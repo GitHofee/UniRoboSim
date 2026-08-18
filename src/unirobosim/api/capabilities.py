@@ -44,6 +44,7 @@ class CapabilityRequirement:
     capability: CapabilityId
     required: bool = True
     constraints: FrozenMap = field(default_factory=FrozenMap)
+    reason: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.capability, CapabilityId):
@@ -52,12 +53,15 @@ class CapabilityRequirement:
             raise _invalid("requirement required flag must be boolean")
         if not isinstance(self.constraints, FrozenMap):
             raise _invalid("requirement constraints must be a FrozenMap")
+        if self.reason is not None and (not isinstance(self.reason, str) or not self.reason.strip()):
+            raise _invalid("requirement reason must be a non-empty string")
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "id": self.capability.value,
             "required": self.required,
             "constraints": self.constraints.to_dict(),
+            "reason": self.reason,
         }
 
 

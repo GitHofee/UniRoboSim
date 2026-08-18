@@ -4,19 +4,23 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "unirobosim"
-version = "0.4.0a0"
+version = "0.5.0a0"
 description = "Backend-neutral contracts and runtime foundation for robot simulators"
 readme = "README.md"
-requires-python = ">=3.12,<3.13"
+requires-python = ">=3.11,<3.13"
 authors = [{name = "UniRoboSim Contributors"}]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Intended Audience :: Developers",
   "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Topic :: Scientific/Engineering",
 ]
 dependencies = []
+
+[project.scripts]
+unirobosim-debug-viewer = "unirobosim.debug.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -39,7 +43,7 @@ skip_covered = true
 
 [tool.ruff]
 line-length = 120
-target-version = "py312"
+target-version = "py311"
 
 [tool.ruff.lint]
 select = ["B", "E", "F", "I", "UP"]

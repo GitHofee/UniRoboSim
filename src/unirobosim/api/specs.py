@@ -133,6 +133,66 @@ class CameraSpec:
         }
 
 
+@dataclass(frozen=True)
+class BoxGeometrySpec:
+    """Portable dynamic box with explicit visual and contact properties."""
+
+    dimensions_m: tuple[float, float, float] = (0.5, 0.5, 0.5)
+    mass_kg: float = 1.0
+    color_rgba: tuple[float, float, float, float] = (0.15, 0.7, 0.95, 1.0)
+    static_friction: float = 1.0
+    dynamic_friction: float = 1.0
+    restitution: float = 0.0
+
+    def __post_init__(self) -> None:
+        try:
+            dimensions = tuple(float(value) for value in self.dimensions_m)
+            mass = float(self.mass_kg)
+            color = tuple(float(value) for value in self.color_rgba)
+            static_friction = float(self.static_friction)
+            dynamic_friction = float(self.dynamic_friction)
+            restitution = float(self.restitution)
+        except (TypeError, ValueError) as exc:
+            raise _invalid("box geometry values must be numeric", "box_geometry_spec.validate") from exc
+        if (
+            len(dimensions) != 3
+            or not all(math.isfinite(value) and value > 0.0 for value in dimensions)
+            or not math.isfinite(mass)
+            or mass <= 0.0
+            or len(color) != 4
+            or not all(math.isfinite(value) and 0.0 <= value <= 1.0 for value in color)
+            or not math.isfinite(static_friction)
+            or static_friction < 0.0
+            or not math.isfinite(dynamic_friction)
+            or dynamic_friction < 0.0
+            or dynamic_friction > static_friction
+            or not math.isfinite(restitution)
+            or not 0.0 <= restitution <= 1.0
+        ):
+            raise _invalid(
+                "box dimensions/mass must be positive; color must be finite RGBA in [0, 1]; "
+                "friction must be finite, non-negative, and static >= dynamic; restitution must be in [0, 1]",
+                "box_geometry_spec.validate",
+            )
+        object.__setattr__(self, "dimensions_m", dimensions)
+        object.__setattr__(self, "mass_kg", mass)
+        object.__setattr__(self, "color_rgba", color)
+        object.__setattr__(self, "static_friction", static_friction)
+        object.__setattr__(self, "dynamic_friction", dynamic_friction)
+        object.__setattr__(self, "restitution", restitution)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "kind": "box",
+            "dimensions_m": list(self.dimensions_m),
+            "mass_kg": self.mass_kg,
+            "color_rgba": list(self.color_rgba),
+            "static_friction": self.static_friction,
+            "dynamic_friction": self.dynamic_friction,
+            "restitution": self.restitution,
+        }
+
+
 def _validate_point_array(value: ArrayValue, name: str, *, first_dimension_minimum: int = 1) -> None:
     if (
         not isinstance(value, ArrayValue)
@@ -383,6 +443,8 @@ class EntitySpec:
     deformable: DeformableBodySpec | None = None
     particle_fluid: ParticleFluidSpec | None = None
     camera: CameraSpec | None = None
+    box: BoxGeometrySpec | None = None
+    joint_effort_limits: tuple[float, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.path, EntityPath) or not isinstance(self.kind, EntityKind):
@@ -392,14 +454,18 @@ class EntitySpec:
         try:
             names = tuple(self.joint_names)
             positions = tuple(float(value) for value in self.initial_joint_positions)
+            effort_limits = tuple(float(value) for value in self.joint_effort_limits)
         except (TypeError, ValueError) as exc:
-            raise _invalid("joint names and positions must be valid iterables", "entity_spec.validate") from exc
+            raise _invalid(
+                "joint names, positions, and effort limits must be valid iterables",
+                "entity_spec.validate",
+            ) from exc
         if any(not isinstance(name, str) or not name.strip() for name in names) or len(names) != len(set(names)):
             raise _invalid("joint names must be unique non-empty strings", "entity_spec.validate", path=str(self.path))
         if not all(math.isfinite(value) for value in positions):
             raise _invalid("initial joint positions must be finite", "entity_spec.validate", path=str(self.path))
-        if self.kind is not EntityKind.ARTICULATION and (names or positions):
-            raise _invalid("only articulations can declare joints", "entity_spec.validate", path=str(self.path))
+        if self.kind is not EntityKind.ARTICULATION and (names or positions or effort_limits):
+            raise _invalid("only articulations can declare joint data", "entity_spec.validate", path=str(self.path))
         if self.kind is EntityKind.ARTICULATION:
             if not names:
                 raise _invalid(
@@ -415,6 +481,25 @@ class EntitySpec:
                     joints=len(names),
                     positions=len(positions),
                 )
+            if effort_limits and (
+                len(effort_limits) != len(names)
+                or not all(math.isfinite(value) and value > 0.0 for value in effort_limits)
+            ):
+                raise _invalid(
+                    "joint effort limits must be positive, finite, and match the joint count",
+                    "entity_spec.validate",
+                    path=str(self.path),
+                )
+        if self.box is not None and (
+            not isinstance(self.box, BoxGeometrySpec)
+            or self.kind is not EntityKind.RIGID_BODY
+            or self.asset_uri is not None
+        ):
+            raise _invalid(
+                "box geometry requires a procedural rigid body without asset URI",
+                "entity_spec.validate",
+                path=str(self.path),
+            )
         soft_kinds = {EntityKind.SURFACE_DEFORMABLE, EntityKind.VOLUME_DEFORMABLE}
         if self.kind in soft_kinds:
             if (
@@ -470,6 +555,7 @@ class EntitySpec:
             raise _invalid("entity metadata must be a FrozenMap", "entity_spec.validate", path=str(self.path))
         object.__setattr__(self, "joint_names", names)
         object.__setattr__(self, "initial_joint_positions", positions)
+        object.__setattr__(self, "joint_effort_limits", effort_limits)
 
     def to_dict(self) -> dict[str, Any]:
         result: dict[str, Any] = {
@@ -484,12 +570,16 @@ class EntitySpec:
             "asset_uri": self.asset_uri,
             "metadata": self.metadata.to_dict(),
         }
+        if self.joint_effort_limits:
+            result["joint_effort_limits"] = list(self.joint_effort_limits)
         if self.deformable is not None:
             result["deformable"] = self.deformable.to_dict()
         if self.particle_fluid is not None:
             result["particle_fluid"] = self.particle_fluid.to_dict()
         if self.camera is not None:
             result["camera"] = self.camera.to_dict()
+        if self.box is not None:
+            result["box"] = self.box.to_dict()
         return result
 
 

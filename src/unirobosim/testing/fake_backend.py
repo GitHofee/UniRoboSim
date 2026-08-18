@@ -20,7 +20,7 @@ from unirobosim.api.capabilities import (
     CapabilitySet,
     NegotiationReport,
 )
-from unirobosim.api.debug import DebugBatch, DebugPrimitive, DebugPublishReport
+from unirobosim.api.debug import DebugBatch, DebugLifetimeMode, DebugPrimitive, DebugPublishReport
 from unirobosim.api.errors import (
     CapabilityNegotiationError,
     CommandError,
@@ -46,6 +46,18 @@ from unirobosim.api.reports import (
     SensorChannel,
     SensorSample,
 )
+from unirobosim.api.scene import (
+    SceneCommand,
+    SceneCommandKind,
+    SceneCommandResult,
+    SceneCommandStatus,
+    SceneDelta,
+    SceneDragMode,
+    SceneEntityState,
+    SceneSnapshot,
+    SceneVisual,
+    SceneVisualKind,
+)
 from unirobosim.api.specs import (
     ArticulationCommand,
     DeformableCommand,
@@ -62,6 +74,7 @@ from unirobosim.api.values import (
     EntityKind,
     EntityPath,
     PointCommandMode,
+    Pose,
     SessionState,
     Tick,
     WorldState,
@@ -158,6 +171,14 @@ FAKE_CAPABILITIES = CapabilitySet(
             FrozenMap({"primitives": ["point_set", "line_list"], "stable_ids": True}),
             limitations=("in-memory reference endpoint; not a renderer overlay",),
         ),
+        CapabilityDeclaration(CapabilityId("scene.snapshot@1")),
+        CapabilityDeclaration(CapabilityId("scene.delta@1")),
+        CapabilityDeclaration(CapabilityId("scene.command.pose@1")),
+        CapabilityDeclaration(
+            CapabilityId("scene.command.drag@1"),
+            FrozenMap({"entity_kinds": ["rigid_body"], "modes": ["kinematic"]}),
+        ),
+        CapabilityDeclaration(CapabilityId("render.browser-scene@1")),
     )
 )
 
@@ -192,6 +213,7 @@ class _RigidRuntime:
     angular_velocities: list[list[float]]
     forces: list[list[float]]
     torques: list[list[float]]
+    mass_kg: float
 
 
 @dataclass
@@ -388,12 +410,15 @@ class FakeWorld:
         self._state = WorldState.READY
         self._step_index = 0
         self._reset_count = 0
+        self._scene_sequence = 0
+        self._scene_results: dict[str, SceneCommandResult] = {}
+        self._active_drags: dict[str, tuple[EntityPath, int, Pose]] = {}
         self._entities = {entity.path: entity for entity in spec.entities}
         self._articulations: dict[EntityPath, _ArticulationRuntime] = {}
         self._rigids: dict[EntityPath, _RigidRuntime] = {}
         self._points: dict[EntityPath, _PointRuntime] = {}
-        self._debug_primitives: dict[tuple[str, str], DebugPrimitive] = {}
-        self._debug_expirations: dict[tuple[str, str], int | None] = {}
+        self._debug_primitives: dict[tuple[str, str, str], DebugPrimitive] = {}
+        self._debug_expirations: dict[tuple[str, str, str], int | None] = {}
         for entity in spec.entities:
             if entity.kind is EntityKind.RIGID_BODY:
                 position = list(entity.pose.position)
@@ -408,6 +433,7 @@ class FakeWorld:
                     angular_velocities=[[0.0, 0.0, 0.0] for _ in range(environment_count)],
                     forces=[[0.0, 0.0, 0.0] for _ in range(environment_count)],
                     torques=[[0.0, 0.0, 0.0] for _ in range(environment_count)],
+                    mass_kg=1.0 if entity.box is None else entity.box.mass_kg,
                 )
             elif entity.kind is EntityKind.ARTICULATION:
                 initial = list(entity.initial_joint_positions)
@@ -636,7 +662,16 @@ class FakeWorld:
                     point_runtime.modes[environment][point] = PointCommandMode.POSITION
                     point_runtime.targets[environment][point] = point_runtime.initial_positions[point].copy()
                     point_runtime.velocities[environment][point] = [0.0, 0.0, 0.0]
+        reset_debug_keys = tuple(
+            key
+            for key, primitive in self._debug_primitives.items()
+            if primitive.lifetime.mode is not DebugLifetimeMode.MANUAL
+        )
+        for key in reset_debug_keys:
+            del self._debug_primitives[key]
+            del self._debug_expirations[key]
         self._reset_count += 1
+        self._scene_sequence += 1
         return ResetResult(environments, self._reset_count, self.tick)
 
     def apply_articulation_command(self, command: ArticulationCommand) -> None:
@@ -947,22 +982,34 @@ class FakeWorld:
                 )
         for primitive in batch.primitives:
             self._debug_primitives[primitive.key] = primitive
-            self._debug_expirations[primitive.key] = (
-                None if primitive.lifetime_steps == 0 else self._step_index + primitive.lifetime_steps
-            )
+            if primitive.lifetime.mode is DebugLifetimeMode.FRAME:
+                expiration = self._step_index + 1
+            elif primitive.lifetime.mode is DebugLifetimeMode.STEPS:
+                assert primitive.lifetime.step_count is not None
+                expiration = self._step_index + primitive.lifetime.step_count
+            else:
+                expiration = None
+            self._debug_expirations[primitive.key] = expiration
         return DebugPublishReport(len(batch.primitives), 0, len(self._debug_primitives))
 
-    def clear_debug(self, *, layer: str | None = None, primitive_id: str | None = None) -> int:
+    def clear_debug(
+        self,
+        *,
+        layer: str | None = None,
+        group: str | None = None,
+        primitive_id: str | None = None,
+    ) -> int:
         operation = "world.clear_debug"
         self._ensure_ready(operation)
-        if layer is not None and (not isinstance(layer, str) or not layer):
-            raise ValidationError("debug layer must be a non-empty string", operation=operation)
-        if primitive_id is not None and (not isinstance(primitive_id, str) or not primitive_id):
-            raise ValidationError("debug primitive ID must be a non-empty string", operation=operation)
+        for name, value in (("layer", layer), ("group", group), ("primitive_id", primitive_id)):
+            if value is not None and (not isinstance(value, str) or not value):
+                raise ValidationError(f"debug {name} must be a non-empty string", operation=operation)
         keys = tuple(
             key
             for key in self._debug_primitives
-            if (layer is None or key[0] == layer) and (primitive_id is None or key[1] == primitive_id)
+            if (layer is None or key[0] == layer)
+            and (group is None or key[1] == group)
+            and (primitive_id is None or key[2] == primitive_id)
         )
         for key in keys:
             del self._debug_primitives[key]
@@ -978,10 +1025,13 @@ class FakeWorld:
             for rigid_runtime in self._rigids.values():
                 for environment in range(self._spec.environments.count):
                     linear_acceleration = [
-                        rigid_runtime.forces[environment][axis] + self._spec.physics.gravity_m_s2[axis]
+                        rigid_runtime.forces[environment][axis] / rigid_runtime.mass_kg
+                        + self._spec.physics.gravity_m_s2[axis]
                         for axis in range(3)
                     ]
-                    angular_acceleration = rigid_runtime.torques[environment]
+                    angular_acceleration = [
+                        value / rigid_runtime.mass_kg for value in rigid_runtime.torques[environment]
+                    ]
                     rigid_runtime.linear_velocities[environment] = [
                         rigid_runtime.linear_velocities[environment][axis] + linear_acceleration[axis] * time_step
                         for axis in range(3)
@@ -1058,7 +1108,248 @@ class FakeWorld:
             for key in expired:
                 del self._debug_primitives[key]
                 del self._debug_expirations[key]
+        self._scene_sequence += count
         return self.tick
+
+    def _scene_visual(self, entity: EntitySpec) -> tuple[SceneVisual, ...]:
+        if entity.kind is EntityKind.CAMERA_SENSOR:
+            return (
+                SceneVisual(
+                    "camera",
+                    SceneVisualKind.BOX,
+                    dimensions_m=(0.18, 0.12, 0.1),
+                    color_rgba=(0.2, 0.25, 0.32, 1.0),
+                ),
+            )
+        if entity.kind in {
+            EntityKind.SURFACE_DEFORMABLE,
+            EntityKind.VOLUME_DEFORMABLE,
+            EntityKind.PARTICLE_FLUID,
+        }:
+            return (
+                SceneVisual(
+                    "points",
+                    SceneVisualKind.POINT_CLOUD,
+                    dimensions_m=(0.6, 0.6, 0.6),
+                    color_rgba=(0.15, 0.65, 1.0, 0.8),
+                ),
+            )
+        if entity.kind is EntityKind.ARTICULATION:
+            return (
+                SceneVisual(
+                    "body",
+                    SceneVisualKind.BOX,
+                    dimensions_m=(0.55, 0.45, 0.7),
+                    color_rgba=(0.92, 0.49, 0.16, 1.0),
+                ),
+            )
+        dimensions = (0.5, 0.5, 0.5) if entity.box is None else entity.box.dimensions_m
+        color = (0.24, 0.72, 0.92, 1.0) if entity.box is None else entity.box.color_rgba
+        return (
+            SceneVisual(
+                "body",
+                SceneVisualKind.BOX,
+                dimensions_m=dimensions,
+                color_rgba=color,
+            ),
+        )
+
+    def _scene_entities(self) -> tuple[SceneEntityState, ...]:
+        entities: list[SceneEntityState] = []
+        for entity in self._spec.entities:
+            for environment in range(self._spec.environments.count):
+                if entity.kind is EntityKind.RIGID_BODY:
+                    runtime = self._rigids[entity.path]
+                    position = runtime.positions[environment]
+                    orientation = runtime.orientations[environment]
+                    pose = Pose(
+                        (position[0], position[1], position[2]),
+                        (orientation[0], orientation[1], orientation[2], orientation[3]),
+                    )
+                    linear_values = runtime.linear_velocities[environment]
+                    angular_values = runtime.angular_velocities[environment]
+                    linear = (linear_values[0], linear_values[1], linear_values[2])
+                    angular = (angular_values[0], angular_values[1], angular_values[2])
+                    joints: tuple[float, ...] = ()
+                elif entity.kind is EntityKind.ARTICULATION:
+                    runtime_articulation = self._articulations[entity.path]
+                    pose = entity.pose
+                    linear = (0.0, 0.0, 0.0)
+                    angular = (0.0, 0.0, 0.0)
+                    joints = tuple(runtime_articulation.positions[environment])
+                else:
+                    pose = entity.pose
+                    linear = (0.0, 0.0, 0.0)
+                    angular = (0.0, 0.0, 0.0)
+                    joints = ()
+                entities.append(
+                    SceneEntityState(
+                        entity.path,
+                        entity.kind,
+                        environment,
+                        pose,
+                        linear,
+                        angular,
+                        entity.joint_names,
+                        joints,
+                        self._scene_visual(entity),
+                        draggable=entity.kind is EntityKind.RIGID_BODY,
+                    )
+                )
+        return tuple(entities)
+
+    def scene_snapshot(self) -> SceneSnapshot:
+        self._ensure_ready("world.scene_snapshot")
+        return SceneSnapshot(
+            self._session.descriptor.provider_id,
+            self.world_id,
+            self.generation,
+            self._scene_sequence,
+            self.tick,
+            self._scene_entities(),
+        )
+
+    def scene_delta(self, base_sequence: int) -> SceneDelta:
+        self._ensure_ready("world.scene_delta")
+        if (
+            not isinstance(base_sequence, int)
+            or isinstance(base_sequence, bool)
+            or base_sequence < 0
+            or base_sequence > self._scene_sequence
+        ):
+            raise ValidationError("scene delta base sequence is invalid", operation="world.scene_delta")
+        return SceneDelta(
+            self.world_id,
+            self.generation,
+            base_sequence,
+            self._scene_sequence,
+            self.tick,
+            () if base_sequence == self._scene_sequence else self._scene_entities(),
+        )
+
+    def _scene_result(
+        self,
+        command: SceneCommand,
+        status: SceneCommandStatus,
+        *,
+        error_code: str | None = None,
+        message: str | None = None,
+    ) -> SceneCommandResult:
+        result = SceneCommandResult(
+            command.command_id,
+            status,
+            self.generation,
+            self._scene_sequence,
+            self.tick,
+            error_code,
+            message,
+        )
+        self._scene_results[command.command_id] = result
+        if len(self._scene_results) > 4096:
+            del self._scene_results[next(iter(self._scene_results))]
+        return result
+
+    def apply_scene_command(self, command: SceneCommand) -> SceneCommandResult:
+        self._ensure_ready("world.apply_scene_command")
+        if not isinstance(command, SceneCommand):
+            raise ValidationError("operation requires a SceneCommand", operation="world.apply_scene_command")
+        previous = self._scene_results.get(command.command_id)
+        if previous is not None:
+            return SceneCommandResult(
+                command.command_id,
+                SceneCommandStatus.DUPLICATE,
+                previous.generation,
+                previous.scene_sequence,
+                previous.tick,
+                message="original command result already recorded",
+            )
+        if command.expected_generation != self.generation:
+            return self._scene_result(
+                command,
+                SceneCommandStatus.REJECTED,
+                error_code="stale_generation",
+                message="command generation does not match the live world",
+            )
+        entity = self._entities.get(command.entity_path)
+        if entity is None or command.environment_index >= self._spec.environments.count:
+            return self._scene_result(
+                command,
+                SceneCommandStatus.REJECTED,
+                error_code="target_not_found",
+                message="entity or environment does not exist",
+            )
+        if entity.kind is not EntityKind.RIGID_BODY:
+            return self._scene_result(
+                command,
+                SceneCommandStatus.REJECTED,
+                error_code="unsupported_entity_kind",
+                message="the fake adapter exposes scene manipulation only for rigid bodies",
+            )
+        runtime = self._rigids[entity.path]
+        environment = command.environment_index
+        if command.kind is SceneCommandKind.SET_POSE:
+            assert command.target_pose is not None
+            self._set_rigid_pose(runtime, environment, command.target_pose)
+        elif command.kind is SceneCommandKind.DRAG_BEGIN:
+            assert command.drag_id is not None
+            if command.drag_mode is not SceneDragMode.KINEMATIC:
+                return self._scene_result(
+                    command,
+                    SceneCommandStatus.REJECTED,
+                    error_code="unsupported_drag_mode",
+                    message="the fake adapter supports only explicit kinematic drag",
+                )
+            if command.drag_id in self._active_drags:
+                return self._scene_result(
+                    command,
+                    SceneCommandStatus.REJECTED,
+                    error_code="drag_exists",
+                    message="drag ID is already active",
+                )
+            self._active_drags[command.drag_id] = (
+                entity.path,
+                environment,
+                Pose(
+                    (
+                        runtime.positions[environment][0],
+                        runtime.positions[environment][1],
+                        runtime.positions[environment][2],
+                    ),
+                    (
+                        runtime.orientations[environment][0],
+                        runtime.orientations[environment][1],
+                        runtime.orientations[environment][2],
+                        runtime.orientations[environment][3],
+                    ),
+                ),
+            )
+        else:
+            assert command.drag_id is not None
+            active = self._active_drags.get(command.drag_id)
+            if active is None or active[:2] != (entity.path, environment):
+                return self._scene_result(
+                    command,
+                    SceneCommandStatus.REJECTED,
+                    error_code="drag_not_active",
+                    message="drag transaction is missing or targets a different entity",
+                )
+            if command.kind is SceneCommandKind.DRAG_UPDATE:
+                assert command.target_pose is not None
+                self._set_rigid_pose(runtime, environment, command.target_pose)
+            elif command.kind is SceneCommandKind.DRAG_CANCEL:
+                self._set_rigid_pose(runtime, environment, active[2])
+                del self._active_drags[command.drag_id]
+            else:
+                del self._active_drags[command.drag_id]
+        self._scene_sequence += 1
+        return self._scene_result(command, SceneCommandStatus.APPLIED)
+
+    @staticmethod
+    def _set_rigid_pose(runtime: _RigidRuntime, environment: int, pose: Pose) -> None:
+        runtime.positions[environment] = list(pose.position)
+        runtime.orientations[environment] = list(pose.orientation_xyzw)
+        runtime.linear_velocities[environment] = [0.0, 0.0, 0.0]
+        runtime.angular_velocities[environment] = [0.0, 0.0, 0.0]
 
     def _close(self, *, notify_session: bool) -> None:
         if self._state is WorldState.CLOSED:

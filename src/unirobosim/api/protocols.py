@@ -19,6 +19,7 @@ from .reports import (
     RigidBodyState,
     SensorSample,
 )
+from .scene import SceneCommand, SceneCommandResult, SceneDelta, SceneSnapshot
 from .specs import ArticulationCommand, DeformableCommand, ParticleFluidCommand, RigidBodyCommand, WorldSpec
 from .values import EntityHandle, EntityPath, SessionState, Tick, WorldState
 
@@ -66,11 +67,28 @@ class World(Protocol):
 
     def publish_debug(self, batch: DebugBatch) -> DebugPublishReport: ...
 
-    def clear_debug(self, *, layer: str | None = None, primitive_id: str | None = None) -> int: ...
+    def clear_debug(
+        self,
+        *,
+        layer: str | None = None,
+        group: str | None = None,
+        primitive_id: str | None = None,
+    ) -> int: ...
 
     def step(self, count: int = 1) -> Tick: ...
 
     def close(self) -> None: ...
+
+
+@runtime_checkable
+class SceneControlWorld(Protocol):
+    """Optional capability-gated extension consumed by Studio and other clients."""
+
+    def scene_snapshot(self) -> SceneSnapshot: ...
+
+    def scene_delta(self, base_sequence: int) -> SceneDelta: ...
+
+    def apply_scene_command(self, command: SceneCommand) -> SceneCommandResult: ...
 
 
 @runtime_checkable

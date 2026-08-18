@@ -13,6 +13,7 @@ from unirobosim import (
     CommandError,
     DebugBatch,
     DebugBus,
+    DebugLifetime,
     DebugPrimitive,
     DebugPrimitiveKind,
     DebugPublishReport,
@@ -62,7 +63,7 @@ def point_primitive(
         environment_indices=(0, 1),
         color_rgba=(1.0, 0.25, 0.0, 0.75),
         size=3.0,
-        lifetime_steps=lifetime_steps,
+        lifetime=DebugLifetime.steps(lifetime_steps) if lifetime_steps else DebugLifetime.persistent(),
     )
 
 
@@ -167,8 +168,7 @@ class DebugContractTests(unittest.TestCase):
             {"color_rgba": None},
             {"size": True},
             {"size": 0.0},
-            {"lifetime_steps": True},
-            {"lifetime_steps": -1},
+            {"lifetime": True},
             {"metadata": {}},
         )
         base = {
@@ -192,9 +192,9 @@ class DebugContractTests(unittest.TestCase):
             with self.subTest(counts=counts), self.assertRaises(ValidationError):
                 DebugPublishReport(*counts)  # type: ignore[arg-type]
         with self.assertRaises(ValidationError):
-            DebugPublishReport(0, 0, 0, None)  # type: ignore[arg-type]
+            DebugPublishReport(0, 0, 0, sink_failures=None)  # type: ignore[arg-type]
         with self.assertRaises(ValidationError):
-            DebugPublishReport(0, 0, 0, ("",))
+            DebugPublishReport(0, 0, 0, sink_failures=("",))
 
     def test_bus_and_reference_sink_lifecycle_edges(self) -> None:
         for sinks, budget in ((None, 1), ((), 1), ((object(),), 1), ((TestDebugSink(),), 0)):
@@ -205,8 +205,17 @@ class DebugContractTests(unittest.TestCase):
             def publish(self, batch: DebugBatch) -> None:
                 raise RuntimeError("publish")
 
-            def clear(self, *, layer: str | None = None, primitive_id: str | None = None) -> int:
+            def clear(
+                self,
+                *,
+                layer: str | None = None,
+                group: str | None = None,
+                primitive_id: str | None = None,
+            ) -> int:
                 raise RuntimeError("clear")
+
+            def reset(self) -> int:
+                raise RuntimeError("reset")
 
             def close(self) -> None:
                 raise RuntimeError("close")
@@ -254,7 +263,7 @@ class DebugContractTests(unittest.TestCase):
 
     def test_primitive_shapes_and_environment_batches_are_strict(self) -> None:
         primitive = point_primitive()
-        self.assertEqual(primitive.key, ("planning", "origin"))
+        self.assertEqual(primitive.key, ("planning", "default", "origin"))
         lines = DebugPrimitive(
             "axes",
             "frames",
@@ -303,7 +312,16 @@ class DebugContractTests(unittest.TestCase):
             def publish(self, batch: DebugBatch) -> None:
                 raise RuntimeError("broken")
 
-            def clear(self, *, layer: str | None = None, primitive_id: str | None = None) -> int:
+            def clear(
+                self,
+                *,
+                layer: str | None = None,
+                group: str | None = None,
+                primitive_id: str | None = None,
+            ) -> int:
+                raise RuntimeError("broken")
+
+            def reset(self) -> int:
                 raise RuntimeError("broken")
 
             def close(self) -> None:
@@ -327,8 +345,18 @@ class DebugContractTests(unittest.TestCase):
             bus.close()
             lines = path.read_text(encoding="utf-8").splitlines()
             events = [json.loads(line) for line in lines]
-            self.assertEqual([event["event"] for event in events], ["publish", "clear", "close"])
-            self.assertEqual(events[-1]["events_before_close"], 2)
+            self.assertEqual(
+                [event["record"] for event in events],
+                ["header", "event", "report", "event", "close"],
+            )
+            self.assertEqual(
+                [event.get("event") for event in events],
+                [None, "publish", None, "clear", None],
+            )
+            self.assertEqual(events[2]["accepted_count"], 1)
+            self.assertEqual(events[2]["dropped_count"], 0)
+            self.assertEqual(events[-1]["event_count"], 2)
+            self.assertEqual(events[-1]["report_count"], 1)
             self.assertEqual(lines[0], json.dumps(events[0], sort_keys=True, separators=(",", ":")))
 
     def test_native_world_sink_forwards_and_fake_world_expires(self) -> None:
