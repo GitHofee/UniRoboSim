@@ -4,17 +4,20 @@ UniRoboSim is a backend-neutral contract and runtime layer for robot simulators.
 one explicit lifecycle, capability model, world schema, data convention, and failure model while
 keeping simulator SDKs behind adapters.
 
-This repository is at **M0 / `v0alpha1`**. The implemented scope is deliberately small:
+This repository is at **M1 / `v0alpha2`**. The implemented scope is deliberately small:
 
 - immutable portable values using SI units, right-handed Z-up frames, XYZW quaternions, and
   batch-first arrays;
 - versioned capability declaration and strict negotiation;
 - immutable world specifications with deterministic fingerprints;
 - provider protocols and registry with no simulator imports;
+- surface and volume deformable topology/state/point-command contracts;
+- fixed-count particle-fluid state and point-command contracts;
 - a deterministic Fake Reference Backend for contract and lifecycle tests.
 
-The fake backend is not a physics simulator. Isaac Lab, Isaac Sim, MuJoCo, rendering, sensors,
-debug visualization, configuration compilation, and MCP are not implemented in M0.
+The fake backend uses independent point-mass reference rules and is not a soft-matter physics
+simulator. Isaac Lab, Isaac Sim, MuJoCo, FEM/PBD/SPH, collision, rendering, sensors, debug
+visualization, configuration compilation, and MCP are not implemented in M1.
 
 ## Development environment
 

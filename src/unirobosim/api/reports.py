@@ -142,3 +142,52 @@ class ArticulationState:
             raise ValidationError("articulation state values are invalid", operation="articulation_state.validate")
         if self.joint_positions.shape != self.joint_velocities.shape:
             raise ValidationError("articulation state shapes must match", operation="articulation_state.validate")
+
+
+def _validate_point_state(positions: ArrayValue, velocities: ArrayValue, tick: Tick, operation: str) -> None:
+    if not isinstance(positions, ArrayValue) or not isinstance(velocities, ArrayValue) or not isinstance(tick, Tick):
+        raise ValidationError("point state values are invalid", operation=operation)
+    if (
+        positions.shape != velocities.shape
+        or len(positions.shape) != 3
+        or positions.shape[2] != 3
+        or not positions.dtype.startswith("float")
+        or not velocities.dtype.startswith("float")
+    ):
+        raise ValidationError(
+            "point state must use matching floating [environment, point, xyz] arrays", operation=operation
+        )
+
+
+@dataclass(frozen=True)
+class DeformableState:
+    """World-frame batched deformable-node state."""
+
+    node_positions_m: ArrayValue
+    node_velocities_m_s: ArrayValue
+    tick: Tick
+
+    def __post_init__(self) -> None:
+        _validate_point_state(
+            self.node_positions_m,
+            self.node_velocities_m_s,
+            self.tick,
+            "deformable_state.validate",
+        )
+
+
+@dataclass(frozen=True)
+class ParticleFluidState:
+    """World-frame batched particle-fluid state."""
+
+    particle_positions_m: ArrayValue
+    particle_velocities_m_s: ArrayValue
+    tick: Tick
+
+    def __post_init__(self) -> None:
+        _validate_point_state(
+            self.particle_positions_m,
+            self.particle_velocities_m_s,
+            self.tick,
+            "particle_fluid_state.validate",
+        )

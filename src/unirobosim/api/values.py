@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from functools import reduce
 from operator import mul
+from typing import Any
 
 from .errors import ValidationError
 
@@ -18,12 +19,30 @@ _PATH_SEGMENT = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]*$")
 class EntityKind(StrEnum):
     RIGID_BODY = "rigid_body"
     ARTICULATION = "articulation"
+    SURFACE_DEFORMABLE = "surface_deformable"
+    VOLUME_DEFORMABLE = "volume_deformable"
+    PARTICLE_FLUID = "particle_fluid"
 
 
 class CommandMode(StrEnum):
     POSITION = "position"
     VELOCITY = "velocity"
     EFFORT = "effort"
+
+
+class PointCommandMode(StrEnum):
+    """World-frame point control mode for deformable nodes and fluid particles."""
+
+    POSITION = "position"
+    VELOCITY = "velocity"
+    FORCE = "force"
+
+
+class DeformableTopology(StrEnum):
+    """Portable simulation topology, independent of a backend solver implementation."""
+
+    SURFACE = "surface"
+    VOLUME = "volume"
 
 
 class SessionState(StrEnum):
@@ -90,6 +109,20 @@ def _finite_tuple(values: Iterable[float], length: int, field: str) -> tuple[flo
     if len(result) != length or not all(math.isfinite(value) for value in result):
         raise _validation(f"{field} must contain {length} finite numbers", "pose.validate", field=field)
     return result
+
+
+def _flatten_nested(value: object) -> tuple[tuple[int, ...], tuple[float | int | bool, ...]]:
+    if isinstance(value, (list, tuple)):
+        if not value:
+            raise _validation("nested arrays cannot contain an empty dimension", "array.from_nested")
+        children = tuple(_flatten_nested(item) for item in value)
+        child_shape = children[0][0]
+        if any(shape != child_shape for shape, _ in children):
+            raise _validation("nested arrays must be rectangular", "array.from_nested")
+        return (len(children), *child_shape), tuple(item for _, values in children for item in values)
+    if isinstance(value, (bool, int, float)):
+        return (), (value,)
+    raise _validation("nested arrays may only contain numeric or boolean scalars", "array.from_nested")
 
 
 @dataclass(frozen=True)
@@ -183,11 +216,31 @@ class ArrayValue:
             dtype=dtype,
         )
 
+    @classmethod
+    def from_nested(cls, values: object, *, dtype: str = "float64") -> ArrayValue:
+        """Build an ArrayValue from a non-empty rectangular nested sequence."""
+
+        shape, flattened = _flatten_nested(values)
+        if not shape:
+            raise _validation("from_nested requires at least one array dimension", "array.from_nested")
+        return cls(shape=shape, values=flattened, dtype=dtype)
+
     def rows(self) -> tuple[tuple[float | int | bool, ...], ...]:
         if len(self.shape) != 2:
             raise _validation("rows() requires a rank-2 array", "array.rows", shape=self.shape)
         width = self.shape[1]
         return tuple(tuple(self.values[offset : offset + width]) for offset in range(0, len(self.values), width))
+
+    def nested(self) -> tuple[Any, ...]:
+        """Return a tuple-nested representation with the declared shape."""
+
+        def build(offset: int, shape: tuple[int, ...]) -> tuple[Any, ...]:
+            if len(shape) == 1:
+                return tuple(self.values[offset : offset + shape[0]])
+            stride = reduce(mul, shape[1:], 1)
+            return tuple(build(offset + index * stride, shape[1:]) for index in range(shape[0]))
+
+        return build(0, self.shape)
 
 
 @dataclass(frozen=True)

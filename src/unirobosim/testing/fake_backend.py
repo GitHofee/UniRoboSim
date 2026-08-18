@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import itertools
+import math
 from collections.abc import Iterable
 from dataclasses import dataclass
 from types import TracebackType
@@ -34,17 +35,26 @@ from unirobosim.api.reports import (
     ArticulationState,
     BuildFingerprint,
     BuildReport,
+    DeformableState,
+    ParticleFluidState,
     ProbeReport,
     ProviderDescriptor,
     ResetResult,
 )
-from unirobosim.api.specs import ArticulationCommand, EntitySpec, WorldSpec
+from unirobosim.api.specs import (
+    ArticulationCommand,
+    DeformableCommand,
+    EntitySpec,
+    ParticleFluidCommand,
+    WorldSpec,
+)
 from unirobosim.api.values import (
     ArrayValue,
     CommandMode,
     EntityHandle,
     EntityKind,
     EntityPath,
+    PointCommandMode,
     SessionState,
     Tick,
     WorldState,
@@ -70,14 +80,50 @@ FAKE_CAPABILITIES = CapabilitySet(
             CapabilityId("control.articulation.effort@1"),
             limitations=("unit-mass deterministic test integration; not physical simulation",),
         ),
+        CapabilityDeclaration(
+            CapabilityId("profile.soft-matter@1"),
+            FrozenMap(
+                {
+                    "state_layout": "batch-point-xyz",
+                    "point_count": "fixed",
+                    "dynamics": "independent-point-mass-reference-only",
+                }
+            ),
+            limitations=("no elasticity, incompressibility, collision, or self-collision",),
+        ),
+        CapabilityDeclaration(
+            CapabilityId("state.deformable.surface@1"),
+            FrozenMap({"topology": "triangles", "point_count": "fixed"}),
+            limitations=("topology does not affect fake point-mass dynamics",),
+        ),
+        CapabilityDeclaration(
+            CapabilityId("state.deformable.volume@1"),
+            FrozenMap({"topology": "tetrahedra", "point_count": "fixed"}),
+            limitations=("no FEM constitutive model or collision",),
+        ),
+        CapabilityDeclaration(
+            CapabilityId("control.deformable.points@1"),
+            FrozenMap({"modes": ["position", "velocity", "force"], "frame": "world"}),
+            limitations=("independent point control only",),
+        ),
+        CapabilityDeclaration(
+            CapabilityId("state.fluid.particles@1"),
+            FrozenMap({"representation": "particles", "point_count": "fixed"}),
+            limitations=("no density constraint, viscosity, surface tension, or collision",),
+        ),
+        CapabilityDeclaration(
+            CapabilityId("control.fluid.particles@1"),
+            FrozenMap({"modes": ["position", "velocity", "force"], "frame": "world"}),
+            limitations=("independent particle control only",),
+        ),
     )
 )
 
 FAKE_DESCRIPTOR = ProviderDescriptor(
     provider_id="reference.fake",
     display_name="UniRoboSim Fake Reference Backend",
-    version="0.1.0a0",
-    contract_version="v0alpha1",
+    version="0.2.0a0",
+    contract_version="v0alpha2",
     capabilities=FAKE_CAPABILITIES,
     metadata=FrozenMap({"purpose": "contract-testing-only"}),
 )
@@ -92,6 +138,54 @@ class _ArticulationRuntime:
     velocities: list[list[float]]
     modes: list[list[CommandMode]]
     targets: list[list[float]]
+
+
+@dataclass
+class _PointRuntime:
+    spec: EntitySpec
+    initial_positions: list[list[float]]
+    initial_velocities: list[list[float]]
+    point_mass_kg: float
+    linear_damping_per_s: float
+    kinematic_indices: frozenset[int]
+    positions: list[list[list[float]]]
+    velocities: list[list[list[float]]]
+    modes: list[list[PointCommandMode]]
+    targets: list[list[list[float]]]
+
+
+def _vectors(value: ArrayValue) -> list[list[float]]:
+    return [
+        [float(value.values[offset]), float(value.values[offset + 1]), float(value.values[offset + 2])]
+        for offset in range(0, len(value.values), 3)
+    ]
+
+
+def _copy_vectors(values: list[list[float]]) -> list[list[float]]:
+    return [vector.copy() for vector in values]
+
+
+def _rotate_vector_xyzw(vector: list[float], quaternion: tuple[float, float, float, float]) -> list[float]:
+    x, y, z, w = quaternion
+    vx, vy, vz = vector
+    tx = 2.0 * (y * vz - z * vy)
+    ty = 2.0 * (z * vx - x * vz)
+    tz = 2.0 * (x * vy - y * vx)
+    return [
+        vx + w * tx + (y * tz - z * ty),
+        vy + w * ty + (z * tx - x * tz),
+        vz + w * tz + (x * ty - y * tx),
+    ]
+
+
+def _entity_frame_vectors(entity: EntitySpec, value: ArrayValue, *, translate: bool) -> list[list[float]]:
+    result = []
+    for vector in _vectors(value):
+        transformed = _rotate_vector_xyzw(vector, entity.pose.orientation_xyzw)
+        if translate:
+            transformed = [transformed[axis] + entity.pose.position[axis] for axis in range(3)]
+        result.append([0.0 if math.isclose(component, 0.0, abs_tol=1e-15) else component for component in transformed])
+    return result
 
 
 class FakeProvider:
@@ -229,6 +323,7 @@ class FakeWorld:
         self._reset_count = 0
         self._entities = {entity.path: entity for entity in spec.entities}
         self._articulations: dict[EntityPath, _ArticulationRuntime] = {}
+        self._points: dict[EntityPath, _PointRuntime] = {}
         for entity in spec.entities:
             if entity.kind is EntityKind.ARTICULATION:
                 initial = list(entity.initial_joint_positions)
@@ -239,6 +334,34 @@ class FakeWorld:
                     velocities=[[0.0] * len(initial) for _ in range(spec.environments.count)],
                     modes=[[CommandMode.POSITION] * len(initial) for _ in range(spec.environments.count)],
                     targets=[initial.copy() for _ in range(spec.environments.count)],
+                )
+            elif entity.deformable is not None:
+                initial_positions = _entity_frame_vectors(entity, entity.deformable.rest_positions_m, translate=True)
+                initial_velocities = _entity_frame_vectors(
+                    entity, entity.deformable.initial_velocities(), translate=False
+                )
+                self._points[entity.path] = self._make_point_runtime(
+                    entity,
+                    initial_positions,
+                    initial_velocities,
+                    point_mass_kg=entity.deformable.node_mass_kg,
+                    linear_damping_per_s=entity.deformable.linear_damping_per_s,
+                    kinematic_indices=frozenset(entity.deformable.kinematic_node_indices),
+                )
+            elif entity.particle_fluid is not None:
+                initial_positions = _entity_frame_vectors(
+                    entity, entity.particle_fluid.initial_particle_positions_m, translate=True
+                )
+                initial_velocities = _entity_frame_vectors(
+                    entity, entity.particle_fluid.initial_velocities(), translate=False
+                )
+                self._points[entity.path] = self._make_point_runtime(
+                    entity,
+                    initial_positions,
+                    initial_velocities,
+                    point_mass_kg=entity.particle_fluid.resolved_particle_mass_kg,
+                    linear_damping_per_s=0.0,
+                    kinematic_indices=frozenset(),
                 )
         fingerprint = BuildFingerprint(
             provider_id=session.descriptor.provider_id,
@@ -253,6 +376,40 @@ class FakeWorld:
             generation=generation,
             environment_count=spec.environments.count,
             entity_count=len(spec.entities),
+        )
+
+    def _make_point_runtime(
+        self,
+        entity: EntitySpec,
+        initial_positions: list[list[float]],
+        initial_velocities: list[list[float]],
+        *,
+        point_mass_kg: float,
+        linear_damping_per_s: float,
+        kinematic_indices: frozenset[int],
+    ) -> _PointRuntime:
+        environment_count = self._spec.environments.count
+        point_count = len(initial_positions)
+        positions = [_copy_vectors(initial_positions) for _ in range(environment_count)]
+        velocities = [_copy_vectors(initial_velocities) for _ in range(environment_count)]
+        modes = [[PointCommandMode.FORCE] * point_count for _ in range(environment_count)]
+        targets = [[([0.0, 0.0, 0.0]) for _ in range(point_count)] for _ in range(environment_count)]
+        for environment in range(environment_count):
+            for point in kinematic_indices:
+                modes[environment][point] = PointCommandMode.POSITION
+                targets[environment][point] = initial_positions[point].copy()
+                velocities[environment][point] = [0.0, 0.0, 0.0]
+        return _PointRuntime(
+            spec=entity,
+            initial_positions=initial_positions,
+            initial_velocities=initial_velocities,
+            point_mass_kg=point_mass_kg,
+            linear_damping_per_s=linear_damping_per_s,
+            kinematic_indices=kinematic_indices,
+            positions=positions,
+            velocities=velocities,
+            modes=modes,
+            targets=targets,
         )
 
     @property
@@ -368,13 +525,25 @@ class FakeWorld:
             "environment_indices",
             operation="world.reset",
         )
-        for runtime in self._articulations.values():
-            initial = runtime.spec.initial_joint_positions
+        for articulation_runtime in self._articulations.values():
+            initial = articulation_runtime.spec.initial_joint_positions
             for environment in environments:
-                runtime.positions[environment] = list(initial)
-                runtime.velocities[environment] = [0.0] * len(initial)
-                runtime.modes[environment] = [CommandMode.POSITION] * len(initial)
-                runtime.targets[environment] = list(initial)
+                articulation_runtime.positions[environment] = list(initial)
+                articulation_runtime.velocities[environment] = [0.0] * len(initial)
+                articulation_runtime.modes[environment] = [CommandMode.POSITION] * len(initial)
+                articulation_runtime.targets[environment] = list(initial)
+        for point_runtime in self._points.values():
+            for environment in environments:
+                point_runtime.positions[environment] = _copy_vectors(point_runtime.initial_positions)
+                point_runtime.velocities[environment] = _copy_vectors(point_runtime.initial_velocities)
+                point_runtime.modes[environment] = [PointCommandMode.FORCE] * len(point_runtime.initial_positions)
+                point_runtime.targets[environment] = [
+                    [0.0, 0.0, 0.0] for _ in range(len(point_runtime.initial_positions))
+                ]
+                for point in point_runtime.kinematic_indices:
+                    point_runtime.modes[environment][point] = PointCommandMode.POSITION
+                    point_runtime.targets[environment][point] = point_runtime.initial_positions[point].copy()
+                    point_runtime.velocities[environment][point] = [0.0, 0.0, 0.0]
         self._reset_count += 1
         return ResetResult(environments, self._reset_count, self.tick)
 
@@ -436,29 +605,180 @@ class FakeWorld:
             tick=self.tick,
         )
 
+    def _apply_point_command(
+        self,
+        *,
+        handle: EntityHandle,
+        mode: PointCommandMode,
+        targets: ArrayValue,
+        environment_indices: tuple[int, ...] | None,
+        point_indices: tuple[int, ...] | None,
+        accepted_kinds: frozenset[EntityKind],
+        operation: str,
+    ) -> None:
+        entity = self._validate_handle(handle, operation)
+        if entity.kind not in accepted_kinds:
+            raise CommandError(
+                "entity does not support this point operation",
+                operation=operation,
+                entity_path=entity.path.value,
+                details={"entity_kind": entity.kind.value},
+            )
+        runtime = self._points[entity.path]
+        environments = self._indices(
+            environment_indices,
+            self._spec.environments.count,
+            "environment_indices",
+            operation=operation,
+        )
+        points = self._indices(
+            point_indices,
+            len(runtime.initial_positions),
+            "point_indices",
+            operation=operation,
+        )
+        expected_shape = (len(environments), len(points), 3)
+        if targets.shape != expected_shape:
+            raise CommandError(
+                "point target shape must exactly match selected environments and points",
+                operation=operation,
+                backend_id=self._session.descriptor.provider_id,
+                world_id=self.world_id,
+                entity_path=entity.path.value,
+                details={"expected_shape": list(expected_shape), "actual_shape": list(targets.shape)},
+            )
+        selected_kinematic = runtime.kinematic_indices.intersection(points)
+        if mode is not PointCommandMode.POSITION and selected_kinematic:
+            raise CommandError(
+                "kinematic deformable points only accept position commands",
+                operation=operation,
+                backend_id=self._session.descriptor.provider_id,
+                world_id=self.world_id,
+                entity_path=entity.path.value,
+                details={"kinematic_indices": sorted(selected_kinematic), "mode": mode.value},
+            )
+        point_count = len(points)
+        for row_index, environment in enumerate(environments):
+            for column_index, point in enumerate(points):
+                offset = (row_index * point_count + column_index) * 3
+                runtime.modes[environment][point] = mode
+                runtime.targets[environment][point] = [
+                    float(targets.values[offset]),
+                    float(targets.values[offset + 1]),
+                    float(targets.values[offset + 2]),
+                ]
+
+    def apply_deformable_command(self, command: DeformableCommand) -> None:
+        operation = "world.apply_deformable_command"
+        self._ensure_ready(operation)
+        if not isinstance(command, DeformableCommand):
+            raise CommandError("operation requires a DeformableCommand", operation=operation)
+        self._apply_point_command(
+            handle=command.handle,
+            mode=command.mode,
+            targets=command.targets,
+            environment_indices=command.environment_indices,
+            point_indices=command.node_indices,
+            accepted_kinds=frozenset({EntityKind.SURFACE_DEFORMABLE, EntityKind.VOLUME_DEFORMABLE}),
+            operation=operation,
+        )
+
+    def read_deformable(self, handle: EntityHandle) -> DeformableState:
+        operation = "world.read_deformable"
+        self._ensure_ready(operation)
+        entity = self._validate_handle(handle, operation)
+        if entity.kind not in {EntityKind.SURFACE_DEFORMABLE, EntityKind.VOLUME_DEFORMABLE}:
+            raise CommandError("entity is not a deformable", operation=operation, entity_path=entity.path.value)
+        runtime = self._points[entity.path]
+        return DeformableState(
+            node_positions_m=ArrayValue.from_nested(runtime.positions),
+            node_velocities_m_s=ArrayValue.from_nested(runtime.velocities),
+            tick=self.tick,
+        )
+
+    def apply_particle_fluid_command(self, command: ParticleFluidCommand) -> None:
+        operation = "world.apply_particle_fluid_command"
+        self._ensure_ready(operation)
+        if not isinstance(command, ParticleFluidCommand):
+            raise CommandError("operation requires a ParticleFluidCommand", operation=operation)
+        self._apply_point_command(
+            handle=command.handle,
+            mode=command.mode,
+            targets=command.targets,
+            environment_indices=command.environment_indices,
+            point_indices=command.particle_indices,
+            accepted_kinds=frozenset({EntityKind.PARTICLE_FLUID}),
+            operation=operation,
+        )
+
+    def read_particle_fluid(self, handle: EntityHandle) -> ParticleFluidState:
+        operation = "world.read_particle_fluid"
+        self._ensure_ready(operation)
+        entity = self._validate_handle(handle, operation)
+        if entity.kind is not EntityKind.PARTICLE_FLUID:
+            raise CommandError("entity is not a particle fluid", operation=operation, entity_path=entity.path.value)
+        runtime = self._points[entity.path]
+        return ParticleFluidState(
+            particle_positions_m=ArrayValue.from_nested(runtime.positions),
+            particle_velocities_m_s=ArrayValue.from_nested(runtime.velocities),
+            tick=self.tick,
+        )
+
     def step(self, count: int = 1) -> Tick:
         self._ensure_ready("world.step")
         if not isinstance(count, int) or isinstance(count, bool) or count <= 0:
             raise ValidationError("step count must be a positive integer", operation="world.step")
         time_step = self._spec.physics.time_step_seconds
         for _ in range(count):
-            for runtime in self._articulations.values():
+            for articulation_runtime in self._articulations.values():
                 for environment in range(self._spec.environments.count):
-                    for degree in range(len(runtime.spec.joint_names)):
-                        mode = runtime.modes[environment][degree]
-                        target = runtime.targets[environment][degree]
-                        if mode is CommandMode.POSITION:
-                            previous = runtime.positions[environment][degree]
-                            runtime.positions[environment][degree] = target
-                            runtime.velocities[environment][degree] = (target - previous) / time_step
-                        elif mode is CommandMode.VELOCITY:
-                            runtime.velocities[environment][degree] = target
-                            runtime.positions[environment][degree] += target * time_step
+                    for degree in range(len(articulation_runtime.spec.joint_names)):
+                        articulation_mode = articulation_runtime.modes[environment][degree]
+                        articulation_target = articulation_runtime.targets[environment][degree]
+                        if articulation_mode is CommandMode.POSITION:
+                            previous = articulation_runtime.positions[environment][degree]
+                            articulation_runtime.positions[environment][degree] = articulation_target
+                            articulation_runtime.velocities[environment][degree] = (
+                                articulation_target - previous
+                            ) / time_step
+                        elif articulation_mode is CommandMode.VELOCITY:
+                            articulation_runtime.velocities[environment][degree] = articulation_target
+                            articulation_runtime.positions[environment][degree] += articulation_target * time_step
                         else:
-                            runtime.velocities[environment][degree] += target * time_step
-                            runtime.positions[environment][degree] += (
-                                runtime.velocities[environment][degree] * time_step
+                            articulation_runtime.velocities[environment][degree] += articulation_target * time_step
+                            articulation_runtime.positions[environment][degree] += (
+                                articulation_runtime.velocities[environment][degree] * time_step
                             )
+            for point_runtime in self._points.values():
+                damping_factor = max(0.0, 1.0 - point_runtime.linear_damping_per_s * time_step)
+                for environment in range(self._spec.environments.count):
+                    for point in range(len(point_runtime.initial_positions)):
+                        point_mode = point_runtime.modes[environment][point]
+                        point_target = point_runtime.targets[environment][point]
+                        position = point_runtime.positions[environment][point]
+                        velocity = point_runtime.velocities[environment][point]
+                        if point_mode is PointCommandMode.POSITION:
+                            point_runtime.positions[environment][point] = point_target.copy()
+                            point_runtime.velocities[environment][point] = [
+                                (point_target[axis] - position[axis]) / time_step for axis in range(3)
+                            ]
+                        elif point_mode is PointCommandMode.VELOCITY:
+                            point_runtime.velocities[environment][point] = point_target.copy()
+                            point_runtime.positions[environment][point] = [
+                                position[axis] + point_target[axis] * time_step for axis in range(3)
+                            ]
+                        else:
+                            acceleration = [
+                                point_target[axis] / point_runtime.point_mass_kg + self._spec.physics.gravity_m_s2[axis]
+                                for axis in range(3)
+                            ]
+                            next_velocity = [
+                                (velocity[axis] + acceleration[axis] * time_step) * damping_factor for axis in range(3)
+                            ]
+                            point_runtime.velocities[environment][point] = next_velocity
+                            point_runtime.positions[environment][point] = [
+                                position[axis] + next_velocity[axis] * time_step for axis in range(3)
+                            ]
             self._step_index += 1
         return self.tick
 
@@ -468,6 +788,7 @@ class FakeWorld:
         self._state = WorldState.CLOSED
         self._entities.clear()
         self._articulations.clear()
+        self._points.clear()
         if notify_session:
             self._session._world_closed(self)
 

@@ -12,9 +12,20 @@ from typing import Any
 from .capabilities import CapabilityId, CapabilityRequirement
 from .errors import ValidationError
 from .frozen import FrozenMap
-from .values import ArrayValue, CommandMode, EntityHandle, EntityKind, EntityPath, Pose
+from .values import (
+    ArrayValue,
+    CommandMode,
+    DeformableTopology,
+    EntityHandle,
+    EntityKind,
+    EntityPath,
+    PointCommandMode,
+    Pose,
+)
 
-WORLD_SCHEMA_VERSION = "unirobosim.world/v0alpha1"
+LEGACY_WORLD_SCHEMA_VERSION = "unirobosim.world/v0alpha1"
+WORLD_SCHEMA_VERSION = "unirobosim.world/v0alpha2"
+SUPPORTED_WORLD_SCHEMA_VERSIONS = (LEGACY_WORLD_SCHEMA_VERSION, WORLD_SCHEMA_VERSION)
 _WORLD_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 
 
@@ -53,6 +64,244 @@ class EnvironmentSpec:
             raise _invalid("environment count must be a positive integer", "environment_spec.validate")
 
 
+def _validate_point_array(value: ArrayValue, name: str, *, first_dimension_minimum: int = 1) -> None:
+    if (
+        not isinstance(value, ArrayValue)
+        or not value.dtype.startswith("float")
+        or len(value.shape) != 2
+        or value.shape[0] < first_dimension_minimum
+        or value.shape[1] != 3
+    ):
+        raise _invalid(
+            f"{name} must be a floating [point, xyz] array",
+            "soft_entity_spec.validate",
+            name=name,
+        )
+
+
+def _validate_topology_array(
+    value: ArrayValue | None,
+    name: str,
+    *,
+    width: int,
+    point_count: int,
+    required: bool,
+) -> None:
+    if value is None:
+        if required:
+            raise _invalid(f"{name} is required", "deformable_spec.validate")
+        return
+    if (
+        not isinstance(value, ArrayValue)
+        or not value.dtype.startswith("int")
+        or len(value.shape) != 2
+        or value.shape[1] != width
+    ):
+        raise _invalid(
+            f"{name} must be an integer [element, {width}] array",
+            "deformable_spec.validate",
+        )
+    for element in value.rows():
+        indices = tuple(int(index) for index in element)
+        if len(indices) != len(set(indices)) or any(index < 0 or index >= point_count for index in indices):
+            raise _invalid(
+                f"{name} contains a repeated or out-of-range point index",
+                "deformable_spec.validate",
+                element=list(indices),
+                point_count=point_count,
+            )
+
+
+@dataclass(frozen=True)
+class DeformableBodySpec:
+    """Entity-local deformable authoring geometry and portable physical intent."""
+
+    topology: DeformableTopology
+    rest_positions_m: ArrayValue
+    surface_triangles: ArrayValue | None = None
+    tetrahedra: ArrayValue | None = None
+    initial_node_velocities_m_s: ArrayValue | None = None
+    kinematic_node_indices: tuple[int, ...] = ()
+    node_mass_kg: float = 1.0
+    linear_damping_per_s: float = 0.0
+    self_collision: bool = False
+    material_id: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.topology, DeformableTopology):
+            raise _invalid("deformable topology is invalid", "deformable_spec.validate")
+        minimum = 3 if self.topology is DeformableTopology.SURFACE else 4
+        _validate_point_array(self.rest_positions_m, "rest_positions_m", first_dimension_minimum=minimum)
+        point_count = self.rest_positions_m.shape[0]
+        _validate_topology_array(
+            self.surface_triangles,
+            "surface_triangles",
+            width=3,
+            point_count=point_count,
+            required=self.topology is DeformableTopology.SURFACE,
+        )
+        _validate_topology_array(
+            self.tetrahedra,
+            "tetrahedra",
+            width=4,
+            point_count=point_count,
+            required=self.topology is DeformableTopology.VOLUME,
+        )
+        if self.topology is DeformableTopology.SURFACE and self.tetrahedra is not None:
+            raise _invalid("surface deformables cannot contain tetrahedra", "deformable_spec.validate")
+        if self.initial_node_velocities_m_s is not None:
+            _validate_point_array(self.initial_node_velocities_m_s, "initial_node_velocities_m_s")
+            if self.initial_node_velocities_m_s.shape != self.rest_positions_m.shape:
+                raise _invalid(
+                    "initial node velocity shape must match rest positions",
+                    "deformable_spec.validate",
+                )
+        try:
+            kinematic = tuple(self.kinematic_node_indices)
+        except TypeError as exc:
+            raise _invalid("kinematic node indices must be iterable", "deformable_spec.validate") from exc
+        if any(
+            not isinstance(index, int) or isinstance(index, bool) or index < 0 or index >= point_count
+            for index in kinematic
+        ) or len(kinematic) != len(set(kinematic)):
+            raise _invalid("kinematic node indices must be unique and in range", "deformable_spec.validate")
+        if isinstance(self.node_mass_kg, bool) or isinstance(self.linear_damping_per_s, bool):
+            raise _invalid("deformable mass and damping must be numeric", "deformable_spec.validate")
+        try:
+            mass = float(self.node_mass_kg)
+            damping = float(self.linear_damping_per_s)
+        except (TypeError, ValueError) as exc:
+            raise _invalid("deformable mass and damping must be numeric", "deformable_spec.validate") from exc
+        if not math.isfinite(mass) or mass <= 0.0 or not math.isfinite(damping) or damping < 0.0:
+            raise _invalid("deformable mass/damping is out of range", "deformable_spec.validate")
+        if not isinstance(self.self_collision, bool):
+            raise _invalid("self_collision must be boolean", "deformable_spec.validate")
+        if self.material_id is not None and (not isinstance(self.material_id, str) or not self.material_id.strip()):
+            raise _invalid("material ID must be a non-empty string", "deformable_spec.validate")
+        object.__setattr__(self, "kinematic_node_indices", kinematic)
+        object.__setattr__(self, "node_mass_kg", mass)
+        object.__setattr__(self, "linear_damping_per_s", damping)
+
+    @property
+    def node_count(self) -> int:
+        return self.rest_positions_m.shape[0]
+
+    def initial_velocities(self) -> ArrayValue:
+        if self.initial_node_velocities_m_s is not None:
+            return self.initial_node_velocities_m_s
+        return ArrayValue(shape=self.rest_positions_m.shape, values=(0.0,) * (self.node_count * 3))
+
+    def to_dict(self) -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "topology": self.topology.value,
+            "rest_positions_m": self.rest_positions_m.nested(),
+            "kinematic_node_indices": list(self.kinematic_node_indices),
+            "node_mass_kg": self.node_mass_kg,
+            "linear_damping_per_s": self.linear_damping_per_s,
+            "self_collision": self.self_collision,
+            "material_id": self.material_id,
+        }
+        if self.surface_triangles is not None:
+            result["surface_triangles"] = self.surface_triangles.nested()
+        if self.tetrahedra is not None:
+            result["tetrahedra"] = self.tetrahedra.nested()
+        if self.initial_node_velocities_m_s is not None:
+            result["initial_node_velocities_m_s"] = self.initial_node_velocities_m_s.nested()
+        return result
+
+
+@dataclass(frozen=True)
+class ParticleFluidSpec:
+    """Entity-local fixed-count particle-fluid authoring state and physical intent."""
+
+    initial_particle_positions_m: ArrayValue
+    initial_particle_velocities_m_s: ArrayValue | None = None
+    particle_radius_m: float = 0.01
+    rest_density_kg_m3: float = 1000.0
+    particle_mass_kg: float | None = None
+    dynamic_viscosity_pa_s: float = 0.001
+    surface_tension_n_m: float = 0.072
+    material_id: str | None = None
+
+    def __post_init__(self) -> None:
+        _validate_point_array(self.initial_particle_positions_m, "initial_particle_positions_m")
+        if self.initial_particle_velocities_m_s is not None:
+            _validate_point_array(self.initial_particle_velocities_m_s, "initial_particle_velocities_m_s")
+            if self.initial_particle_velocities_m_s.shape != self.initial_particle_positions_m.shape:
+                raise _invalid(
+                    "initial particle velocity shape must match particle positions",
+                    "particle_fluid_spec.validate",
+                )
+        numeric_properties = (
+            self.particle_radius_m,
+            self.rest_density_kg_m3,
+            self.dynamic_viscosity_pa_s,
+            self.surface_tension_n_m,
+        )
+        if any(isinstance(value, bool) for value in numeric_properties) or isinstance(self.particle_mass_kg, bool):
+            raise _invalid("particle fluid properties must be numeric", "particle_fluid_spec.validate")
+        try:
+            radius = float(self.particle_radius_m)
+            density = float(self.rest_density_kg_m3)
+            mass = None if self.particle_mass_kg is None else float(self.particle_mass_kg)
+            viscosity = float(self.dynamic_viscosity_pa_s)
+            tension = float(self.surface_tension_n_m)
+        except (TypeError, ValueError) as exc:
+            raise _invalid("particle fluid properties must be numeric", "particle_fluid_spec.validate") from exc
+        if (
+            not math.isfinite(radius)
+            or radius <= 0.0
+            or not math.isfinite(density)
+            or density <= 0.0
+            or mass is not None
+            and (not math.isfinite(mass) or mass <= 0.0)
+            or not math.isfinite(viscosity)
+            or viscosity < 0.0
+            or not math.isfinite(tension)
+            or tension < 0.0
+        ):
+            raise _invalid("particle fluid properties are out of range", "particle_fluid_spec.validate")
+        if self.material_id is not None and (not isinstance(self.material_id, str) or not self.material_id.strip()):
+            raise _invalid("material ID must be a non-empty string", "particle_fluid_spec.validate")
+        object.__setattr__(self, "particle_radius_m", radius)
+        object.__setattr__(self, "rest_density_kg_m3", density)
+        object.__setattr__(self, "particle_mass_kg", mass)
+        object.__setattr__(self, "dynamic_viscosity_pa_s", viscosity)
+        object.__setattr__(self, "surface_tension_n_m", tension)
+
+    @property
+    def particle_count(self) -> int:
+        return self.initial_particle_positions_m.shape[0]
+
+    @property
+    def resolved_particle_mass_kg(self) -> float:
+        if self.particle_mass_kg is not None:
+            return self.particle_mass_kg
+        return self.rest_density_kg_m3 * (4.0 / 3.0) * math.pi * self.particle_radius_m**3
+
+    def initial_velocities(self) -> ArrayValue:
+        if self.initial_particle_velocities_m_s is not None:
+            return self.initial_particle_velocities_m_s
+        return ArrayValue(
+            shape=self.initial_particle_positions_m.shape,
+            values=(0.0,) * (self.particle_count * 3),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "initial_particle_positions_m": self.initial_particle_positions_m.nested(),
+            "particle_radius_m": self.particle_radius_m,
+            "rest_density_kg_m3": self.rest_density_kg_m3,
+            "particle_mass_kg": self.particle_mass_kg,
+            "dynamic_viscosity_pa_s": self.dynamic_viscosity_pa_s,
+            "surface_tension_n_m": self.surface_tension_n_m,
+            "material_id": self.material_id,
+        }
+        if self.initial_particle_velocities_m_s is not None:
+            result["initial_particle_velocities_m_s"] = self.initial_particle_velocities_m_s.nested()
+        return result
+
+
 @dataclass(frozen=True)
 class EntitySpec:
     path: EntityPath
@@ -62,6 +311,8 @@ class EntitySpec:
     initial_joint_positions: tuple[float, ...] = ()
     asset_uri: str | None = None
     metadata: FrozenMap = field(default_factory=FrozenMap)
+    deformable: DeformableBodySpec | None = None
+    particle_fluid: ParticleFluidSpec | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.path, EntityPath) or not isinstance(self.kind, EntityKind):
@@ -77,8 +328,8 @@ class EntitySpec:
             raise _invalid("joint names must be unique non-empty strings", "entity_spec.validate", path=str(self.path))
         if not all(math.isfinite(value) for value in positions):
             raise _invalid("initial joint positions must be finite", "entity_spec.validate", path=str(self.path))
-        if self.kind is EntityKind.RIGID_BODY and (names or positions):
-            raise _invalid("rigid bodies cannot declare joints", "entity_spec.validate", path=str(self.path))
+        if self.kind is not EntityKind.ARTICULATION and (names or positions):
+            raise _invalid("only articulations can declare joints", "entity_spec.validate", path=str(self.path))
         if self.kind is EntityKind.ARTICULATION:
             if not names:
                 raise _invalid(
@@ -94,6 +345,36 @@ class EntitySpec:
                     joints=len(names),
                     positions=len(positions),
                 )
+        soft_kinds = {EntityKind.SURFACE_DEFORMABLE, EntityKind.VOLUME_DEFORMABLE}
+        if self.kind in soft_kinds:
+            if not isinstance(self.deformable, DeformableBodySpec) or self.particle_fluid is not None:
+                raise _invalid(
+                    "deformable entities require only a DeformableBodySpec",
+                    "entity_spec.validate",
+                    path=str(self.path),
+                )
+            expected_topology = (
+                DeformableTopology.SURFACE if self.kind is EntityKind.SURFACE_DEFORMABLE else DeformableTopology.VOLUME
+            )
+            if self.deformable.topology is not expected_topology:
+                raise _invalid(
+                    "entity kind and deformable topology do not match",
+                    "entity_spec.validate",
+                    path=str(self.path),
+                )
+        elif self.kind is EntityKind.PARTICLE_FLUID:
+            if not isinstance(self.particle_fluid, ParticleFluidSpec) or self.deformable is not None:
+                raise _invalid(
+                    "particle-fluid entities require only a ParticleFluidSpec",
+                    "entity_spec.validate",
+                    path=str(self.path),
+                )
+        elif self.deformable is not None or self.particle_fluid is not None:
+            raise _invalid(
+                "rigid/articulation entities cannot contain soft-matter specs",
+                "entity_spec.validate",
+                path=str(self.path),
+            )
         if self.asset_uri is not None and (not isinstance(self.asset_uri, str) or not self.asset_uri.strip()):
             raise _invalid("asset URI must be a non-empty string", "entity_spec.validate", path=str(self.path))
         if not isinstance(self.metadata, FrozenMap):
@@ -102,7 +383,7 @@ class EntitySpec:
         object.__setattr__(self, "initial_joint_positions", positions)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        result: dict[str, Any] = {
             "path": self.path.value,
             "kind": self.kind.value,
             "pose": {
@@ -114,6 +395,11 @@ class EntitySpec:
             "asset_uri": self.asset_uri,
             "metadata": self.metadata.to_dict(),
         }
+        if self.deformable is not None:
+            result["deformable"] = self.deformable.to_dict()
+        if self.particle_fluid is not None:
+            result["particle_fluid"] = self.particle_fluid.to_dict()
+        return result
 
 
 def _default_requirements() -> tuple[CapabilityRequirement, ...]:
@@ -133,11 +419,11 @@ class WorldSpec:
     def __post_init__(self) -> None:
         if not isinstance(self.world_id, str) or not _WORLD_ID.fullmatch(self.world_id):
             raise _invalid("world ID is invalid", "world_spec.validate", world_id=self.world_id)
-        if self.schema_version != WORLD_SCHEMA_VERSION:
+        if self.schema_version not in SUPPORTED_WORLD_SCHEMA_VERSIONS:
             raise _invalid(
                 "unsupported world schema version",
                 "world_spec.validate",
-                expected=WORLD_SCHEMA_VERSION,
+                expected=list(SUPPORTED_WORLD_SCHEMA_VERSIONS),
                 actual=self.schema_version,
             )
         if not isinstance(self.physics, PhysicsSpec) or not isinstance(self.environments, EnvironmentSpec):
@@ -150,6 +436,13 @@ class WorldSpec:
         if not raw_entities or any(not isinstance(item, EntitySpec) for item in raw_entities):
             raise _invalid("world must contain EntitySpec values", "world_spec.validate")
         entities = tuple(sorted(raw_entities, key=lambda item: item.path.value))
+        soft_kinds = {
+            EntityKind.SURFACE_DEFORMABLE,
+            EntityKind.VOLUME_DEFORMABLE,
+            EntityKind.PARTICLE_FLUID,
+        }
+        if self.schema_version == LEGACY_WORLD_SCHEMA_VERSION and any(entity.kind in soft_kinds for entity in entities):
+            raise _invalid("v0alpha1 worlds cannot contain soft-matter entities", "world_spec.validate")
         paths = tuple(item.path for item in entities)
         if len(paths) != len(set(paths)):
             raise _invalid("world entity paths must be unique", "world_spec.validate")
@@ -162,6 +455,25 @@ class WorldSpec:
             raise _invalid("the core robotics profile cannot be optional", "world_spec.validate")
         if core_requirement is None:
             requirements += (CapabilityRequirement(core_id),)
+        kind_requirements = {
+            EntityKind.SURFACE_DEFORMABLE: CapabilityId("state.deformable.surface@1"),
+            EntityKind.VOLUME_DEFORMABLE: CapabilityId("state.deformable.volume@1"),
+            EntityKind.PARTICLE_FLUID: CapabilityId("state.fluid.particles@1"),
+        }
+        existing_ids = {item.capability for item in requirements}
+        for entity in entities:
+            capability = kind_requirements.get(entity.kind)
+            if capability is not None and capability not in existing_ids:
+                requirements += (CapabilityRequirement(capability),)
+                existing_ids.add(capability)
+            if (
+                entity.deformable is not None
+                and entity.deformable.self_collision
+                and CapabilityId("physics.deformable.self-collision@1") not in existing_ids
+            ):
+                self_collision_capability = CapabilityId("physics.deformable.self-collision@1")
+                requirements += (CapabilityRequirement(self_collision_capability),)
+                existing_ids.add(self_collision_capability)
         requirements = tuple(sorted(requirements, key=lambda item: item.capability.value))
         ids = tuple(item.capability for item in requirements)
         if len(ids) != len(set(ids)):
@@ -224,3 +536,88 @@ class ArticulationCommand:
                 if len(indices) != len(set(indices)):
                     raise _invalid(f"{field_name} must be unique", "command.validate")
                 object.__setattr__(self, field_name, indices)
+
+
+def _validate_point_command(
+    handle: EntityHandle,
+    accepted_kinds: set[EntityKind],
+    mode: PointCommandMode,
+    targets: ArrayValue,
+    environment_indices: tuple[int, ...] | None,
+    point_indices: tuple[int, ...] | None,
+    operation: str,
+) -> tuple[tuple[int, ...] | None, tuple[int, ...] | None]:
+    if not isinstance(handle, EntityHandle) or handle.entity_kind not in accepted_kinds:
+        raise _invalid("point command handle has the wrong entity kind", operation)
+    if not isinstance(mode, PointCommandMode) or not isinstance(targets, ArrayValue):
+        raise _invalid("point command mode/targets use invalid types", operation)
+    if not targets.dtype.startswith("float") or len(targets.shape) != 3 or targets.shape[2] != 3:
+        raise _invalid("point command targets must be floating [environment, point, xyz]", operation)
+    normalized: list[tuple[int, ...] | None] = []
+    for field_name, value in (
+        ("environment_indices", environment_indices),
+        ("point_indices", point_indices),
+    ):
+        if value is None:
+            normalized.append(None)
+            continue
+        try:
+            indices = tuple(value)
+        except TypeError as exc:
+            raise _invalid(f"{field_name} must be iterable", operation) from exc
+        if (
+            not indices
+            or any(not isinstance(index, int) or isinstance(index, bool) or index < 0 for index in indices)
+            or len(indices) != len(set(indices))
+        ):
+            raise _invalid(f"{field_name} must contain unique non-negative integers", operation)
+        normalized.append(indices)
+    return normalized[0], normalized[1]
+
+
+@dataclass(frozen=True)
+class DeformableCommand:
+    """Strict world-frame command for selected deformable nodes and environments."""
+
+    handle: EntityHandle
+    mode: PointCommandMode
+    targets: ArrayValue
+    environment_indices: tuple[int, ...] | None = None
+    node_indices: tuple[int, ...] | None = None
+
+    def __post_init__(self) -> None:
+        environments, points = _validate_point_command(
+            self.handle,
+            {EntityKind.SURFACE_DEFORMABLE, EntityKind.VOLUME_DEFORMABLE},
+            self.mode,
+            self.targets,
+            self.environment_indices,
+            self.node_indices,
+            "deformable_command.validate",
+        )
+        object.__setattr__(self, "environment_indices", environments)
+        object.__setattr__(self, "node_indices", points)
+
+
+@dataclass(frozen=True)
+class ParticleFluidCommand:
+    """Strict world-frame command for selected fluid particles and environments."""
+
+    handle: EntityHandle
+    mode: PointCommandMode
+    targets: ArrayValue
+    environment_indices: tuple[int, ...] | None = None
+    particle_indices: tuple[int, ...] | None = None
+
+    def __post_init__(self) -> None:
+        environments, points = _validate_point_command(
+            self.handle,
+            {EntityKind.PARTICLE_FLUID},
+            self.mode,
+            self.targets,
+            self.environment_indices,
+            self.particle_indices,
+            "particle_fluid_command.validate",
+        )
+        object.__setattr__(self, "environment_indices", environments)
+        object.__setattr__(self, "particle_indices", points)

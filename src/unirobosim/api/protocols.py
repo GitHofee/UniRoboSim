@@ -6,8 +6,16 @@ from collections.abc import Iterable
 from typing import Protocol, runtime_checkable
 
 from .capabilities import CapabilityRequirement, NegotiationReport
-from .reports import ArticulationState, BuildReport, ProbeReport, ProviderDescriptor, ResetResult
-from .specs import ArticulationCommand, WorldSpec
+from .reports import (
+    ArticulationState,
+    BuildReport,
+    DeformableState,
+    ParticleFluidState,
+    ProbeReport,
+    ProviderDescriptor,
+    ResetResult,
+)
+from .specs import ArticulationCommand, DeformableCommand, ParticleFluidCommand, WorldSpec
 from .values import EntityHandle, EntityPath, SessionState, Tick, WorldState
 
 
@@ -35,6 +43,14 @@ class World(Protocol):
     def apply_articulation_command(self, command: ArticulationCommand) -> None: ...
 
     def read_articulation(self, handle: EntityHandle) -> ArticulationState: ...
+
+    def apply_deformable_command(self, command: DeformableCommand) -> None: ...
+
+    def read_deformable(self, handle: EntityHandle) -> DeformableState: ...
+
+    def apply_particle_fluid_command(self, command: ParticleFluidCommand) -> None: ...
+
+    def read_particle_fluid(self, handle: EntityHandle) -> ParticleFluidState: ...
 
     def step(self, count: int = 1) -> Tick: ...
 

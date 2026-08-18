@@ -1,4 +1,4 @@
-"""Stable M0 public API."""
+"""Stable M1 alpha public API."""
 
 from .capabilities import (
     CapabilityDeclaration,
@@ -23,12 +23,27 @@ from .errors import (
 )
 from .frozen import FrozenMap, freeze_json, thaw_json
 from .protocols import Provider, Session, World
-from .reports import ArticulationState, BuildFingerprint, BuildReport, ProbeReport, ProviderDescriptor, ResetResult
+from .reports import (
+    ArticulationState,
+    BuildFingerprint,
+    BuildReport,
+    DeformableState,
+    ParticleFluidState,
+    ProbeReport,
+    ProviderDescriptor,
+    ResetResult,
+)
 from .specs import (
+    LEGACY_WORLD_SCHEMA_VERSION,
+    SUPPORTED_WORLD_SCHEMA_VERSIONS,
     WORLD_SCHEMA_VERSION,
     ArticulationCommand,
+    DeformableBodySpec,
+    DeformableCommand,
     EntitySpec,
     EnvironmentSpec,
+    ParticleFluidCommand,
+    ParticleFluidSpec,
     PhysicsSpec,
     WorldSpec,
 )
@@ -36,9 +51,11 @@ from .values import (
     ArrayOwnership,
     ArrayValue,
     CommandMode,
+    DeformableTopology,
     EntityHandle,
     EntityKind,
     EntityPath,
+    PointCommandMode,
     Pose,
     SessionState,
     Tick,
@@ -60,6 +77,10 @@ __all__ = [
     "CapabilitySet",
     "CommandError",
     "CommandMode",
+    "DeformableBodySpec",
+    "DeformableCommand",
+    "DeformableState",
+    "DeformableTopology",
     "EntityHandle",
     "EntityKind",
     "EntityNotFoundError",
@@ -68,8 +89,13 @@ __all__ = [
     "EnvironmentSpec",
     "FrozenMap",
     "LifecycleError",
+    "LEGACY_WORLD_SCHEMA_VERSION",
     "NegotiationReport",
     "PhysicsSpec",
+    "ParticleFluidCommand",
+    "ParticleFluidSpec",
+    "ParticleFluidState",
+    "PointCommandMode",
     "Pose",
     "ProbeReport",
     "Provider",
@@ -80,6 +106,7 @@ __all__ = [
     "Session",
     "SessionState",
     "StaleHandleError",
+    "SUPPORTED_WORLD_SCHEMA_VERSIONS",
     "Tick",
     "UniRoboSimError",
     "UnsupportedCapabilityError",
