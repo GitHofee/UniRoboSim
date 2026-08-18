@@ -1,0 +1,8 @@
+# Changelog
+
+## 0.1.0a0 - 2026-08-18
+
+- Add the `v0alpha1` backend-neutral foundation contract.
+- Add portable immutable values, capability negotiation, world specifications, provider protocols,
+  and a provider registry.
+- Add the deterministic Fake Reference Backend and zero-dependency conformance suite.
