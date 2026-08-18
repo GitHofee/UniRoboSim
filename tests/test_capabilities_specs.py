@@ -97,6 +97,7 @@ class WorldSpecTests(unittest.TestCase):
         self.assertEqual(spec.entities[0].path, EntityPath("/ground"))
         self.assertEqual(spec.entities[1].initial_joint_positions, (0.0, 0.0))
         self.assertEqual(spec.requirements[0].capability, CapabilityId("profile.core-robotics@1"))
+        self.assertIn(CapabilityId("state.rigid_body@1"), {item.capability for item in spec.requirements})
 
     def test_digest_is_stable_across_mapping_and_entity_order(self) -> None:
         robot, ground = self._entities()

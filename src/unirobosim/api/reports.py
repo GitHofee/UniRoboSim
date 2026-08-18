@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass, field
 
@@ -142,6 +143,70 @@ class ArticulationState:
             raise ValidationError("articulation state values are invalid", operation="articulation_state.validate")
         if self.joint_positions.shape != self.joint_velocities.shape:
             raise ValidationError("articulation state shapes must match", operation="articulation_state.validate")
+
+
+def _validate_environment_vectors(value: ArrayValue, width: int, name: str, operation: str) -> None:
+    if (
+        not isinstance(value, ArrayValue)
+        or not value.dtype.startswith("float")
+        or len(value.shape) != 2
+        or value.shape[1] != width
+    ):
+        raise ValidationError(f"{name} must be a floating [environment, {width}] array", operation=operation)
+
+
+@dataclass(frozen=True)
+class RigidBodyState:
+    """Root-link pose and twist in the environment-local world frame."""
+
+    positions_m: ArrayValue
+    orientations_xyzw: ArrayValue
+    linear_velocities_m_s: ArrayValue
+    angular_velocities_rad_s: ArrayValue
+    tick: Tick
+
+    def __post_init__(self) -> None:
+        operation = "rigid_body_state.validate"
+        _validate_environment_vectors(self.positions_m, 3, "positions_m", operation)
+        _validate_environment_vectors(self.orientations_xyzw, 4, "orientations_xyzw", operation)
+        _validate_environment_vectors(self.linear_velocities_m_s, 3, "linear_velocities_m_s", operation)
+        _validate_environment_vectors(self.angular_velocities_rad_s, 3, "angular_velocities_rad_s", operation)
+        environment_count = self.positions_m.shape[0]
+        if (
+            self.orientations_xyzw.shape[0] != environment_count
+            or self.linear_velocities_m_s.shape[0] != environment_count
+            or self.angular_velocities_rad_s.shape[0] != environment_count
+            or not isinstance(self.tick, Tick)
+        ):
+            raise ValidationError("rigid-body state batches/tick must match", operation=operation)
+        for orientation in self.orientations_xyzw.rows():
+            norm = math.sqrt(sum(float(value) ** 2 for value in orientation))
+            if not math.isclose(norm, 1.0, rel_tol=0.0, abs_tol=1.0e-5):
+                raise ValidationError("rigid-body orientations must be unit XYZW quaternions", operation=operation)
+
+
+@dataclass(frozen=True)
+class ContactState:
+    """Aggregated normal-contact state for one rigid body."""
+
+    net_normal_forces_n: ArrayValue
+    in_contact: ArrayValue
+    tick: Tick
+
+    def __post_init__(self) -> None:
+        operation = "contact_state.validate"
+        _validate_environment_vectors(self.net_normal_forces_n, 3, "net_normal_forces_n", operation)
+        if (
+            not isinstance(self.in_contact, ArrayValue)
+            or self.in_contact.dtype != "bool"
+            or len(self.in_contact.shape) != 1
+            or self.in_contact.shape[0] != self.net_normal_forces_n.shape[0]
+            or not isinstance(self.tick, Tick)
+        ):
+            raise ValidationError(
+                "contact state must use boolean [environment] flags matching force batches",
+                operation=operation,
+            )
 
 
 def _validate_point_state(positions: ArrayValue, velocities: ArrayValue, tick: Tick, operation: str) -> None:

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.0a0 - 2026-08-18
+
+- Add the `v0alpha3` rigid-body root-link pose/twist state contract.
+- Add strict persistent world-frame force/torque commands with selected-environment semantics.
+- Add aggregated normal-contact force and binary-contact state without overstating friction,
+  manifold, impulse, or contact-point availability.
+- Preserve explicit `v0alpha1` and `v0alpha2` WorldSpec compatibility.
+
 ## 0.2.0a0 - 2026-08-18
 
 - Add the `v0alpha2` surface-deformable, volume-deformable, and fixed particle-fluid contracts.

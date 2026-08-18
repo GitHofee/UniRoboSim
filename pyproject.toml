@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "unirobosim"
-version = "0.2.0a0"
+version = "0.3.0a0"
 description = "Backend-neutral contracts and runtime foundation for robot simulators"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"

@@ -1,4 +1,4 @@
-"""Stable M1 alpha public API."""
+"""Stable M2 alpha public API."""
 
 from .capabilities import (
     CapabilityDeclaration,
@@ -27,14 +27,17 @@ from .reports import (
     ArticulationState,
     BuildFingerprint,
     BuildReport,
+    ContactState,
     DeformableState,
     ParticleFluidState,
     ProbeReport,
     ProviderDescriptor,
     ResetResult,
+    RigidBodyState,
 )
 from .specs import (
     LEGACY_WORLD_SCHEMA_VERSION,
+    SOFT_MATTER_WORLD_SCHEMA_VERSION,
     SUPPORTED_WORLD_SCHEMA_VERSIONS,
     WORLD_SCHEMA_VERSION,
     ArticulationCommand,
@@ -45,6 +48,7 @@ from .specs import (
     ParticleFluidCommand,
     ParticleFluidSpec,
     PhysicsSpec,
+    RigidBodyCommand,
     WorldSpec,
 )
 from .values import (
@@ -77,6 +81,7 @@ __all__ = [
     "CapabilitySet",
     "CommandError",
     "CommandMode",
+    "ContactState",
     "DeformableBodySpec",
     "DeformableCommand",
     "DeformableState",
@@ -103,8 +108,11 @@ __all__ = [
     "ProviderRegistrationError",
     "ProviderSelectionError",
     "ResetResult",
+    "RigidBodyCommand",
+    "RigidBodyState",
     "Session",
     "SessionState",
+    "SOFT_MATTER_WORLD_SCHEMA_VERSION",
     "StaleHandleError",
     "SUPPORTED_WORLD_SCHEMA_VERSIONS",
     "Tick",

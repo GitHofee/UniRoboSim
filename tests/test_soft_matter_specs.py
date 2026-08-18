@@ -5,6 +5,7 @@ import unittest
 
 from unirobosim import (
     LEGACY_WORLD_SCHEMA_VERSION,
+    SOFT_MATTER_WORLD_SCHEMA_VERSION,
     WORLD_SCHEMA_VERSION,
     ArrayValue,
     CapabilityId,
@@ -180,7 +181,7 @@ class SoftMatterWorldSpecTests(unittest.TestCase):
             with self.subTest(overrides=overrides), self.assertRaises(ValidationError):
                 EntitySpec(EntityPath("/invalid"), **overrides)  # type: ignore[arg-type]
 
-    def test_world_injects_state_requirements_and_uses_v0alpha2(self) -> None:
+    def test_world_injects_state_requirements_and_uses_current_schema(self) -> None:
         entities = (
             EntitySpec(EntityPath("/cloth"), EntityKind.SURFACE_DEFORMABLE, deformable=surface_body()),
             EntitySpec(EntityPath("/gel"), EntityKind.VOLUME_DEFORMABLE, deformable=volume_body()),
@@ -221,6 +222,15 @@ class SoftMatterWorldSpecTests(unittest.TestCase):
         cloth = EntitySpec(EntityPath("/cloth"), EntityKind.SURFACE_DEFORMABLE, deformable=surface_body())
         with self.assertRaises(ValidationError):
             WorldSpec("legacy-soft", (cloth,), schema_version=LEGACY_WORLD_SCHEMA_VERSION)
+
+    def test_explicit_v0alpha2_preserves_its_previous_rigid_requirement_normalization(self) -> None:
+        rigid = EntitySpec(EntityPath("/box"), EntityKind.RIGID_BODY)
+        world = WorldSpec("soft-era", (rigid,), schema_version=SOFT_MATTER_WORLD_SCHEMA_VERSION)
+        self.assertEqual(world.schema_version, SOFT_MATTER_WORLD_SCHEMA_VERSION)
+        self.assertNotIn(
+            CapabilityId("state.rigid_body@1"),
+            {requirement.capability for requirement in world.requirements},
+        )
 
 
 if __name__ == "__main__":

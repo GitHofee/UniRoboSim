@@ -9,13 +9,15 @@ from .capabilities import CapabilityRequirement, NegotiationReport
 from .reports import (
     ArticulationState,
     BuildReport,
+    ContactState,
     DeformableState,
     ParticleFluidState,
     ProbeReport,
     ProviderDescriptor,
     ResetResult,
+    RigidBodyState,
 )
-from .specs import ArticulationCommand, DeformableCommand, ParticleFluidCommand, WorldSpec
+from .specs import ArticulationCommand, DeformableCommand, ParticleFluidCommand, RigidBodyCommand, WorldSpec
 from .values import EntityHandle, EntityPath, SessionState, Tick, WorldState
 
 
@@ -43,6 +45,12 @@ class World(Protocol):
     def apply_articulation_command(self, command: ArticulationCommand) -> None: ...
 
     def read_articulation(self, handle: EntityHandle) -> ArticulationState: ...
+
+    def apply_rigid_body_command(self, command: RigidBodyCommand) -> None: ...
+
+    def read_rigid_body(self, handle: EntityHandle) -> RigidBodyState: ...
+
+    def read_contact(self, handle: EntityHandle, force_threshold_n: float = 1.0e-6) -> ContactState: ...
 
     def apply_deformable_command(self, command: DeformableCommand) -> None: ...
 

@@ -24,8 +24,13 @@ from .values import (
 )
 
 LEGACY_WORLD_SCHEMA_VERSION = "unirobosim.world/v0alpha1"
-WORLD_SCHEMA_VERSION = "unirobosim.world/v0alpha2"
-SUPPORTED_WORLD_SCHEMA_VERSIONS = (LEGACY_WORLD_SCHEMA_VERSION, WORLD_SCHEMA_VERSION)
+SOFT_MATTER_WORLD_SCHEMA_VERSION = "unirobosim.world/v0alpha2"
+WORLD_SCHEMA_VERSION = "unirobosim.world/v0alpha3"
+SUPPORTED_WORLD_SCHEMA_VERSIONS = (
+    LEGACY_WORLD_SCHEMA_VERSION,
+    SOFT_MATTER_WORLD_SCHEMA_VERSION,
+    WORLD_SCHEMA_VERSION,
+)
 _WORLD_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 
 
@@ -460,6 +465,8 @@ class WorldSpec:
             EntityKind.VOLUME_DEFORMABLE: CapabilityId("state.deformable.volume@1"),
             EntityKind.PARTICLE_FLUID: CapabilityId("state.fluid.particles@1"),
         }
+        if self.schema_version == WORLD_SCHEMA_VERSION:
+            kind_requirements[EntityKind.RIGID_BODY] = CapabilityId("state.rigid_body@1")
         existing_ids = {item.capability for item in requirements}
         for entity in entities:
             capability = kind_requirements.get(entity.kind)
@@ -536,6 +543,48 @@ class ArticulationCommand:
                 if len(indices) != len(set(indices)):
                     raise _invalid(f"{field_name} must be unique", "command.validate")
                 object.__setattr__(self, field_name, indices)
+
+
+@dataclass(frozen=True)
+class RigidBodyCommand:
+    """Persistent world-frame force and free-torque command for rigid bodies."""
+
+    handle: EntityHandle
+    forces_n: ArrayValue
+    torques_n_m: ArrayValue
+    environment_indices: tuple[int, ...] | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.handle, EntityHandle) or self.handle.entity_kind is not EntityKind.RIGID_BODY:
+            raise _invalid("rigid-body command requires a rigid-body handle", "rigid_body_command.validate")
+        for name, value in (("forces_n", self.forces_n), ("torques_n_m", self.torques_n_m)):
+            if (
+                not isinstance(value, ArrayValue)
+                or not value.dtype.startswith("float")
+                or len(value.shape) != 2
+                or value.shape[1] != 3
+            ):
+                raise _invalid(
+                    f"{name} must be a floating [environment, xyz] array",
+                    "rigid_body_command.validate",
+                )
+        if self.forces_n.shape != self.torques_n_m.shape:
+            raise _invalid("rigid-body force and torque shapes must match", "rigid_body_command.validate")
+        if self.environment_indices is not None:
+            try:
+                indices = tuple(self.environment_indices)
+            except TypeError as exc:
+                raise _invalid("environment_indices must be iterable", "rigid_body_command.validate") from exc
+            if (
+                not indices
+                or any(not isinstance(index, int) or isinstance(index, bool) or index < 0 for index in indices)
+                or len(indices) != len(set(indices))
+            ):
+                raise _invalid(
+                    "environment_indices must contain unique non-negative integers",
+                    "rigid_body_command.validate",
+                )
+            object.__setattr__(self, "environment_indices", indices)
 
 
 def _validate_point_command(

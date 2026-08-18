@@ -35,17 +35,20 @@ from unirobosim.api.reports import (
     ArticulationState,
     BuildFingerprint,
     BuildReport,
+    ContactState,
     DeformableState,
     ParticleFluidState,
     ProbeReport,
     ProviderDescriptor,
     ResetResult,
+    RigidBodyState,
 )
 from unirobosim.api.specs import (
     ArticulationCommand,
     DeformableCommand,
     EntitySpec,
     ParticleFluidCommand,
+    RigidBodyCommand,
     WorldSpec,
 )
 from unirobosim.api.values import (
@@ -73,6 +76,21 @@ FAKE_CAPABILITIES = CapabilitySet(
             ),
         ),
         CapabilityDeclaration(CapabilityId("world.multi-environment@1")),
+        CapabilityDeclaration(CapabilityId("state.rigid_body@1")),
+        CapabilityDeclaration(
+            CapabilityId("control.rigid_body.wrench@1"),
+            FrozenMap({"frame": "environment-local-world", "persistence": "until-overwrite-or-reset"}),
+            limitations=("unit mass and unit diagonal inertia; not physical simulation",),
+        ),
+        CapabilityDeclaration(
+            CapabilityId("contact.binary@1"),
+            limitations=("fake reference backend has no collision model and therefore reports false",),
+        ),
+        CapabilityDeclaration(
+            CapabilityId("contact.net_normal_force@1"),
+            FrozenMap({"aggregation": "all-partners", "frame": "environment-local-world"}),
+            limitations=("fake reference backend has no collision model and therefore reports zero",),
+        ),
         CapabilityDeclaration(CapabilityId("state.articulation@1")),
         CapabilityDeclaration(CapabilityId("control.articulation.position@1")),
         CapabilityDeclaration(CapabilityId("control.articulation.velocity@1")),
@@ -122,8 +140,8 @@ FAKE_CAPABILITIES = CapabilitySet(
 FAKE_DESCRIPTOR = ProviderDescriptor(
     provider_id="reference.fake",
     display_name="UniRoboSim Fake Reference Backend",
-    version="0.2.0a0",
-    contract_version="v0alpha2",
+    version="0.3.0a0",
+    contract_version="v0alpha3",
     capabilities=FAKE_CAPABILITIES,
     metadata=FrozenMap({"purpose": "contract-testing-only"}),
 )
@@ -138,6 +156,18 @@ class _ArticulationRuntime:
     velocities: list[list[float]]
     modes: list[list[CommandMode]]
     targets: list[list[float]]
+
+
+@dataclass
+class _RigidRuntime:
+    initial_position: list[float]
+    initial_orientation: list[float]
+    positions: list[list[float]]
+    orientations: list[list[float]]
+    linear_velocities: list[list[float]]
+    angular_velocities: list[list[float]]
+    forces: list[list[float]]
+    torques: list[list[float]]
 
 
 @dataclass
@@ -176,6 +206,19 @@ def _rotate_vector_xyzw(vector: list[float], quaternion: tuple[float, float, flo
         vy + w * ty + (z * tx - x * tz),
         vz + w * tz + (x * ty - y * tx),
     ]
+
+
+def _integrate_orientation_xyzw(orientation: list[float], angular_velocity_w: list[float], dt: float) -> list[float]:
+    x, y, z, w = orientation
+    wx, wy, wz = angular_velocity_w
+    integrated = [
+        x + 0.5 * dt * (wx * w + wy * z - wz * y),
+        y + 0.5 * dt * (-wx * z + wy * w + wz * x),
+        z + 0.5 * dt * (wx * y - wy * x + wz * w),
+        w + 0.5 * dt * (-wx * x - wy * y - wz * z),
+    ]
+    norm = math.sqrt(sum(value * value for value in integrated))
+    return [value / norm for value in integrated]
 
 
 def _entity_frame_vectors(entity: EntitySpec, value: ArrayValue, *, translate: bool) -> list[list[float]]:
@@ -323,9 +366,24 @@ class FakeWorld:
         self._reset_count = 0
         self._entities = {entity.path: entity for entity in spec.entities}
         self._articulations: dict[EntityPath, _ArticulationRuntime] = {}
+        self._rigids: dict[EntityPath, _RigidRuntime] = {}
         self._points: dict[EntityPath, _PointRuntime] = {}
         for entity in spec.entities:
-            if entity.kind is EntityKind.ARTICULATION:
+            if entity.kind is EntityKind.RIGID_BODY:
+                position = list(entity.pose.position)
+                orientation = list(entity.pose.orientation_xyzw)
+                environment_count = spec.environments.count
+                self._rigids[entity.path] = _RigidRuntime(
+                    initial_position=position,
+                    initial_orientation=orientation,
+                    positions=[position.copy() for _ in range(environment_count)],
+                    orientations=[orientation.copy() for _ in range(environment_count)],
+                    linear_velocities=[[0.0, 0.0, 0.0] for _ in range(environment_count)],
+                    angular_velocities=[[0.0, 0.0, 0.0] for _ in range(environment_count)],
+                    forces=[[0.0, 0.0, 0.0] for _ in range(environment_count)],
+                    torques=[[0.0, 0.0, 0.0] for _ in range(environment_count)],
+                )
+            elif entity.kind is EntityKind.ARTICULATION:
                 initial = list(entity.initial_joint_positions)
                 positions = [initial.copy() for _ in range(spec.environments.count)]
                 self._articulations[entity.path] = _ArticulationRuntime(
@@ -532,6 +590,14 @@ class FakeWorld:
                 articulation_runtime.velocities[environment] = [0.0] * len(initial)
                 articulation_runtime.modes[environment] = [CommandMode.POSITION] * len(initial)
                 articulation_runtime.targets[environment] = list(initial)
+        for rigid_runtime in self._rigids.values():
+            for environment in environments:
+                rigid_runtime.positions[environment] = rigid_runtime.initial_position.copy()
+                rigid_runtime.orientations[environment] = rigid_runtime.initial_orientation.copy()
+                rigid_runtime.linear_velocities[environment] = [0.0, 0.0, 0.0]
+                rigid_runtime.angular_velocities[environment] = [0.0, 0.0, 0.0]
+                rigid_runtime.forces[environment] = [0.0, 0.0, 0.0]
+                rigid_runtime.torques[environment] = [0.0, 0.0, 0.0]
         for point_runtime in self._points.values():
             for environment in environments:
                 point_runtime.positions[environment] = _copy_vectors(point_runtime.initial_positions)
@@ -602,6 +668,75 @@ class FakeWorld:
         return ArticulationState(
             joint_positions=ArrayValue.from_rows(runtime.positions),
             joint_velocities=ArrayValue.from_rows(runtime.velocities),
+            tick=self.tick,
+        )
+
+    def apply_rigid_body_command(self, command: RigidBodyCommand) -> None:
+        operation = "world.apply_rigid_body_command"
+        self._ensure_ready(operation)
+        if not isinstance(command, RigidBodyCommand):
+            raise CommandError("operation requires a RigidBodyCommand", operation=operation)
+        entity = self._validate_handle(command.handle, operation)
+        if entity.kind is not EntityKind.RIGID_BODY:
+            raise CommandError("entity is not a rigid body", operation=operation, entity_path=entity.path.value)
+        environments = self._indices(
+            command.environment_indices,
+            self._spec.environments.count,
+            "environment_indices",
+            operation=operation,
+        )
+        expected_shape = (len(environments), 3)
+        if command.forces_n.shape != expected_shape or command.torques_n_m.shape != expected_shape:
+            raise CommandError(
+                "rigid-body command shapes must exactly match selected environments and xyz",
+                operation=operation,
+                backend_id=self._session.descriptor.provider_id,
+                world_id=self.world_id,
+                entity_path=entity.path.value,
+                details={
+                    "expected_shape": list(expected_shape),
+                    "force_shape": list(command.forces_n.shape),
+                    "torque_shape": list(command.torques_n_m.shape),
+                },
+            )
+        runtime = self._rigids[entity.path]
+        forces = command.forces_n.rows()
+        torques = command.torques_n_m.rows()
+        for row, environment in enumerate(environments):
+            runtime.forces[environment] = [float(value) for value in forces[row]]
+            runtime.torques[environment] = [float(value) for value in torques[row]]
+
+    def read_rigid_body(self, handle: EntityHandle) -> RigidBodyState:
+        operation = "world.read_rigid_body"
+        self._ensure_ready(operation)
+        entity = self._validate_handle(handle, operation)
+        if entity.kind is not EntityKind.RIGID_BODY:
+            raise CommandError("entity is not a rigid body", operation=operation, entity_path=entity.path.value)
+        runtime = self._rigids[entity.path]
+        return RigidBodyState(
+            positions_m=ArrayValue.from_rows(runtime.positions),
+            orientations_xyzw=ArrayValue.from_rows(runtime.orientations),
+            linear_velocities_m_s=ArrayValue.from_rows(runtime.linear_velocities),
+            angular_velocities_rad_s=ArrayValue.from_rows(runtime.angular_velocities),
+            tick=self.tick,
+        )
+
+    def read_contact(self, handle: EntityHandle, force_threshold_n: float = 1.0e-6) -> ContactState:
+        operation = "world.read_contact"
+        self._ensure_ready(operation)
+        entity = self._validate_handle(handle, operation)
+        if entity.kind is not EntityKind.RIGID_BODY:
+            raise CommandError("entity is not a rigid body", operation=operation, entity_path=entity.path.value)
+        try:
+            threshold = float(force_threshold_n)
+        except (TypeError, ValueError) as exc:
+            raise ValidationError("force threshold must be numeric", operation=operation) from exc
+        if not math.isfinite(threshold) or threshold < 0.0:
+            raise ValidationError("force threshold must be finite and non-negative", operation=operation)
+        environment_count = self._spec.environments.count
+        return ContactState(
+            net_normal_forces_n=ArrayValue.from_rows(((0.0, 0.0, 0.0),) * environment_count),
+            in_contact=ArrayValue((environment_count,), (False,) * environment_count, dtype="bool"),
             tick=self.tick,
         )
 
@@ -730,6 +865,31 @@ class FakeWorld:
             raise ValidationError("step count must be a positive integer", operation="world.step")
         time_step = self._spec.physics.time_step_seconds
         for _ in range(count):
+            for rigid_runtime in self._rigids.values():
+                for environment in range(self._spec.environments.count):
+                    linear_acceleration = [
+                        rigid_runtime.forces[environment][axis] + self._spec.physics.gravity_m_s2[axis]
+                        for axis in range(3)
+                    ]
+                    angular_acceleration = rigid_runtime.torques[environment]
+                    rigid_runtime.linear_velocities[environment] = [
+                        rigid_runtime.linear_velocities[environment][axis] + linear_acceleration[axis] * time_step
+                        for axis in range(3)
+                    ]
+                    rigid_runtime.angular_velocities[environment] = [
+                        rigid_runtime.angular_velocities[environment][axis] + angular_acceleration[axis] * time_step
+                        for axis in range(3)
+                    ]
+                    rigid_runtime.positions[environment] = [
+                        rigid_runtime.positions[environment][axis]
+                        + rigid_runtime.linear_velocities[environment][axis] * time_step
+                        for axis in range(3)
+                    ]
+                    rigid_runtime.orientations[environment] = _integrate_orientation_xyzw(
+                        rigid_runtime.orientations[environment],
+                        rigid_runtime.angular_velocities[environment],
+                        time_step,
+                    )
             for articulation_runtime in self._articulations.values():
                 for environment in range(self._spec.environments.count):
                     for degree in range(len(articulation_runtime.spec.joint_names)):
@@ -788,6 +948,7 @@ class FakeWorld:
         self._state = WorldState.CLOSED
         self._entities.clear()
         self._articulations.clear()
+        self._rigids.clear()
         self._points.clear()
         if notify_session:
             self._session._world_closed(self)
