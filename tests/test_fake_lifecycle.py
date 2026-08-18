@@ -48,7 +48,7 @@ class FakeLifecycleTests(unittest.TestCase):
 
     def test_negotiation_failure_does_not_poison_session(self) -> None:
         session = FakeProvider().open()
-        unsupported = make_world_spec(requirements=(CapabilityRequirement(CapabilityId("sensor.camera@1")),))
+        unsupported = make_world_spec(requirements=(CapabilityRequirement(CapabilityId("sensor.lidar@1")),))
         with self.assertRaises(CapabilityNegotiationError) as caught:
             session.build(unsupported)
         self.assertFalse(caught.exception.details["negotiation"]["accepted"])

@@ -39,7 +39,7 @@ class ProviderRegistryTests(unittest.TestCase):
         provider = registry.select((CapabilityRequirement(CapabilityId("state.articulation@1")),))
         self.assertEqual(provider.descriptor.provider_id, "reference.fake")
         with self.assertRaises(ProviderSelectionError) as caught:
-            registry.select((CapabilityRequirement(CapabilityId("sensor.camera@1")),))
+            registry.select((CapabilityRequirement(CapabilityId("sensor.lidar@1")),))
         self.assertTrue(caught.exception.details["attempts"])
 
     def test_unavailable_provider_is_not_selected(self) -> None:

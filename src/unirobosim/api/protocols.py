@@ -6,6 +6,7 @@ from collections.abc import Iterable
 from typing import Protocol, runtime_checkable
 
 from .capabilities import CapabilityRequirement, NegotiationReport
+from .debug import DebugBatch, DebugPublishReport
 from .reports import (
     ArticulationState,
     BuildReport,
@@ -16,6 +17,7 @@ from .reports import (
     ProviderDescriptor,
     ResetResult,
     RigidBodyState,
+    SensorSample,
 )
 from .specs import ArticulationCommand, DeformableCommand, ParticleFluidCommand, RigidBodyCommand, WorldSpec
 from .values import EntityHandle, EntityPath, SessionState, Tick, WorldState
@@ -59,6 +61,12 @@ class World(Protocol):
     def apply_particle_fluid_command(self, command: ParticleFluidCommand) -> None: ...
 
     def read_particle_fluid(self, handle: EntityHandle) -> ParticleFluidState: ...
+
+    def read_sensor(self, handle: EntityHandle) -> SensorSample: ...
+
+    def publish_debug(self, batch: DebugBatch) -> DebugPublishReport: ...
+
+    def clear_debug(self, *, layer: str | None = None, primitive_id: str | None = None) -> int: ...
 
     def step(self, count: int = 1) -> Tick: ...
 

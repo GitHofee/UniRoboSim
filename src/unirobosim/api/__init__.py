@@ -1,4 +1,4 @@
-"""Stable M2 alpha public API."""
+"""Stable M3 alpha public API."""
 
 from .capabilities import (
     CapabilityDeclaration,
@@ -7,6 +7,17 @@ from .capabilities import (
     CapabilityRequirement,
     CapabilitySet,
     NegotiationReport,
+)
+from .debug import (
+    DebugBatch,
+    DebugBus,
+    DebugPrimitive,
+    DebugPrimitiveKind,
+    DebugPublishReport,
+    DebugSink,
+    NativeWorldDebugSink,
+    TestDebugSink,
+    TraceDebugSink,
 )
 from .errors import (
     CapabilityNegotiationError,
@@ -34,13 +45,17 @@ from .reports import (
     ProviderDescriptor,
     ResetResult,
     RigidBodyState,
+    SensorChannel,
+    SensorSample,
 )
 from .specs import (
     LEGACY_WORLD_SCHEMA_VERSION,
+    RIGID_CONTACT_WORLD_SCHEMA_VERSION,
     SOFT_MATTER_WORLD_SCHEMA_VERSION,
     SUPPORTED_WORLD_SCHEMA_VERSIONS,
     WORLD_SCHEMA_VERSION,
     ArticulationCommand,
+    CameraSpec,
     DeformableBodySpec,
     DeformableCommand,
     EntitySpec,
@@ -54,6 +69,7 @@ from .specs import (
 from .values import (
     ArrayOwnership,
     ArrayValue,
+    CameraModality,
     CommandMode,
     DeformableTopology,
     EntityHandle,
@@ -73,6 +89,8 @@ __all__ = [
     "ArticulationState",
     "BuildFingerprint",
     "BuildReport",
+    "CameraModality",
+    "CameraSpec",
     "CapabilityDeclaration",
     "CapabilityId",
     "CapabilityIssue",
@@ -86,6 +104,12 @@ __all__ = [
     "DeformableCommand",
     "DeformableState",
     "DeformableTopology",
+    "DebugBatch",
+    "DebugBus",
+    "DebugPrimitive",
+    "DebugPrimitiveKind",
+    "DebugPublishReport",
+    "DebugSink",
     "EntityHandle",
     "EntityKind",
     "EntityNotFoundError",
@@ -96,6 +120,7 @@ __all__ = [
     "LifecycleError",
     "LEGACY_WORLD_SCHEMA_VERSION",
     "NegotiationReport",
+    "NativeWorldDebugSink",
     "PhysicsSpec",
     "ParticleFluidCommand",
     "ParticleFluidSpec",
@@ -110,12 +135,17 @@ __all__ = [
     "ResetResult",
     "RigidBodyCommand",
     "RigidBodyState",
+    "RIGID_CONTACT_WORLD_SCHEMA_VERSION",
+    "SensorChannel",
+    "SensorSample",
     "Session",
     "SessionState",
     "SOFT_MATTER_WORLD_SCHEMA_VERSION",
     "StaleHandleError",
     "SUPPORTED_WORLD_SCHEMA_VERSIONS",
     "Tick",
+    "TestDebugSink",
+    "TraceDebugSink",
     "UniRoboSimError",
     "UnsupportedCapabilityError",
     "ValidationError",

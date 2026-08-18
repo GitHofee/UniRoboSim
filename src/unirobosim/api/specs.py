@@ -14,6 +14,7 @@ from .errors import ValidationError
 from .frozen import FrozenMap
 from .values import (
     ArrayValue,
+    CameraModality,
     CommandMode,
     DeformableTopology,
     EntityHandle,
@@ -25,10 +26,12 @@ from .values import (
 
 LEGACY_WORLD_SCHEMA_VERSION = "unirobosim.world/v0alpha1"
 SOFT_MATTER_WORLD_SCHEMA_VERSION = "unirobosim.world/v0alpha2"
-WORLD_SCHEMA_VERSION = "unirobosim.world/v0alpha3"
+RIGID_CONTACT_WORLD_SCHEMA_VERSION = "unirobosim.world/v0alpha3"
+WORLD_SCHEMA_VERSION = "unirobosim.world/v0alpha4"
 SUPPORTED_WORLD_SCHEMA_VERSIONS = (
     LEGACY_WORLD_SCHEMA_VERSION,
     SOFT_MATTER_WORLD_SCHEMA_VERSION,
+    RIGID_CONTACT_WORLD_SCHEMA_VERSION,
     WORLD_SCHEMA_VERSION,
 )
 _WORLD_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
@@ -67,6 +70,67 @@ class EnvironmentSpec:
     def __post_init__(self) -> None:
         if not isinstance(self.count, int) or isinstance(self.count, bool) or self.count <= 0:
             raise _invalid("environment count must be a positive integer", "environment_spec.validate")
+
+
+@dataclass(frozen=True)
+class CameraSpec:
+    """Synchronous pinhole camera intent using an environment-local world pose."""
+
+    width_px: int = 640
+    height_px: int = 480
+    modalities: tuple[CameraModality, ...] = (CameraModality.RGB, CameraModality.DEPTH)
+    horizontal_fov_degrees: float = 90.0
+    near_plane_m: float = 0.01
+    far_plane_m: float = 1000.0
+
+    def __post_init__(self) -> None:
+        operation = "camera_spec.validate"
+        if any(
+            not isinstance(value, int) or isinstance(value, bool) or value <= 0
+            for value in (self.width_px, self.height_px)
+        ):
+            raise _invalid("camera resolution must contain positive integers", operation)
+        try:
+            modalities = tuple(self.modalities)
+        except TypeError as exc:
+            raise _invalid("camera modalities must be iterable", operation) from exc
+        if (
+            not modalities
+            or any(not isinstance(item, CameraModality) for item in modalities)
+            or len(modalities) != len(set(modalities))
+        ):
+            raise _invalid("camera modalities must be non-empty and unique", operation)
+        if any(
+            isinstance(value, bool) or not isinstance(value, (int, float))
+            for value in (self.horizontal_fov_degrees, self.near_plane_m, self.far_plane_m)
+        ):
+            raise _invalid("camera projection values must be numeric", operation)
+        fov = float(self.horizontal_fov_degrees)
+        near = float(self.near_plane_m)
+        far = float(self.far_plane_m)
+        if (
+            not math.isfinite(fov)
+            or not 0.0 < fov < 180.0
+            or not math.isfinite(near)
+            or not math.isfinite(far)
+            or near <= 0.0
+            or far <= near
+        ):
+            raise _invalid("camera projection values are out of range", operation)
+        object.__setattr__(self, "modalities", modalities)
+        object.__setattr__(self, "horizontal_fov_degrees", fov)
+        object.__setattr__(self, "near_plane_m", near)
+        object.__setattr__(self, "far_plane_m", far)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "width_px": self.width_px,
+            "height_px": self.height_px,
+            "modalities": [item.value for item in self.modalities],
+            "horizontal_fov_degrees": self.horizontal_fov_degrees,
+            "near_plane_m": self.near_plane_m,
+            "far_plane_m": self.far_plane_m,
+        }
 
 
 def _validate_point_array(value: ArrayValue, name: str, *, first_dimension_minimum: int = 1) -> None:
@@ -318,6 +382,7 @@ class EntitySpec:
     metadata: FrozenMap = field(default_factory=FrozenMap)
     deformable: DeformableBodySpec | None = None
     particle_fluid: ParticleFluidSpec | None = None
+    camera: CameraSpec | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.path, EntityPath) or not isinstance(self.kind, EntityKind):
@@ -352,7 +417,11 @@ class EntitySpec:
                 )
         soft_kinds = {EntityKind.SURFACE_DEFORMABLE, EntityKind.VOLUME_DEFORMABLE}
         if self.kind in soft_kinds:
-            if not isinstance(self.deformable, DeformableBodySpec) or self.particle_fluid is not None:
+            if (
+                not isinstance(self.deformable, DeformableBodySpec)
+                or self.particle_fluid is not None
+                or self.camera is not None
+            ):
                 raise _invalid(
                     "deformable entities require only a DeformableBodySpec",
                     "entity_spec.validate",
@@ -368,15 +437,30 @@ class EntitySpec:
                     path=str(self.path),
                 )
         elif self.kind is EntityKind.PARTICLE_FLUID:
-            if not isinstance(self.particle_fluid, ParticleFluidSpec) or self.deformable is not None:
+            if (
+                not isinstance(self.particle_fluid, ParticleFluidSpec)
+                or self.deformable is not None
+                or self.camera is not None
+            ):
                 raise _invalid(
                     "particle-fluid entities require only a ParticleFluidSpec",
                     "entity_spec.validate",
                     path=str(self.path),
                 )
-        elif self.deformable is not None or self.particle_fluid is not None:
+        elif self.kind is EntityKind.CAMERA_SENSOR:
+            if (
+                not isinstance(self.camera, CameraSpec)
+                or self.deformable is not None
+                or self.particle_fluid is not None
+            ):
+                raise _invalid(
+                    "camera entities require only a CameraSpec",
+                    "entity_spec.validate",
+                    path=str(self.path),
+                )
+        elif self.deformable is not None or self.particle_fluid is not None or self.camera is not None:
             raise _invalid(
-                "rigid/articulation entities cannot contain soft-matter specs",
+                "rigid/articulation entities cannot contain soft-matter or camera specs",
                 "entity_spec.validate",
                 path=str(self.path),
             )
@@ -404,6 +488,8 @@ class EntitySpec:
             result["deformable"] = self.deformable.to_dict()
         if self.particle_fluid is not None:
             result["particle_fluid"] = self.particle_fluid.to_dict()
+        if self.camera is not None:
+            result["camera"] = self.camera.to_dict()
         return result
 
 
@@ -448,6 +534,10 @@ class WorldSpec:
         }
         if self.schema_version == LEGACY_WORLD_SCHEMA_VERSION and any(entity.kind in soft_kinds for entity in entities):
             raise _invalid("v0alpha1 worlds cannot contain soft-matter entities", "world_spec.validate")
+        if self.schema_version != WORLD_SCHEMA_VERSION and any(
+            entity.kind is EntityKind.CAMERA_SENSOR for entity in entities
+        ):
+            raise _invalid("only v0alpha4 worlds can contain camera entities", "world_spec.validate")
         paths = tuple(item.path for item in entities)
         if len(paths) != len(set(paths)):
             raise _invalid("world entity paths must be unique", "world_spec.validate")
@@ -464,8 +554,9 @@ class WorldSpec:
             EntityKind.SURFACE_DEFORMABLE: CapabilityId("state.deformable.surface@1"),
             EntityKind.VOLUME_DEFORMABLE: CapabilityId("state.deformable.volume@1"),
             EntityKind.PARTICLE_FLUID: CapabilityId("state.fluid.particles@1"),
+            EntityKind.CAMERA_SENSOR: CapabilityId("sensor.camera@1"),
         }
-        if self.schema_version == WORLD_SCHEMA_VERSION:
+        if self.schema_version in {RIGID_CONTACT_WORLD_SCHEMA_VERSION, WORLD_SCHEMA_VERSION}:
             kind_requirements[EntityKind.RIGID_BODY] = CapabilityId("state.rigid_body@1")
         existing_ids = {item.capability for item in requirements}
         for entity in entities:
@@ -473,6 +564,16 @@ class WorldSpec:
             if capability is not None and capability not in existing_ids:
                 requirements += (CapabilityRequirement(capability),)
                 existing_ids.add(capability)
+            if entity.camera is not None:
+                modality_capabilities = {
+                    CameraModality.RGB: CapabilityId("sensor.camera.rgb@1"),
+                    CameraModality.DEPTH: CapabilityId("sensor.camera.depth@1"),
+                }
+                for modality in entity.camera.modalities:
+                    modality_capability = modality_capabilities[modality]
+                    if modality_capability not in existing_ids:
+                        requirements += (CapabilityRequirement(modality_capability),)
+                        existing_ids.add(modality_capability)
             if (
                 entity.deformable is not None
                 and entity.deformable.self_collision

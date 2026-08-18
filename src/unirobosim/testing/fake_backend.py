@@ -20,6 +20,7 @@ from unirobosim.api.capabilities import (
     CapabilitySet,
     NegotiationReport,
 )
+from unirobosim.api.debug import DebugBatch, DebugPrimitive, DebugPublishReport
 from unirobosim.api.errors import (
     CapabilityNegotiationError,
     CommandError,
@@ -42,6 +43,8 @@ from unirobosim.api.reports import (
     ProviderDescriptor,
     ResetResult,
     RigidBodyState,
+    SensorChannel,
+    SensorSample,
 )
 from unirobosim.api.specs import (
     ArticulationCommand,
@@ -53,6 +56,7 @@ from unirobosim.api.specs import (
 )
 from unirobosim.api.values import (
     ArrayValue,
+    CameraModality,
     CommandMode,
     EntityHandle,
     EntityKind,
@@ -134,14 +138,34 @@ FAKE_CAPABILITIES = CapabilitySet(
             FrozenMap({"modes": ["position", "velocity", "force"], "frame": "world"}),
             limitations=("independent particle control only",),
         ),
+        CapabilityDeclaration(
+            CapabilityId("sensor.camera@1"),
+            FrozenMap({"schedule": "synchronous", "pose_frame": "environment-local-world"}),
+            limitations=("deterministic test pattern; not a rendered image",),
+        ),
+        CapabilityDeclaration(
+            CapabilityId("sensor.camera.rgb@1"),
+            FrozenMap({"dtype": "uint8", "layout": "environment-height-width-rgb"}),
+            limitations=("deterministic test pattern; not a rendered image",),
+        ),
+        CapabilityDeclaration(
+            CapabilityId("sensor.camera.depth@1"),
+            FrozenMap({"dtype": "float32", "unit": "metre", "no_hit": 0.0}),
+            limitations=("deterministic test pattern; not ray-cast depth",),
+        ),
+        CapabilityDeclaration(
+            CapabilityId("debug.sink.native_overlay@1"),
+            FrozenMap({"primitives": ["point_set", "line_list"], "stable_ids": True}),
+            limitations=("in-memory reference endpoint; not a renderer overlay",),
+        ),
     )
 )
 
 FAKE_DESCRIPTOR = ProviderDescriptor(
     provider_id="reference.fake",
     display_name="UniRoboSim Fake Reference Backend",
-    version="0.3.0a0",
-    contract_version="v0alpha3",
+    version="0.4.0a0",
+    contract_version="v0alpha4",
     capabilities=FAKE_CAPABILITIES,
     metadata=FrozenMap({"purpose": "contract-testing-only"}),
 )
@@ -368,6 +392,8 @@ class FakeWorld:
         self._articulations: dict[EntityPath, _ArticulationRuntime] = {}
         self._rigids: dict[EntityPath, _RigidRuntime] = {}
         self._points: dict[EntityPath, _PointRuntime] = {}
+        self._debug_primitives: dict[tuple[str, str], DebugPrimitive] = {}
+        self._debug_expirations: dict[tuple[str, str], int | None] = {}
         for entity in spec.entities:
             if entity.kind is EntityKind.RIGID_BODY:
                 position = list(entity.pose.position)
@@ -859,6 +885,90 @@ class FakeWorld:
             tick=self.tick,
         )
 
+    def read_sensor(self, handle: EntityHandle) -> SensorSample:
+        operation = "world.read_sensor"
+        self._ensure_ready(operation)
+        entity = self._validate_handle(handle, operation)
+        if entity.kind is not EntityKind.CAMERA_SENSOR or entity.camera is None:
+            raise CommandError("entity is not a camera sensor", operation=operation, entity_path=entity.path.value)
+        camera = entity.camera
+        environment_count = self._spec.environments.count
+        channels: list[SensorChannel] = []
+        for modality in camera.modalities:
+            if modality is CameraModality.RGB:
+                rgb: list[int] = []
+                for environment in range(environment_count):
+                    for row in range(camera.height_px):
+                        for column in range(camera.width_px):
+                            rgb.extend(
+                                (
+                                    (column * 17 + environment * 31 + self._step_index) % 256,
+                                    (row * 29 + environment * 13 + self._step_index * 3) % 256,
+                                    (column * 7 + row * 11 + self._step_index * 5) % 256,
+                                )
+                            )
+                data = ArrayValue(
+                    (environment_count, camera.height_px, camera.width_px, 3),
+                    tuple(rgb),
+                    dtype="uint8",
+                )
+            else:
+                depth = tuple(
+                    min(
+                        camera.far_plane_m,
+                        max(
+                            camera.near_plane_m,
+                            1.0 + environment * 0.1 + row * 0.002 + column * 0.001,
+                        ),
+                    )
+                    for environment in range(environment_count)
+                    for row in range(camera.height_px)
+                    for column in range(camera.width_px)
+                )
+                data = ArrayValue(
+                    (environment_count, camera.height_px, camera.width_px),
+                    depth,
+                    dtype="float32",
+                )
+            channels.append(SensorChannel(modality, data))
+        return SensorSample(handle=handle, channels=tuple(channels), tick=self.tick)
+
+    def publish_debug(self, batch: DebugBatch) -> DebugPublishReport:
+        operation = "world.publish_debug"
+        self._ensure_ready(operation)
+        if not isinstance(batch, DebugBatch):
+            raise ValidationError("publish requires a DebugBatch", operation=operation)
+        for primitive in batch.primitives:
+            if any(index >= self._spec.environments.count for index in primitive.environment_indices):
+                raise ValidationError(
+                    "debug primitive contains an out-of-range environment",
+                    operation=operation,
+                    details={"environment_indices": list(primitive.environment_indices)},
+                )
+        for primitive in batch.primitives:
+            self._debug_primitives[primitive.key] = primitive
+            self._debug_expirations[primitive.key] = (
+                None if primitive.lifetime_steps == 0 else self._step_index + primitive.lifetime_steps
+            )
+        return DebugPublishReport(len(batch.primitives), 0, len(self._debug_primitives))
+
+    def clear_debug(self, *, layer: str | None = None, primitive_id: str | None = None) -> int:
+        operation = "world.clear_debug"
+        self._ensure_ready(operation)
+        if layer is not None and (not isinstance(layer, str) or not layer):
+            raise ValidationError("debug layer must be a non-empty string", operation=operation)
+        if primitive_id is not None and (not isinstance(primitive_id, str) or not primitive_id):
+            raise ValidationError("debug primitive ID must be a non-empty string", operation=operation)
+        keys = tuple(
+            key
+            for key in self._debug_primitives
+            if (layer is None or key[0] == layer) and (primitive_id is None or key[1] == primitive_id)
+        )
+        for key in keys:
+            del self._debug_primitives[key]
+            del self._debug_expirations[key]
+        return len(keys)
+
     def step(self, count: int = 1) -> Tick:
         self._ensure_ready("world.step")
         if not isinstance(count, int) or isinstance(count, bool) or count <= 0:
@@ -940,6 +1050,14 @@ class FakeWorld:
                                 position[axis] + next_velocity[axis] * time_step for axis in range(3)
                             ]
             self._step_index += 1
+            expired = tuple(
+                key
+                for key, expiration in self._debug_expirations.items()
+                if expiration is not None and expiration <= self._step_index
+            )
+            for key in expired:
+                del self._debug_primitives[key]
+                del self._debug_expirations[key]
         return self.tick
 
     def _close(self, *, notify_session: bool) -> None:
@@ -950,6 +1068,8 @@ class FakeWorld:
         self._articulations.clear()
         self._rigids.clear()
         self._points.clear()
+        self._debug_primitives.clear()
+        self._debug_expirations.clear()
         if notify_session:
             self._session._world_closed(self)
 

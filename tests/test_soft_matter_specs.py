@@ -169,7 +169,7 @@ class SoftMatterWorldSpecTests(unittest.TestCase):
             EntitySpec(EntityPath("/gel"), EntityKind.VOLUME_DEFORMABLE, deformable=volume),
             EntitySpec(EntityPath("/water"), EntityKind.PARTICLE_FLUID, particle_fluid=fluid),
         )
-        self.assertEqual([entity.kind for entity in valid], list(EntityKind)[2:])
+        self.assertEqual([entity.kind for entity in valid], list(EntityKind)[2:5])
         invalid = (
             {"kind": EntityKind.SURFACE_DEFORMABLE},
             {"kind": EntityKind.SURFACE_DEFORMABLE, "deformable": volume},

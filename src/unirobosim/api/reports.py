@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from .capabilities import CapabilitySet
 from .errors import ValidationError
 from .frozen import FrozenMap
-from .values import ArrayValue, Tick
+from .values import ArrayValue, CameraModality, EntityHandle, Tick
 
 _PROVIDER_ID = re.compile(r"^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -255,4 +255,65 @@ class ParticleFluidState:
             self.particle_velocities_m_s,
             self.tick,
             "particle_fluid_state.validate",
+        )
+
+
+@dataclass(frozen=True)
+class SensorChannel:
+    """One named channel in a synchronous sensor sample."""
+
+    modality: CameraModality
+    data: ArrayValue
+
+    def __post_init__(self) -> None:
+        operation = "sensor_channel.validate"
+        if not isinstance(self.modality, CameraModality) or not isinstance(self.data, ArrayValue):
+            raise ValidationError("sensor channel values are invalid", operation=operation)
+        if self.modality is CameraModality.RGB:
+            valid = self.data.dtype == "uint8" and len(self.data.shape) == 4 and self.data.shape[-1] == 3
+        else:
+            valid = self.data.dtype == "float32" and len(self.data.shape) == 3
+        if not valid:
+            raise ValidationError("sensor channel shape or dtype is invalid", operation=operation)
+
+
+@dataclass(frozen=True)
+class SensorSample:
+    """Ordered camera channels sampled at one simulation tick."""
+
+    handle: EntityHandle
+    channels: tuple[SensorChannel, ...]
+    tick: Tick
+
+    def __post_init__(self) -> None:
+        operation = "sensor_sample.validate"
+        try:
+            channels = tuple(self.channels)
+        except TypeError as exc:
+            raise ValidationError("sensor channels must be iterable", operation=operation) from exc
+        if (
+            not isinstance(self.handle, EntityHandle)
+            or not channels
+            or any(not isinstance(channel, SensorChannel) for channel in channels)
+            or len({channel.modality for channel in channels}) != len(channels)
+            or not isinstance(self.tick, Tick)
+        ):
+            raise ValidationError("sensor sample values are invalid", operation=operation)
+        batch = channels[0].data.shape[0]
+        height = channels[0].data.shape[1]
+        width = channels[0].data.shape[2]
+        if any(channel.data.shape[:3] != (batch, height, width) for channel in channels):
+            raise ValidationError("sensor channel batches and resolutions must match", operation=operation)
+        object.__setattr__(self, "channels", channels)
+
+    def channel(self, modality: CameraModality) -> ArrayValue:
+        if not isinstance(modality, CameraModality):
+            raise ValidationError("channel lookup requires a CameraModality", operation="sensor_sample.channel")
+        for channel in self.channels:
+            if channel.modality is modality:
+                return channel.data
+        raise ValidationError(
+            "sensor sample does not contain the requested modality",
+            operation="sensor_sample.channel",
+            details={"modality": modality.value},
         )

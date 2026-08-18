@@ -22,6 +22,14 @@ class EntityKind(StrEnum):
     SURFACE_DEFORMABLE = "surface_deformable"
     VOLUME_DEFORMABLE = "volume_deformable"
     PARTICLE_FLUID = "particle_fluid"
+    CAMERA_SENSOR = "camera_sensor"
+
+
+class CameraModality(StrEnum):
+    """Portable camera channels supported by the M3 contract."""
+
+    RGB = "rgb"
+    DEPTH = "depth"
 
 
 class CommandMode(StrEnum):
@@ -164,7 +172,7 @@ class ArrayValue:
             raise _validation("array shape and values must be iterable", "array.validate") from exc
         if not shape or any(not isinstance(size, int) or isinstance(size, bool) or size <= 0 for size in shape):
             raise _validation("array shape must contain positive integer dimensions", "array.validate", shape=shape)
-        if self.dtype not in {"float32", "float64", "int32", "int64", "bool"}:
+        if self.dtype not in {"float32", "float64", "int32", "int64", "uint8", "bool"}:
             raise _validation("unsupported array dtype", "array.validate", dtype=self.dtype)
         if self.device != "cpu" or self.ownership is not ArrayOwnership.OWNED:
             raise _validation(
@@ -188,9 +196,11 @@ class ArrayValue:
             values = tuple(float(value) for value in raw_values)
             if not all(math.isfinite(value) for value in values):
                 raise _validation("floating array values must be finite", "array.validate", dtype=self.dtype)
-        elif self.dtype.startswith("int"):
+        elif self.dtype.startswith("int") or self.dtype == "uint8":
             if any(isinstance(value, bool) or not isinstance(value, int) for value in raw_values):
                 raise _validation("integer array contains a non-integer value", "array.validate", dtype=self.dtype)
+            if self.dtype == "uint8" and any(value < 0 or value > 255 for value in raw_values):
+                raise _validation("uint8 array values must be in [0, 255]", "array.validate", dtype=self.dtype)
             values = raw_values
         else:
             if any(not isinstance(value, bool) for value in raw_values):
