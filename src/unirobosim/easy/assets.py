@@ -20,7 +20,7 @@ def _invalid(message: str, **details: object) -> ValidationError:
     return ValidationError(message, operation="easy.asset_bundle", details=details)
 
 
-def _infer_media_type(uri: str) -> str:
+def infer_media_type(uri: str) -> str:
     suffix = Path(urlparse(uri).path).suffix.lower()
     return {
         ".usd": "model/vnd.usd",
@@ -30,6 +30,7 @@ def _infer_media_type(uri: str) -> str:
         ".sdf": "model/vnd.sdf+xml",
         ".xml": "application/xml",
         ".mjcf": "model/vnd.mujoco.mjcf+xml",
+        ".obj": "model/obj",
     }.get(suffix, "application/octet-stream")
 
 
@@ -64,7 +65,7 @@ def _normalize_variants(values: object, *, base_directory: Path | None = None) -
             uri = str((base_directory / uri).resolve())
         normalized[selector] = {
             "uri": uri,
-            "media_type": _infer_media_type(uri) if media_type is None else media_type,
+            "media_type": infer_media_type(uri) if media_type is None else media_type,
         }
         if sha256 is not None:
             normalized[selector]["sha256"] = sha256.lower()
@@ -79,6 +80,7 @@ class ResolvedAsset:
     media_type: str
     sha256: str | None = None
     source_manifest: str | None = None
+    conversion: FrozenMap | None = None
 
     def to_dict(self) -> dict[str, object]:
         result: dict[str, object] = {
@@ -91,6 +93,8 @@ class ResolvedAsset:
             result["sha256"] = self.sha256
         if self.source_manifest is not None:
             result["source_manifest"] = self.source_manifest
+        if self.conversion is not None:
+            result["conversion"] = self.conversion.to_dict()
         return result
 
 
@@ -176,6 +180,37 @@ class AssetBundle:
             media_type,
             None if expected_hash is None else str(expected_hash),
             self.source_manifest,
+        )
+
+    def source_for_conversion(self) -> ResolvedAsset:
+        """Return the canonical/first USD variant when a native target is absent."""
+
+        selectors = tuple(self.variants)
+        preferred = tuple(selector for selector in ("source", "canonical", "usd", "isaaclab") if selector in selectors)
+        candidates = (*preferred, *(selector for selector in selectors if selector not in preferred))
+        for selector in candidates:
+            variant = self.variants[selector]
+            assert isinstance(variant, FrozenMap)
+            uri = variant["uri"]
+            media_type = variant["media_type"]
+            assert isinstance(uri, str) and isinstance(media_type, str)
+            if media_type != "model/vnd.usd":
+                continue
+            expected_hash = variant.get("sha256")
+            if expected_hash is not None:
+                self._verify_local_hash(uri, str(expected_hash), selector)
+            return ResolvedAsset(
+                self.logical_name,
+                selector,
+                uri,
+                media_type,
+                None if expected_hash is None else str(expected_hash),
+                self.source_manifest,
+            )
+        raise _invalid(
+            "logical asset has no USD source variant for conversion",
+            logical_name=self.logical_name,
+            available_selectors=selectors,
         )
 
     def _verify_local_hash(self, uri: str, expected: str, selector: str) -> None:

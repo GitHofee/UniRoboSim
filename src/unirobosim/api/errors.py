@@ -73,6 +73,10 @@ class WorldBuildError(UniRoboSimError):
     code = "unirobosim.world.build_failed"
 
 
+class AssetConversionError(UniRoboSimError):
+    code = "unirobosim.asset.conversion_failed"
+
+
 class EntityNotFoundError(UniRoboSimError):
     code = "unirobosim.entity.not_found"
 

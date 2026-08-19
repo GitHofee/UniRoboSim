@@ -6,6 +6,10 @@ from .easy import (
     ASSET_BUNDLE_SCHEMA,
     Articulation,
     AssetBundle,
+    AssetConversionRequest,
+    AssetConversionResult,
+    AssetConverter,
+    AssetPolicy,
     Camera,
     Deformable,
     Entity,
@@ -14,16 +18,21 @@ from .easy import (
     RigidBody,
     Sim,
     SimState,
+    infer_media_type,
 )
 from .runtime import ProviderFactory, ProviderRegistry
 
-__version__ = "0.5.0a0"
+__version__ = "0.6.0a0"
 
 __all__ = [
     *_api_all,
     "ASSET_BUNDLE_SCHEMA",
     "Articulation",
     "AssetBundle",
+    "AssetConversionRequest",
+    "AssetConversionResult",
+    "AssetConverter",
+    "AssetPolicy",
     "Camera",
     "Deformable",
     "Entity",
@@ -35,4 +44,5 @@ __all__ = [
     "Sim",
     "SimState",
     "__version__",
+    "infer_media_type",
 ]

@@ -37,6 +37,7 @@ from .debug import (
     replay_debug_trace,
 )
 from .errors import (
+    AssetConversionError,
     CapabilityNegotiationError,
     CommandError,
     EntityNotFoundError,
@@ -118,6 +119,7 @@ __all__ = [
     "ArrayValue",
     "ArticulationCommand",
     "ArticulationState",
+    "AssetConversionError",
     "BuildFingerprint",
     "BuildReport",
     "BoxGeometrySpec",

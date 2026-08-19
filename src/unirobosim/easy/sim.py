@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import replace
 from enum import StrEnum
 from importlib import metadata
+from os import PathLike
 from typing import Any, cast
 
 from unirobosim.api.capabilities import CapabilityId, CapabilityRequirement
 from unirobosim.api.debug import DebugBatch, DebugPrimitive, DebugPublishReport
 from unirobosim.api.errors import (
+    AssetConversionError,
     LifecycleError,
     ProviderSelectionError,
     UnsupportedCapabilityError,
@@ -57,7 +59,15 @@ from unirobosim.api.values import (
     Tick,
 )
 
-from .assets import AssetBundle
+from .assets import AssetBundle, ResolvedAsset, infer_media_type
+from .conversion import (
+    AssetConversionRequest,
+    AssetConverter,
+    AssetPolicy,
+    default_asset_cache_directory,
+    discover_asset_converters,
+    select_asset_converter,
+)
 
 
 class SimState(StrEnum):
@@ -381,6 +391,9 @@ class Sim:
         time_step_seconds: float = 1.0 / 60.0,
         gravity_m_s2: Sequence[float] = (0.0, 0.0, -9.81),
         headless: bool = True,
+        asset_policy: AssetPolicy | str = AssetPolicy.CONVERT_IF_NEEDED,
+        asset_cache_directory: str | PathLike[str] | None = None,
+        asset_converters: Iterable[AssetConverter] | None = None,
     ) -> None:
         if not isinstance(backend, str) or not backend:
             raise _invalid("backend must be a non-empty string", "easy.sim.init")
@@ -388,6 +401,20 @@ class Sim:
             raise _invalid("provider must satisfy the Provider protocol", "easy.sim.init")
         if headless is not True:
             raise _invalid("the current Easy API compatibility profile is headless", "easy.sim.init")
+        try:
+            resolved_policy = asset_policy if isinstance(asset_policy, AssetPolicy) else AssetPolicy(asset_policy)
+        except ValueError as exc:
+            raise _invalid("asset_policy must be prebuilt_only or convert_if_needed", "easy.sim.init") from exc
+        if asset_cache_directory is not None and not isinstance(asset_cache_directory, (str, PathLike)):
+            raise _invalid("asset_cache_directory must be a non-empty path", "easy.sim.init")
+        asset_cache_path = None if asset_cache_directory is None else str(asset_cache_directory)
+        if asset_cache_path is not None and not asset_cache_path.strip():
+            raise _invalid("asset_cache_directory must be a non-empty path", "easy.sim.init")
+        configured_converters = None if asset_converters is None else tuple(asset_converters)
+        if configured_converters is not None and any(
+            not isinstance(converter, AssetConverter) for converter in configured_converters
+        ):
+            raise _invalid("asset_converters must satisfy AssetConverter", "easy.sim.init")
         self._backend = backend
         self._provider = provider
         self._world_id = world_id
@@ -397,6 +424,10 @@ class Sim:
         self._state = SimState.CONFIGURING
         self._entities: dict[EntityPath, Entity] = {}
         self._asset_bundles: dict[EntityPath, AssetBundle] = {}
+        self._asset_conversion_options: dict[EntityPath, FrozenMap] = {}
+        self._asset_policy = resolved_policy
+        self._asset_cache_directory = asset_cache_path or default_asset_cache_directory()
+        self._asset_converters = configured_converters
         self._requirements: dict[CapabilityId, CapabilityRequirement] = {}
         self._session: Session | None = None
         self._world: World | None = None
@@ -479,6 +510,7 @@ class Sim:
         *,
         asset_uri: str | None = None,
         asset: AssetBundle | None = None,
+        conversion_options: Mapping[str, object] | None = None,
         position_m: Sequence[float] = (0.0, 0.0, 0.0),
         orientation_xyzw: Sequence[float] = (0.0, 0.0, 0.0, 1.0),
     ) -> RigidBody:
@@ -496,6 +528,8 @@ class Sim:
         body = cast(RigidBody, self._add(RigidBody(self, spec)))
         if asset is not None:
             self._asset_bundles[path] = asset
+        if conversion_options is not None:
+            self._asset_conversion_options[path] = FrozenMap(conversion_options)
         return body
 
     def add_articulation(
@@ -673,13 +707,10 @@ class Sim:
         resolved_entities: list[EntitySpec] = []
         for entity in self._entities.values():
             bundle = self._asset_bundles.get(entity.path)
-            if bundle is None:
+            if bundle is None and entity._spec.asset_uri is None:
                 resolved_entities.append(entity._spec)
                 continue
-            resolved = bundle.resolve(
-                backend=self._backend,
-                provider_id=provider.descriptor.provider_id,
-            )
+            resolved = self._resolve_asset(entity._spec, bundle, provider)
             metadata_values = entity._spec.metadata.to_dict()
             metadata_values["unirobosim_asset"] = resolved.to_dict()
             resolved_entities.append(
@@ -708,6 +739,107 @@ class Sim:
         self._world_spec = spec
         self._state = SimState.RUNNING
         return world.build_report
+
+    @staticmethod
+    def _supported_asset_media_types(provider: Provider, kind: EntityKind) -> tuple[str, ...] | None:
+        declaration = provider.descriptor.capabilities.get(CapabilityId("asset.formats@1"))
+        if declaration is None:
+            return None
+        raw = declaration.properties.get(kind.value)
+        if raw is None:
+            return ()
+        if not isinstance(raw, tuple) or any(not isinstance(value, str) for value in raw):
+            raise AssetConversionError(
+                "provider asset format declaration is invalid",
+                operation="easy.asset.formats",
+                backend_id=provider.descriptor.provider_id,
+                details={"entity_kind": kind.value, "declared": raw},
+            )
+        return raw
+
+    def _resolve_asset(
+        self,
+        entity: EntitySpec,
+        bundle: AssetBundle | None,
+        provider: Provider,
+    ) -> ResolvedAsset:
+        if bundle is None:
+            assert entity.asset_uri is not None
+            source = ResolvedAsset(
+                logical_name=entity.path.value,
+                selector="direct",
+                uri=entity.asset_uri,
+                media_type=infer_media_type(entity.asset_uri),
+            )
+        else:
+            try:
+                source = bundle.resolve(backend=self._backend, provider_id=provider.descriptor.provider_id)
+            except ValidationError as native_resolution_error:
+                if self._asset_policy is AssetPolicy.PREBUILT_ONLY:
+                    raise
+                try:
+                    source = bundle.source_for_conversion()
+                except ValidationError:
+                    # Preserve the primary error when the bundle contains neither
+                    # a native variant nor a canonical USD conversion source.
+                    raise native_resolution_error from None
+
+        supported = self._supported_asset_media_types(provider, entity.kind)
+        if supported is None or source.media_type in supported:
+            return source
+        if self._asset_policy is AssetPolicy.PREBUILT_ONLY:
+            raise AssetConversionError(
+                "selected provider does not accept this asset format and conversion is disabled",
+                operation="easy.asset.resolve",
+                backend_id=provider.descriptor.provider_id,
+                entity_path=entity.path.value,
+                details={"source": source.to_dict(), "supported_media_types": supported},
+            )
+
+        request = AssetConversionRequest(
+            source_uri=source.uri,
+            source_media_type=source.media_type,
+            target_backend=self._backend,
+            provider_id=provider.descriptor.provider_id,
+            entity_kind=entity.kind,
+            cache_directory=self._asset_cache_directory,
+            options=self._asset_conversion_options.get(entity.path, FrozenMap()),
+        )
+        converters = self._asset_converters
+        if converters is None:
+            converters = discover_asset_converters()
+            self._asset_converters = converters
+        converter = select_asset_converter(request, converters)
+        try:
+            converted = converter.convert(request)
+        except AssetConversionError:
+            raise
+        except Exception as exc:
+            raise AssetConversionError(
+                "asset converter failed",
+                operation="easy.asset.convert",
+                backend_id=provider.descriptor.provider_id,
+                entity_path=entity.path.value,
+                details={"converter_id": converter.converter_id, "request": request.to_dict()},
+                cause=exc,
+            ) from exc
+        if converted.media_type not in supported:
+            raise AssetConversionError(
+                "asset converter returned a format unsupported by the provider",
+                operation="easy.asset.convert",
+                backend_id=provider.descriptor.provider_id,
+                entity_path=entity.path.value,
+                details={"conversion": converted.to_dict(), "supported_media_types": supported},
+            )
+        return ResolvedAsset(
+            logical_name=source.logical_name,
+            selector=f"converted:{converted.converter_id}",
+            uri=converted.uri,
+            media_type=converted.media_type,
+            sha256=converted.output_sha256,
+            source_manifest=source.source_manifest,
+            conversion=FrozenMap(converted.to_dict()),
+        )
 
     def reset(self, environments: Iterable[int] | None = None) -> ResetResult:
         return self.world.reset(environments)
