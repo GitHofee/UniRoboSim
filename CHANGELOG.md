@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.7.0 - 2026-08-19
+
+- Publish the accepted EasyAPI, RuntimeAPI, scene-control, debug and asset-preparation
+  feature set as the coordinated 0.7 release.
+- Preserve `unirobosim.world/v0alpha4` as the tested wire contract; no schema
+  migration is hidden in the package-version change.
+- Align the Fake provider identity with the released Core package.
+
 ## 0.7.0a0 - 2026-08-19
 
 - Separate provider format compatibility from semantic physics readiness through

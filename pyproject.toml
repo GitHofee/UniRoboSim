@@ -4,13 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "unirobosim"
-version = "0.7.0a0"
+version = "0.7.0"
 description = "Backend-neutral contracts and runtime foundation for robot simulators"
 readme = "README.md"
 requires-python = ">=3.11,<3.13"
 authors = [{name = "UniRoboSim Contributors"}]
 classifiers = [
-  "Development Status :: 3 - Alpha",
+  "Development Status :: 4 - Beta",
   "Intended Audience :: Developers",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.11",

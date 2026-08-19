@@ -1,4 +1,4 @@
-"""Stable M4 alpha public API."""
+"""Stable UniRoboSim 0.7 public API."""
 
 from .capabilities import (
     CapabilityDeclaration,

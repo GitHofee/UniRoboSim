@@ -79,11 +79,7 @@ def run(backend: str, manifest: Path, output: Path, *, xs: tuple[float, ...]) ->
     if not xs:
         raise ValueError("at least one x candidate is required")
     close_angles = (0.45, 0.48, 0.50, 0.52, 0.55)
-    candidates = tuple(
-        ((x, 0.0, CUBE_SIZE_M / 2.0), close_angle)
-        for x in xs
-        for close_angle in close_angles
-    )
+    candidates = tuple(((x, 0.0, CUBE_SIZE_M / 2.0), close_angle) for x in xs for close_angle in close_angles)
     sim = Sim(
         backend=backend,
         world_id="franka-grasp-calibration",

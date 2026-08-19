@@ -139,6 +139,7 @@ def _result(request: AssetNormalizationRequest) -> AssetNormalizationResult:
         warnings=("derived collision",),
     )
 
+
 def test_supported_usd_is_semantically_normalized(tmp_path: Path) -> None:
     source = tmp_path / "visual-only.usd"
     source.write_text("#usda 1.0\n", encoding="utf-8")

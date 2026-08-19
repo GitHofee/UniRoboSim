@@ -114,9 +114,7 @@ def compare(inputs: dict[str, Path], *, require_video: bool) -> dict[str, object
                 joint_b = b["joint_positions"]
                 arm_errors.extend(abs(x - y) for x, y in zip(joint_a[:7], joint_b[:7], strict=True))
                 gripper_errors.extend(abs(x - y) for x, y in zip(joint_a[7:], joint_b[7:], strict=True))
-                differences = [
-                    x - y for x, y in zip(a["cube_position_m"], b["cube_position_m"], strict=True)
-                ]
+                differences = [x - y for x, y in zip(a["cube_position_m"], b["cube_position_m"], strict=True)]
                 cube_component_errors.extend(differences)
                 distance = math.sqrt(sum(value * value for value in differences))
                 cube_distances.append(distance)

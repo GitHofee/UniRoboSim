@@ -1,0 +1,149 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 640" width="1100" height="640" font-family="'PingFang SC','Microsoft YaHei','Helvetica Neue',Arial,sans-serif" role="img" aria-labelledby="title desc">
+  <title id="title">UniRoboSim 架构</title>
+  <desc id="desc">应用、FastSim、智能体和自定义框架通过 EasyAPI、MCP 与 RuntimeAPI 使用 UniRoboSim。可移植核心通过 Provider、Session 和 World 适配器接口连接 Isaac Lab、MuJoCo、PyBullet 及其他仿真后端。</desc>
+  <defs>
+    <marker id="arrow" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L0,6 L8,3 z" fill="#5a6a7e"/>
+    </marker>
+    <marker id="arrow-purple" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L0,6 L8,3 z" fill="#7c3aed"/>
+    </marker>
+    <filter id="shadow" x="-5%" y="-5%" width="110%" height="118%">
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#00000018"/>
+    </filter>
+    <linearGradient id="grad-consumer" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#eff6ff"/>
+      <stop offset="100%" stop-color="#dbeafe"/>
+    </linearGradient>
+    <linearGradient id="grad-api" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#f0fdf4"/>
+      <stop offset="100%" stop-color="#dcfce7"/>
+    </linearGradient>
+    <linearGradient id="grad-core" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#fffbeb"/>
+      <stop offset="100%" stop-color="#fef3c7"/>
+    </linearGradient>
+    <linearGradient id="grad-spi" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#faf5ff"/>
+      <stop offset="100%" stop-color="#ede9fe"/>
+    </linearGradient>
+    <linearGradient id="grad-backend" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#fff1f2"/>
+      <stop offset="100%" stop-color="#ffe4e6"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1100" height="760" fill="#f8fafc"/>
+
+  <!-- Layer 1: Consumers -->
+  <rect x="30" y="20" width="1040" height="100" rx="8" fill="url(#grad-consumer)" stroke="#3b82f6" stroke-width="1.5" filter="url(#shadow)"/>
+  <rect x="30" y="20" width="1040" height="30" rx="8" fill="#3b82f6"/>
+  <rect x="30" y="38" width="1040" height="12" fill="#3b82f6"/>
+  <text x="550" y="40" text-anchor="middle" fill="white" font-size="13" font-weight="bold" letter-spacing="1">使用者层</text>
+
+  <g fill="white" stroke="#93c5fd" stroke-width="1.2">
+    <rect x="55" y="61" width="230" height="44" rx="6"/>
+    <rect x="305" y="61" width="230" height="44" rx="6"/>
+    <rect x="555" y="61" width="230" height="44" rx="6"/>
+    <rect x="805" y="61" width="240" height="44" rx="6"/>
+  </g>
+  <text x="170" y="79" text-anchor="middle" fill="#1e40af" font-size="12" font-weight="bold">Applications</text>
+  <text x="170" y="96" text-anchor="middle" fill="#6b7280" font-size="10">研究与评测工作流</text>
+  <text x="420" y="79" text-anchor="middle" fill="#1e40af" font-size="12" font-weight="bold">FastSim</text>
+  <text x="420" y="96" text-anchor="middle" fill="#6b7280" font-size="10">可配置的仿真开发工作流</text>
+  <text x="670" y="79" text-anchor="middle" fill="#1e40af" font-size="12" font-weight="bold">Agents / Policies</text>
+  <text x="670" y="96" text-anchor="middle" fill="#6b7280" font-size="10">通过 MCP 接入智能体与策略</text>
+  <text x="925" y="79" text-anchor="middle" fill="#1e40af" font-size="12" font-weight="bold">Custom Frameworks</text>
+  <text x="925" y="96" text-anchor="middle" fill="#6b7280" font-size="10">领域运行时与服务</text>
+
+  <line x1="550" y1="120" x2="550" y2="143" stroke="#5a6a7e" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- Layer 2: Public APIs -->
+  <rect x="30" y="145" width="1040" height="100" rx="8" fill="url(#grad-api)" stroke="#22c55e" stroke-width="1.5" filter="url(#shadow)"/>
+  <rect x="30" y="145" width="1040" height="30" rx="8" fill="#16a34a"/>
+  <rect x="30" y="163" width="1040" height="12" fill="#16a34a"/>
+  <text x="550" y="165" text-anchor="middle" fill="white" font-size="13" font-weight="bold" letter-spacing="1">公共接口层</text>
+
+  <g fill="white" stroke="#86efac" stroke-width="1.2">
+    <rect x="55" y="186" width="230" height="44" rx="6"/>
+    <rect x="305" y="186" width="230" height="44" rx="6"/>
+    <rect x="555" y="186" width="230" height="44" rx="6"/>
+    <rect x="805" y="186" width="240" height="44" rx="6"/>
+  </g>
+  <text x="170" y="204" text-anchor="middle" fill="#15803d" font-size="12" font-weight="bold">EasyAPI</text>
+  <text x="170" y="221" text-anchor="middle" fill="#6b7280" font-size="10">构建场景并切换仿真后端</text>
+  <text x="420" y="204" text-anchor="middle" fill="#15803d" font-size="12" font-weight="bold">MCP</text>
+  <text x="420" y="221" text-anchor="middle" fill="#6b7280" font-size="10">连接智能体、证据与仿真</text>
+  <text x="670" y="204" text-anchor="middle" fill="#15803d" font-size="12" font-weight="bold">RuntimeAPI</text>
+  <text x="670" y="221" text-anchor="middle" fill="#6b7280" font-size="10">框架生命周期与类型化输入输出</text>
+  <text x="925" y="204" text-anchor="middle" fill="#15803d" font-size="12" font-weight="bold">Studio</text>
+  <text x="925" y="221" text-anchor="middle" fill="#6b7280" font-size="10">浏览器串流与场景控制</text>
+
+  <line x1="550" y1="245" x2="550" y2="268" stroke="#5a6a7e" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- Layer 3: Portable Core -->
+  <rect x="30" y="270" width="1040" height="100" rx="8" fill="url(#grad-core)" stroke="#f59e0b" stroke-width="1.5" filter="url(#shadow)"/>
+  <rect x="30" y="270" width="1040" height="30" rx="8" fill="#d97706"/>
+  <rect x="30" y="288" width="1040" height="12" fill="#d97706"/>
+  <text x="550" y="290" text-anchor="middle" fill="white" font-size="13" font-weight="bold" letter-spacing="1">可移植核心层</text>
+
+  <g fill="white" stroke="#fbbf24" stroke-width="1.2">
+    <rect x="50" y="311" width="240" height="44" rx="7"/>
+    <rect x="310" y="311" width="240" height="44" rx="7"/>
+    <rect x="570" y="311" width="240" height="44" rx="7"/>
+    <rect x="830" y="311" width="240" height="44" rx="7"/>
+  </g>
+  <text x="170" y="329" text-anchor="middle" fill="#b45309" font-size="12" font-weight="bold">合同与能力</text>
+  <text x="430" y="329" text-anchor="middle" fill="#b45309" font-size="12" font-weight="bold">场景与实体</text>
+  <text x="690" y="329" text-anchor="middle" fill="#b45309" font-size="12" font-weight="bold">资产</text>
+  <text x="950" y="329" text-anchor="middle" fill="#b45309" font-size="12" font-weight="bold">可观测性</text>
+  <text x="170" y="346" text-anchor="middle" fill="#6b7280" font-size="10">可移植数据结构与能力合同</text>
+  <text x="430" y="346" text-anchor="middle" fill="#6b7280" font-size="10">统一实体、状态与控制</text>
+  <text x="690" y="346" text-anchor="middle" fill="#6b7280" font-size="10">资产选择与格式转换</text>
+  <text x="950" y="346" text-anchor="middle" fill="#6b7280" font-size="10">传感器、调试轨迹与证据</text>
+
+  <line x1="550" y1="370" x2="550" y2="393" stroke="#5a6a7e" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- Layer 4: Adapter SPI -->
+  <rect x="30" y="395" width="1040" height="100" rx="8" fill="url(#grad-spi)" stroke="#8b5cf6" stroke-width="1.5" filter="url(#shadow)"/>
+  <rect x="30" y="395" width="1040" height="30" rx="8" fill="#7c3aed"/>
+  <rect x="30" y="413" width="1040" height="12" fill="#7c3aed"/>
+  <text x="550" y="415" text-anchor="middle" fill="white" font-size="13" font-weight="bold" letter-spacing="1">适配器接口层</text>
+
+  <g fill="white" stroke="#c4b5fd" stroke-width="1.2">
+    <rect x="115" y="436" width="220" height="44" rx="7"/>
+    <rect x="440" y="436" width="220" height="44" rx="7"/>
+    <rect x="765" y="436" width="220" height="44" rx="7"/>
+  </g>
+  <text x="225" y="454" text-anchor="middle" fill="#6d28d9" font-size="12" font-weight="bold">Provider</text>
+  <text x="225" y="471" text-anchor="middle" fill="#6b7280" font-size="10">后端发现与能力声明</text>
+  <text x="550" y="454" text-anchor="middle" fill="#6d28d9" font-size="12" font-weight="bold">Session</text>
+  <text x="550" y="471" text-anchor="middle" fill="#6b7280" font-size="10">能力协商与资源管理</text>
+  <text x="875" y="454" text-anchor="middle" fill="#6d28d9" font-size="12" font-weight="bold">World / SceneControlWorld</text>
+  <text x="875" y="471" text-anchor="middle" fill="#6b7280" font-size="10">仿真生命周期与类型化输入输出</text>
+  <line x1="335" y1="458" x2="432" y2="458" stroke="#7c3aed" stroke-width="1.5" marker-end="url(#arrow-purple)"/>
+  <line x1="660" y1="458" x2="757" y2="458" stroke="#7c3aed" stroke-width="1.5" marker-end="url(#arrow-purple)"/>
+
+  <line x1="550" y1="495" x2="550" y2="518" stroke="#5a6a7e" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- Layer 5: Backends -->
+  <rect x="30" y="520" width="1040" height="100" rx="8" fill="url(#grad-backend)" stroke="#e11d48" stroke-width="1.5" filter="url(#shadow)"/>
+  <rect x="30" y="520" width="1040" height="30" rx="8" fill="#e11d48"/>
+  <rect x="30" y="538" width="1040" height="12" fill="#e11d48"/>
+  <text x="550" y="540" text-anchor="middle" fill="white" font-size="13" font-weight="bold" letter-spacing="1">仿真后端层</text>
+
+  <g fill="white" stroke="#fda4af" stroke-width="1.2">
+    <rect x="55" y="561" width="230" height="44" rx="7"/>
+    <rect x="305" y="561" width="230" height="44" rx="7"/>
+    <rect x="555" y="561" width="230" height="44" rx="7"/>
+    <rect x="805" y="561" width="240" height="44" rx="7" stroke-dasharray="5 4"/>
+  </g>
+  <text x="170" y="579" text-anchor="middle" fill="#be123c" font-size="12" font-weight="bold">Isaac Lab 3.0</text>
+  <text x="170" y="596" text-anchor="middle" fill="#6b7280" font-size="10">基于 Isaac Sim 6.0 的完整物理能力</text>
+  <text x="420" y="579" text-anchor="middle" fill="#be123c" font-size="12" font-weight="bold">MuJoCo 3.11</text>
+  <text x="420" y="596" text-anchor="middle" fill="#6b7280" font-size="10">通用刚体与铰接体能力</text>
+  <text x="670" y="579" text-anchor="middle" fill="#be123c" font-size="12" font-weight="bold">PyBullet 3.2.7</text>
+  <text x="670" y="596" text-anchor="middle" fill="#6b7280" font-size="10">通用刚体与铰接体能力</text>
+  <text x="925" y="579" text-anchor="middle" fill="#be123c" font-size="12" font-weight="bold">其他仿真器</text>
+  <text x="925" y="596" text-anchor="middle" fill="#6b7280" font-size="10">独立适配器包</text>
+</svg>
