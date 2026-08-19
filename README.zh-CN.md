@@ -53,8 +53,8 @@ Core 无第三方运行时依赖，支持 Python `>=3.11,<3.13`。
 
 ```bash
 # MuJoCo / Python 3.12
-git clone https://github.com/GitHofee/UniRoboSim-mujuco.git
-python -m pip install ./UniRoboSim-mujuco
+git clone https://github.com/GitHofee/UniRoboSim-mujoco.git
+python -m pip install ./UniRoboSim-mujoco
 
 # Isaac Lab / Python 3.12；先安装已验证的 NVIDIA SDK 运行栈
 git clone https://github.com/GitHofee/UniRoboSim-isaaclab.git

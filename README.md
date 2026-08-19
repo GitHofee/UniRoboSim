@@ -53,8 +53,8 @@ Install Core and the selected adapter in the same environment after its native S
 
 ```bash
 # MuJoCo / Python 3.12
-git clone https://github.com/GitHofee/UniRoboSim-mujuco.git
-python -m pip install ./UniRoboSim-mujuco
+git clone https://github.com/GitHofee/UniRoboSim-mujoco.git
+python -m pip install ./UniRoboSim-mujoco
 
 # Isaac Lab / Python 3.12; install the verified NVIDIA SDK stack first
 git clone https://github.com/GitHofee/UniRoboSim-isaaclab.git
