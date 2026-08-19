@@ -9,6 +9,10 @@ from .easy import (
     AssetConversionRequest,
     AssetConversionResult,
     AssetConverter,
+    AssetNormalizationInspection,
+    AssetNormalizationRequest,
+    AssetNormalizationResult,
+    AssetNormalizer,
     AssetPolicy,
     Camera,
     Deformable,
@@ -22,7 +26,7 @@ from .easy import (
 )
 from .runtime import ProviderFactory, ProviderRegistry
 
-__version__ = "0.6.0a0"
+__version__ = "0.7.0a0"
 
 __all__ = [
     *_api_all,
@@ -32,6 +36,10 @@ __all__ = [
     "AssetConversionRequest",
     "AssetConversionResult",
     "AssetConverter",
+    "AssetNormalizationInspection",
+    "AssetNormalizationRequest",
+    "AssetNormalizationResult",
+    "AssetNormalizer",
     "AssetPolicy",
     "Camera",
     "Deformable",

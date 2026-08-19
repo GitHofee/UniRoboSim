@@ -37,7 +37,7 @@ class ImportBoundaryTests(unittest.TestCase):
         self.assertEqual(violations, [])
 
     def test_public_import_does_not_expose_fake_backend(self) -> None:
-        self.assertEqual(unirobosim.__version__, "0.6.0a0")
+        self.assertEqual(unirobosim.__version__, "0.7.0a0")
         self.assertFalse(hasattr(unirobosim, "FakeProvider"))
         module = importlib.import_module("unirobosim.testing")
         self.assertTrue(hasattr(module, "FakeProvider"))

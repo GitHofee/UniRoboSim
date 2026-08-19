@@ -7,6 +7,12 @@ from .conversion import (
     AssetConverter,
     AssetPolicy,
 )
+from .normalization import (
+    AssetNormalizationInspection,
+    AssetNormalizationRequest,
+    AssetNormalizationResult,
+    AssetNormalizer,
+)
 from .sim import Articulation, Camera, Deformable, Entity, ParticleFluid, RigidBody, Sim, SimState
 
 __all__ = [
@@ -17,6 +23,10 @@ __all__ = [
     "AssetConverter",
     "AssetPolicy",
     "AssetBundle",
+    "AssetNormalizationInspection",
+    "AssetNormalizationRequest",
+    "AssetNormalizationResult",
+    "AssetNormalizer",
     "Camera",
     "Deformable",
     "Entity",

@@ -304,9 +304,12 @@ def test_asset_bundle_resolution_fallback_serialization_and_hash_failures(tmp_pa
 
     remote = bundle.resolve(backend="auto", provider_id="nvidia.isaaclab")
     assert remote.uri.startswith("https://") and remote.sha256 == "0" * 64
-    assert AssetBundle("xml", {"mujoco": "scene.xml"}).resolve(
-        backend="mujoco", provider_id="google-deepmind.mujoco"
-    ).media_type == "application/xml"
+    assert (
+        AssetBundle("xml", {"mujoco": "scene.xml"})
+        .resolve(backend="mujoco", provider_id="google-deepmind.mujoco")
+        .media_type
+        == "application/xml"
+    )
     assert "source_manifest" not in AssetBundle("usd", {"fake": "asset.usdc"}).to_dict()
 
     missing = AssetBundle("missing", {"fake": {"uri": str(tmp_path / "missing.usd"), "sha256": "0" * 64}})

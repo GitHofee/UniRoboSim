@@ -81,6 +81,7 @@ class ResolvedAsset:
     sha256: str | None = None
     source_manifest: str | None = None
     conversion: FrozenMap | None = None
+    normalization: FrozenMap | None = None
 
     def to_dict(self) -> dict[str, object]:
         result: dict[str, object] = {
@@ -95,6 +96,8 @@ class ResolvedAsset:
             result["source_manifest"] = self.source_manifest
         if self.conversion is not None:
             result["conversion"] = self.conversion.to_dict()
+        if self.normalization is not None:
+            result["normalization"] = self.normalization.to_dict()
         return result
 
 

@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.7.0a0 - 2026-08-19
+
+- Separate provider format compatibility from semantic physics readiness through
+  `asset.normalization@1`.
+- Add strict normalization request, inspection, result, discovery, selection, error and provenance
+  contracts without importing simulator or OpenUSD SDKs into core.
+- Let EasyAPI prepare rigid bodies and generic articulations with one `asset_options` mapping;
+  retain `conversion_options` as the rigid-body compatibility alias.
+- Preserve ready native assets and `prebuilt_only` behavior without invoking a normalizer.
+
 ## 0.4.0a0 - 2026-08-18
 
 - Add the `v0alpha4` camera entity and batch-first RGB `uint8` / depth `float32` sample contract.

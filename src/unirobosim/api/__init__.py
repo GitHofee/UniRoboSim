@@ -38,6 +38,7 @@ from .debug import (
 )
 from .errors import (
     AssetConversionError,
+    AssetNormalizationError,
     CapabilityNegotiationError,
     CommandError,
     EntityNotFoundError,
@@ -120,6 +121,7 @@ __all__ = [
     "ArticulationCommand",
     "ArticulationState",
     "AssetConversionError",
+    "AssetNormalizationError",
     "BuildFingerprint",
     "BuildReport",
     "BoxGeometrySpec",

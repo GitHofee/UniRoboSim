@@ -13,6 +13,7 @@ from unirobosim.api.capabilities import CapabilityId, CapabilityRequirement
 from unirobosim.api.debug import DebugBatch, DebugPrimitive, DebugPublishReport
 from unirobosim.api.errors import (
     AssetConversionError,
+    AssetNormalizationError,
     LifecycleError,
     ProviderSelectionError,
     UnsupportedCapabilityError,
@@ -67,6 +68,12 @@ from .conversion import (
     default_asset_cache_directory,
     discover_asset_converters,
     select_asset_converter,
+)
+from .normalization import (
+    AssetNormalizationRequest,
+    AssetNormalizer,
+    discover_asset_normalizers,
+    select_asset_normalizer,
 )
 
 
@@ -394,6 +401,7 @@ class Sim:
         asset_policy: AssetPolicy | str = AssetPolicy.CONVERT_IF_NEEDED,
         asset_cache_directory: str | PathLike[str] | None = None,
         asset_converters: Iterable[AssetConverter] | None = None,
+        asset_normalizers: Iterable[AssetNormalizer] | None = None,
     ) -> None:
         if not isinstance(backend, str) or not backend:
             raise _invalid("backend must be a non-empty string", "easy.sim.init")
@@ -415,6 +423,11 @@ class Sim:
             not isinstance(converter, AssetConverter) for converter in configured_converters
         ):
             raise _invalid("asset_converters must satisfy AssetConverter", "easy.sim.init")
+        configured_normalizers = None if asset_normalizers is None else tuple(asset_normalizers)
+        if configured_normalizers is not None and any(
+            not isinstance(normalizer, AssetNormalizer) for normalizer in configured_normalizers
+        ):
+            raise _invalid("asset_normalizers must satisfy AssetNormalizer", "easy.sim.init")
         self._backend = backend
         self._provider = provider
         self._world_id = world_id
@@ -424,10 +437,11 @@ class Sim:
         self._state = SimState.CONFIGURING
         self._entities: dict[EntityPath, Entity] = {}
         self._asset_bundles: dict[EntityPath, AssetBundle] = {}
-        self._asset_conversion_options: dict[EntityPath, FrozenMap] = {}
+        self._asset_preparation_options: dict[EntityPath, FrozenMap] = {}
         self._asset_policy = resolved_policy
         self._asset_cache_directory = asset_cache_path or default_asset_cache_directory()
         self._asset_converters = configured_converters
+        self._asset_normalizers = configured_normalizers
         self._requirements: dict[CapabilityId, CapabilityRequirement] = {}
         self._session: Session | None = None
         self._world: World | None = None
@@ -510,15 +524,25 @@ class Sim:
         *,
         asset_uri: str | None = None,
         asset: AssetBundle | None = None,
+        asset_options: Mapping[str, object] | None = None,
         conversion_options: Mapping[str, object] | None = None,
         position_m: Sequence[float] = (0.0, 0.0, 0.0),
         orientation_xyzw: Sequence[float] = (0.0, 0.0, 0.0, 1.0),
     ) -> RigidBody:
-        """Add a backend-native rigid asset while preserving the portable entity view."""
+        """Add a rigid asset and prepare it for the selected backend at start time.
+
+        ``asset_options`` carries intent shared by format conversion and semantic
+        normalization. ``conversion_options`` remains as a compatibility alias.
+        """
 
         path = _path(name)
         if (asset_uri is None) == (asset is None):
             raise _invalid("provide exactly one of asset_uri or asset", "easy.sim.add_rigid_body")
+        if asset_options is not None and conversion_options is not None:
+            raise _invalid(
+                "asset_options and conversion_options are mutually exclusive",
+                "easy.sim.add_rigid_body",
+            )
         spec = EntitySpec(
             path,
             EntityKind.RIGID_BODY,
@@ -528,8 +552,9 @@ class Sim:
         body = cast(RigidBody, self._add(RigidBody(self, spec)))
         if asset is not None:
             self._asset_bundles[path] = asset
-        if conversion_options is not None:
-            self._asset_conversion_options[path] = FrozenMap(conversion_options)
+        preparation_options = asset_options if asset_options is not None else conversion_options
+        if preparation_options is not None:
+            self._asset_preparation_options[path] = FrozenMap(preparation_options)
         return body
 
     def add_articulation(
@@ -543,6 +568,7 @@ class Sim:
         orientation_xyzw: Sequence[float] = (0.0, 0.0, 0.0, 1.0),
         asset_uri: str | None = None,
         asset: AssetBundle | None = None,
+        asset_options: Mapping[str, object] | None = None,
     ) -> Articulation:
         if asset_uri is not None and asset is not None:
             raise _invalid("asset_uri and asset are mutually exclusive", "easy.sim.add_articulation")
@@ -559,6 +585,8 @@ class Sim:
         articulation = cast(Articulation, self._add(Articulation(self, spec)))
         if asset is not None:
             self._asset_bundles[path] = asset
+        if asset_options is not None:
+            self._asset_preparation_options[path] = FrozenMap(asset_options)
         return articulation
 
     def add_camera(
@@ -757,6 +785,107 @@ class Sim:
             )
         return raw
 
+    @staticmethod
+    def _asset_normalization_target(provider: Provider, kind: EntityKind) -> tuple[str, str] | None:
+        declaration = provider.descriptor.capabilities.get(CapabilityId("asset.normalization@1"))
+        if declaration is None:
+            return None
+        raw = declaration.properties.get(kind.value)
+        if raw is None:
+            return None
+        if not isinstance(raw, FrozenMap):
+            raise AssetNormalizationError(
+                "provider asset normalization declaration is invalid",
+                operation="easy.asset.normalization",
+                backend_id=provider.descriptor.provider_id,
+                details={"entity_kind": kind.value, "declared": raw},
+            )
+        media_type = raw.get("media_type")
+        profile = raw.get("profile")
+        if (
+            not isinstance(media_type, str)
+            or "/" not in media_type
+            or not isinstance(profile, str)
+            or not profile.strip()
+        ):
+            raise AssetNormalizationError(
+                "provider asset normalization target is invalid",
+                operation="easy.asset.normalization",
+                backend_id=provider.descriptor.provider_id,
+                details={"entity_kind": kind.value, "declared": raw.to_dict()},
+            )
+        return media_type, profile
+
+    def _normalize_asset(
+        self,
+        entity: EntitySpec,
+        source: ResolvedAsset,
+        provider: Provider,
+    ) -> ResolvedAsset:
+        if self._asset_policy is AssetPolicy.PREBUILT_ONLY:
+            return source
+        target = self._asset_normalization_target(provider, entity.kind)
+        if target is None or source.media_type != target[0]:
+            return source
+        normalizers = self._asset_normalizers
+        if normalizers is None:
+            normalizers = discover_asset_normalizers()
+            self._asset_normalizers = normalizers
+        # Keeping already-authored provider-native assets usable without an
+        # optional plugin is important. Providers remain responsible for strict
+        # preflight when no normalizer is installed.
+        if not normalizers:
+            return source
+        request = AssetNormalizationRequest(
+            source_uri=source.uri,
+            source_media_type=source.media_type,
+            target_backend=self._backend,
+            provider_id=provider.descriptor.provider_id,
+            entity_kind=entity.kind,
+            target_profile=target[1],
+            cache_directory=self._asset_cache_directory,
+            options=self._asset_preparation_options.get(entity.path, FrozenMap()),
+        )
+        normalizer = select_asset_normalizer(request, normalizers)
+        try:
+            inspection = normalizer.inspect(request)
+            if not inspection.required:
+                return source
+            normalized = normalizer.normalize(request, inspection)
+        except AssetNormalizationError:
+            raise
+        except Exception as exc:
+            raise AssetNormalizationError(
+                "asset normalizer failed",
+                operation="easy.asset.normalize",
+                backend_id=provider.descriptor.provider_id,
+                entity_path=entity.path.value,
+                details={"normalizer_id": normalizer.normalizer_id, "request": request.to_dict()},
+                cause=exc,
+            ) from exc
+        if normalized.media_type != target[0] or normalized.target_profile != target[1]:
+            raise AssetNormalizationError(
+                "asset normalizer returned an incompatible target",
+                operation="easy.asset.normalize",
+                backend_id=provider.descriptor.provider_id,
+                entity_path=entity.path.value,
+                details={
+                    "normalization": normalized.to_dict(),
+                    "expected_media_type": target[0],
+                    "expected_profile": target[1],
+                },
+            )
+        return ResolvedAsset(
+            logical_name=source.logical_name,
+            selector=f"normalized:{normalized.normalizer_id}",
+            uri=normalized.uri,
+            media_type=normalized.media_type,
+            sha256=normalized.output_sha256,
+            source_manifest=source.source_manifest,
+            conversion=source.conversion,
+            normalization=FrozenMap(normalized.to_dict()),
+        )
+
     def _resolve_asset(
         self,
         entity: EntitySpec,
@@ -786,7 +915,7 @@ class Sim:
 
         supported = self._supported_asset_media_types(provider, entity.kind)
         if supported is None or source.media_type in supported:
-            return source
+            return self._normalize_asset(entity, source, provider)
         if self._asset_policy is AssetPolicy.PREBUILT_ONLY:
             raise AssetConversionError(
                 "selected provider does not accept this asset format and conversion is disabled",
@@ -803,7 +932,7 @@ class Sim:
             provider_id=provider.descriptor.provider_id,
             entity_kind=entity.kind,
             cache_directory=self._asset_cache_directory,
-            options=self._asset_conversion_options.get(entity.path, FrozenMap()),
+            options=self._asset_preparation_options.get(entity.path, FrozenMap()),
         )
         converters = self._asset_converters
         if converters is None:
@@ -831,7 +960,7 @@ class Sim:
                 entity_path=entity.path.value,
                 details={"conversion": converted.to_dict(), "supported_media_types": supported},
             )
-        return ResolvedAsset(
+        prepared = ResolvedAsset(
             logical_name=source.logical_name,
             selector=f"converted:{converted.converter_id}",
             uri=converted.uri,
@@ -840,6 +969,7 @@ class Sim:
             source_manifest=source.source_manifest,
             conversion=FrozenMap(converted.to_dict()),
         )
+        return self._normalize_asset(entity, prepared, provider)
 
     def reset(self, environments: Iterable[int] | None = None) -> ResetResult:
         return self.world.reset(environments)

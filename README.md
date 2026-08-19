@@ -17,6 +17,8 @@ This repository is at **M3 / `v0alpha4`**. The implemented scope is deliberately
 - batch-first RGB and depth camera specifications and samples;
 - backend-neutral point/line debug primitives, stable IDs, budgets, step lifetimes, failure-isolated
   fan-out, native-world, trace, and test sinks;
+- provider-declared asset-format conversion and same-format semantic normalization plugins with
+  content-addressed provenance embedded in the compiled world;
 - a deterministic Fake Reference Backend for contract and lifecycle tests.
 
 The fake backend uses unit-mass rigid and independent point-mass reference rules; it is not a
@@ -34,8 +36,8 @@ python -m pip install --no-build-isolation -e .
 make verify
 ```
 
-The package runtime itself has no third-party dependencies. The initial compatibility promise is
-Python `>=3.12,<3.13`; additional versions will only be claimed after CI coverage exists.
+The package runtime itself has no third-party dependencies. The compatibility promise is Python
+`>=3.11,<3.13`; simulator adapters may require a narrower Python version.
 
 ## Contract-first example
 
@@ -62,5 +64,5 @@ world.step()
 session.close()
 ```
 
-Detailed architecture and verification evidence are maintained by the UniRoboSim project workspace under
+Detailed architecture and verification evidence are maintained by the project control workspace under
 `docs/unirobosim/`; this repository intentionally keeps no second documentation tree.

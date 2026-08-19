@@ -77,6 +77,10 @@ class AssetConversionError(UniRoboSimError):
     code = "unirobosim.asset.conversion_failed"
 
 
+class AssetNormalizationError(UniRoboSimError):
+    code = "unirobosim.asset.normalization_failed"
+
+
 class EntityNotFoundError(UniRoboSimError):
     code = "unirobosim.entity.not_found"
 

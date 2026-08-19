@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -19,6 +20,12 @@ from unirobosim import (
     ProviderDescriptor,
     Sim,
     ValidationError,
+)
+from unirobosim.easy import conversion as conversion_module
+from unirobosim.easy.conversion import (
+    default_asset_cache_directory,
+    discover_asset_converters,
+    select_asset_converter,
 )
 from unirobosim.testing import FAKE_DESCRIPTOR, FakeProvider
 
@@ -146,3 +153,144 @@ def test_conversion_request_rejects_invalid_media_type(value: str) -> None:
             EntityKind.RIGID_BODY,
             "/tmp/cache",
         )
+
+
+def _request(tmp_path: Path) -> AssetConversionRequest:
+    return AssetConversionRequest(
+        "source.usd",
+        "model/vnd.usd",
+        "fake",
+        "reference.fake",
+        EntityKind.RIGID_BODY,
+        str(tmp_path),
+        {"mass_kg": 0.2},
+    )
+
+
+def _result() -> AssetConversionResult:
+    return AssetConversionResult(
+        "output.urdf",
+        "model/vnd.urdf+xml",
+        "test.converter",
+        "1.0.0",
+        "1" * 64,
+        "2" * 64,
+        "3" * 64,
+        "conversion.json",
+        warnings=("approximated",),
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("source_uri", ""),
+        ("target_backend", ""),
+        ("provider_id", ""),
+        ("entity_kind", "rigid_body"),
+        ("cache_directory", ""),
+    ),
+)
+def test_conversion_request_rejects_other_invalid_fields(tmp_path: Path, field: str, value: object) -> None:
+    values: dict[str, object] = {
+        "source_uri": "source.usd",
+        "source_media_type": "model/vnd.usd",
+        "target_backend": "fake",
+        "provider_id": "reference.fake",
+        "entity_kind": EntityKind.RIGID_BODY,
+        "cache_directory": str(tmp_path),
+    }
+    values[field] = value
+    with pytest.raises(ValidationError):
+        AssetConversionRequest(**values)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("uri", ""),
+        ("media_type", "urdf"),
+        ("source_sha256", "bad"),
+        ("recipe_sha256", "z" * 64),
+        ("cache_hit", "yes"),
+        ("warnings", ("",)),
+    ),
+)
+def test_conversion_result_validation_and_serialization(field: str, value: object) -> None:
+    result = _result()
+    assert result.to_dict()["warnings"] == ["approximated"]
+    with pytest.raises(ValidationError):
+        replace(result, **{field: value})
+
+
+class _EntryPoint:
+    def __init__(self, name: str, factory: object) -> None:
+        self.name = name
+        self._factory = factory
+
+    def load(self) -> object:
+        if isinstance(self._factory, Exception):
+            raise self._factory
+        return self._factory
+
+
+def test_converter_discovery_selection_and_cache_configuration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    accepted = RecordingConverter(tmp_path / "accepted.urdf")
+    points = (
+        _EntryPoint("z-broken", RuntimeError("broken plugin")),
+        _EntryPoint("a-valid", lambda: accepted),
+    )
+    monkeypatch.setattr(conversion_module.metadata, "entry_points", lambda **_: points)
+    assert discover_asset_converters() == (accepted,)
+
+    monkeypatch.setattr(
+        conversion_module.metadata,
+        "entry_points",
+        lambda **_: (_EntryPoint("invalid", lambda: object()),),
+    )
+    with pytest.raises(AssetConversionError, match="could not be loaded"):
+        discover_asset_converters()
+
+    class Rejecting(RecordingConverter):
+        converter_id = "test.rejecting"
+
+        def can_convert(self, request: AssetConversionRequest) -> bool:
+            return False
+
+    class Crashing(RecordingConverter):
+        converter_id = "test.crashing"
+
+        def can_convert(self, request: AssetConversionRequest) -> bool:
+            raise RuntimeError("probe failed")
+
+    request = _request(tmp_path)
+    rejecting = Rejecting(tmp_path / "rejected.urdf")
+    crashing = Crashing(tmp_path / "crashed.urdf")
+    assert select_asset_converter(request, (crashing, rejecting, accepted)) is accepted
+    with pytest.raises(AssetConversionError, match="no installed") as failure:
+        select_asset_converter(request, (crashing, rejecting))
+    assert failure.value.details["attempts"][0]["error"] == "RuntimeError: probe failed"
+
+    monkeypatch.setenv("UNIROBOSIM_ASSET_CACHE", str(tmp_path / "configured"))
+    assert default_asset_cache_directory() == str(tmp_path / "configured")
+    monkeypatch.delenv("UNIROBOSIM_ASSET_CACHE")
+    assert default_asset_cache_directory().endswith("/.cache/unirobosim/assets")
+
+
+def test_sim_wraps_unexpected_converter_failure(tmp_path: Path) -> None:
+    source = tmp_path / "source.usd"
+    source.write_text("#usda 1.0\n", encoding="utf-8")
+    converter = RecordingConverter(tmp_path / "never.urdf")
+
+    def crash(_: AssetConversionRequest) -> AssetConversionResult:
+        raise RuntimeError("conversion crashed")
+
+    converter.convert = crash  # type: ignore[method-assign]
+    sim = Sim(provider=FormatAwareFakeProvider(), asset_converters=(converter,))
+    sim.add_rigid_body("object", asset_uri=str(source))
+    with pytest.raises(AssetConversionError, match="asset converter failed") as failure:
+        sim.start()
+    assert isinstance(failure.value.__cause__, RuntimeError)
