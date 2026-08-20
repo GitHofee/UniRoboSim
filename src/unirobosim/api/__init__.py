@@ -36,6 +36,7 @@ from .debug import (
     render_trace_svg,
     replay_debug_trace,
 )
+from .diagnostics import RUNTIME_DIAGNOSTICS_CAPABILITY, read_runtime_diagnostics
 from .errors import (
     AssetConversionError,
     AssetNormalizationError,
@@ -52,7 +53,7 @@ from .errors import (
     WorldBuildError,
 )
 from .frozen import FrozenMap, freeze_json, thaw_json
-from .protocols import Provider, SceneControlWorld, Session, World
+from .protocols import Provider, RuntimeDiagnosticsProvider, SceneControlWorld, Session, World
 from .reports import (
     ArticulationState,
     BuildFingerprint,
@@ -64,6 +65,7 @@ from .reports import (
     ProviderDescriptor,
     ResetResult,
     RigidBodyState,
+    RuntimeDiagnostics,
     SensorChannel,
     SensorSample,
 )
@@ -181,9 +183,12 @@ __all__ = [
     "ProviderDescriptor",
     "ProviderRegistrationError",
     "ProviderSelectionError",
+    "RUNTIME_DIAGNOSTICS_CAPABILITY",
     "ResetResult",
     "RigidBodyCommand",
     "RigidBodyState",
+    "RuntimeDiagnostics",
+    "RuntimeDiagnosticsProvider",
     "RIGID_CONTACT_WORLD_SCHEMA_VERSION",
     "SCENE_SCHEMA_VERSION",
     "SceneCommand",
@@ -218,6 +223,7 @@ __all__ = [
     "DEBUG_SCHEMA_VERSION",
     "build_portable_viewer",
     "freeze_json",
+    "read_runtime_diagnostics",
     "render_trace_svg",
     "replay_debug_trace",
     "thaw_json",

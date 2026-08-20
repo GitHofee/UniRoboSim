@@ -17,6 +17,7 @@ from .reports import (
     ProviderDescriptor,
     ResetResult,
     RigidBodyState,
+    RuntimeDiagnostics,
     SensorSample,
 )
 from .scene import SceneCommand, SceneCommandResult, SceneDelta, SceneSnapshot
@@ -117,3 +118,10 @@ class Provider(Protocol):
     def probe(self) -> ProbeReport: ...
 
     def open(self) -> Session: ...
+
+
+@runtime_checkable
+class RuntimeDiagnosticsProvider(Protocol):
+    """Optional provider endpoint gated by ``runtime.diagnostics@1``."""
+
+    def runtime_diagnostics(self) -> RuntimeDiagnostics: ...

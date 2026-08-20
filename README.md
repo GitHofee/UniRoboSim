@@ -6,7 +6,7 @@
 
 UniRoboSim is a backend-neutral interoperability layer for robotics simulation. It defines portable scene, lifecycle, command, state, sensor, asset, debug, and scene-control contracts while keeping native simulator SDKs in independently packaged adapters. Applications and upper-layer frameworks can select a backend without propagating simulator-specific types through their architecture.
 
-Version `0.7.0` is the coordinated Beta feature release. Python packages use `0.7.x`; the serialized runtime/world contract is independently and explicitly versioned as `v0alpha4` / `unirobosim.world/v0alpha4`.
+Version `0.7.1` is the Core and PyBullet diagnostics maintenance release. Python packages use `0.7.x`; the serialized runtime/world contract is independently and explicitly versioned as `v0alpha4` / `unirobosim.world/v0alpha4`.
 
 <img src="assets/readme/unirobosim-architecture.svg" alt="UniRoboSim architecture: applications, FastSim, policies and agents use EasyAPI, RuntimeAPI, MCP and Studio; portable contracts connect them to independent simulator adapters." width="100%">
 
@@ -19,7 +19,7 @@ Version `0.7.0` is the coordinated Beta feature release. Python packages use `0.
 - Native SDKs remain behind adapters. In particular, Isaac Sim runs in a worker process because its lifecycle should not own the application.
 - Backends and asset processors are ordinary Python plugins. A new adapter should not require a Core patch.
 
-### What 0.7.0 provides
+### What 0.7.1 provides
 
 - rigid pose/twist, persistent wrench control, contact state, and scene pose writes;
 - robot and non-robot articulation state plus position/velocity/effort commands;
@@ -27,6 +27,7 @@ Version `0.7.0` is the coordinated Beta feature release. Python packages use `0.
 - RGB/depth camera contracts;
 - point, line, axes, text, bounding-box, and trajectory debug primitives;
 - scene snapshots/deltas and idempotent drag transactions;
+- capability-gated, provider-owned runtime resource diagnostics without native handles;
 - backend-specific asset bundles, rigid USD conversion, and semantic normalization;
 - deterministic Fake Reference Backend for SDK-free contract testing.
 
@@ -86,7 +87,7 @@ git clone https://github.com/GitHofee/UniRoboSim-mcp.git
 python -m pip install ./UniRoboSim-usd-converter ./UniRoboSim-studio ./UniRoboSim-mcp
 ```
 
-For reproducible deployments, install the coordinated `0.7.0` wheel set and do not mix Core and adapter minor versions.
+For reproducible deployments, pin the exact Core and adapter pair that was tested. PyBullet runtime diagnostics require Core `0.7.1` and the PyBullet adapter `0.7.1`; adapters that do not declare this optional capability remain independently versioned within `0.7.x`.
 
 ## 3. EasyAPI: quick start
 
@@ -337,13 +338,15 @@ The distribution registers the factory in `pyproject.toml`:
 
 ```toml
 [project]
-dependencies = ["unirobosim>=0.7.0,<0.8"]
+dependencies = ["unirobosim>=0.7.1,<0.8"]
 
 [project.entry-points."unirobosim.backends"]
 vendor = "unirobosim_vendor:create_provider"
 ```
 
 `VendorSession` must implement `descriptor`, `negotiate()`, `build()`, and `close()`. Its built `VendorWorld` must implement the complete base `World` protocol. Methods for capabilities the adapter does not advertise must still fail with a structured `UnsupportedCapabilityError`; they must not return fabricated values.
+
+Runtime resource diagnostics are an optional Provider extension. An adapter that implements it declares `runtime.diagnostics@1` and exposes `runtime_diagnostics() -> RuntimeDiagnostics`. The capability property `connection_modes`, when present, must be a non-empty JSON array of unique canonical mode names such as `["direct", "gui"]`; every returned `connection_mode` must belong to that array. Omitting the property keeps the mode unconstrained for compatibility with early diagnostics providers. Counts cover resources owned by that Provider instance and never expose native IDs or handles.
 
 ### Adapter release gate
 
@@ -366,4 +369,4 @@ coverage run -m pytest
 coverage report
 ```
 
-The 0.7.0 coordinated release passed 212 Core tests, adapter suites, clean-wheel smoke tests, and native MuJoCo/PyBullet/Isaac Lab acceptance.
+The 0.7.1 release gate covers the complete Core suite, adapter suites, clean-wheel smoke tests, and native backend acceptance where the corresponding adapter declares the capability.

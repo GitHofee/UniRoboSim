@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.7.1 - 2026-08-21
+
+- Add the optional, capability-gated `runtime.diagnostics@1` provider endpoint for
+  portable provider-owned world and native-client counts.
+- Fail closed with structured causal errors when descriptor or diagnostics endpoint
+  access violates the public contract.
+- Define the optional `connection_modes` capability property as an enforced,
+  non-empty allow-list while retaining declarations that omit the property.
+- Preserve `unirobosim.world/v0alpha4`; this patch adds no serialized world-schema
+  migration.
+
 ## 0.7.0 - 2026-08-19
 
 - Publish the accepted EasyAPI, RuntimeAPI, scene-control, debug and asset-preparation

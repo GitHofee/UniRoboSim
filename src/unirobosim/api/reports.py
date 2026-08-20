@@ -12,6 +12,7 @@ from .frozen import FrozenMap
 from .values import ArrayValue, CameraModality, EntityHandle, Tick
 
 _PROVIDER_ID = re.compile(r"^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$")
+_CONNECTION_MODE = re.compile(r"^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -56,6 +57,42 @@ class ProbeReport:
             raise ValidationError("probe reason must be a non-empty string", operation="probe_report.validate")
         if not isinstance(self.details, FrozenMap):
             raise ValidationError("probe details must be a FrozenMap", operation="probe_report.validate")
+
+
+@dataclass(frozen=True)
+class RuntimeDiagnostics:
+    """Portable provider-owned lifecycle and native-resource counts.
+
+    The snapshot deliberately contains no backend object, process handle or native
+    client identifier. Providers that expose it must declare
+    ``runtime.diagnostics@1``. ``live_worlds`` includes worlds whose close is
+    pending or retryable. ``native_clients`` counts backend-native connections
+    owned by this Provider and not yet confirmed released; it is not a
+    process-global SDK count.
+    """
+
+    provider_id: str
+    connection_mode: str
+    live_worlds: int
+    native_clients: int
+
+    def __post_init__(self) -> None:
+        operation = "runtime_diagnostics.validate"
+        if not isinstance(self.provider_id, str) or not _PROVIDER_ID.fullmatch(self.provider_id):
+            raise ValidationError("runtime diagnostics provider ID is invalid", operation=operation)
+        if not isinstance(self.connection_mode, str) or not _CONNECTION_MODE.fullmatch(self.connection_mode):
+            raise ValidationError("runtime diagnostics connection mode is invalid", operation=operation)
+        counts = (self.live_worlds, self.native_clients)
+        if any(not isinstance(value, int) or isinstance(value, bool) or value < 0 for value in counts):
+            raise ValidationError("runtime diagnostics counts must be non-negative integers", operation=operation)
+
+    def to_dict(self) -> dict[str, str | int]:
+        return {
+            "provider_id": self.provider_id,
+            "connection_mode": self.connection_mode,
+            "live_worlds": self.live_worlds,
+            "native_clients": self.native_clients,
+        }
 
 
 @dataclass(frozen=True)
