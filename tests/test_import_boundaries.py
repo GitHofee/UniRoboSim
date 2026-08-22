@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import ast
 import importlib
+import importlib.metadata
+import tomllib
 import unittest
 from pathlib import Path
 
@@ -10,6 +12,16 @@ import unirobosim
 REPOSITORY = Path(__file__).resolve().parents[1]
 SOURCE = REPOSITORY / "src" / "unirobosim"
 FORBIDDEN_ROOTS = {"fastsim", "isaaclab", "isaacsim", "omni", "mujoco", "pybullet", "torch", "numpy"}
+RELEASE_VERSION = "0.8.0"
+PLANNING_RELEASE_SYMBOLS = (
+    "PlanningGeometryLease",
+    "PlanningGeometryResourceDescriptor",
+    "PlanningGeometryResourceLayout",
+    "PlanningSceneCatalog",
+    "PlanningSceneDelta",
+    "PlanningSceneState",
+    "PlanningSceneWorld",
+)
 
 
 class ImportBoundaryTests(unittest.TestCase):
@@ -37,10 +49,27 @@ class ImportBoundaryTests(unittest.TestCase):
         self.assertEqual(violations, [])
 
     def test_public_import_does_not_expose_fake_backend(self) -> None:
-        self.assertEqual(unirobosim.__version__, "0.7.1")
+        self.assertEqual(unirobosim.__version__, RELEASE_VERSION)
         self.assertFalse(hasattr(unirobosim, "FakeProvider"))
         module = importlib.import_module("unirobosim.testing")
         self.assertTrue(hasattr(module, "FakeProvider"))
+
+    def test_release_identity_is_exact_and_consistent(self) -> None:
+        project = tomllib.loads((REPOSITORY / "pyproject.toml").read_text(encoding="utf-8"))
+        testing = importlib.import_module("unirobosim.testing")
+        self.assertEqual(project["project"]["version"], RELEASE_VERSION)
+        self.assertEqual(importlib.metadata.version("unirobosim"), RELEASE_VERSION)
+        self.assertEqual(unirobosim.__version__, RELEASE_VERSION)
+        self.assertEqual(testing.FAKE_DESCRIPTOR.version, RELEASE_VERSION)
+
+    def test_planning_release_symbols_are_public_at_both_api_levels(self) -> None:
+        api = importlib.import_module("unirobosim.api")
+        planning_scene = importlib.import_module("unirobosim.api.planning_scene")
+        for name in PLANNING_RELEASE_SYMBOLS:
+            self.assertIn(name, api.__all__)
+            self.assertIn(name, unirobosim.__all__)
+            self.assertIs(getattr(api, name), getattr(planning_scene, name))
+            self.assertIs(getattr(unirobosim, name), getattr(planning_scene, name))
 
     def test_repository_has_no_second_documentation_tree(self) -> None:
         self.assertFalse((REPOSITORY / "docs").exists())

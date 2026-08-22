@@ -6,7 +6,7 @@
 
 UniRoboSim 是面向机器人仿真的后端中立互操作层。它定义可移植的场景、生命周期、命令、状态、传感器、资产、调试与场景控制合同，并将原生仿真器 SDK 隔离在独立发布的 Adapter 中。应用和上层框架可以选择仿真后端，而不必让仿真器专用类型扩散到整体架构。
 
-`0.7.1` 是 Core 与 PyBullet 资源诊断能力的 Beta 维护版本。Python 包使用 `0.7.x`，序列化 Runtime/World 合同独立且明确版本化为 `v0alpha4` / `unirobosim.world/v0alpha4`。
+`0.8.0` 是 Core planning-scene v2 发布候选版本。Python 包使用 `0.8.x`，序列化 Runtime/World 合同独立且明确版本化为 `v0alpha4` / `unirobosim.world/v0alpha4`。
 
 <img src="assets/readme/unirobosim-architecture.zh-CN.svg" alt="UniRoboSim 架构：应用、FastSim、策略和智能体通过 EasyAPI、MCP、RuntimeAPI 与 Studio 使用可移植合同，并连接到独立仿真器适配器。" width="100%">
 
@@ -19,7 +19,7 @@ UniRoboSim 是面向机器人仿真的后端中立互操作层。它定义可移
 - 原生 SDK 留在 Adapter 后面。尤其是 Isaac Sim，它运行在 worker 进程中，不应该接管应用生命周期。
 - Backend 和资产处理器就是普通 Python 插件。新增 Adapter 不应要求修改 Core。
 
-### 0.7.1 提供的能力
+### 0.8.0 提供的能力
 
 - 刚体位姿/速度、持续 wrench、接触状态和场景位姿写入；
 - 机器人及非机器人铰接体状态与位置/速度/力矩控制；
@@ -27,6 +27,7 @@ UniRoboSim 是面向机器人仿真的后端中立互操作层。它定义可移
 - RGB/深度相机合同；
 - 点、线、坐标轴、文本、包围盒和轨迹调试图元；
 - 场景快照/增量与幂等拖拽事务；
+- 通过后端中立 Protocol 提供 planning-scene 目录、状态/增量、Frame 与关节拓扑、附着关系和哈希固定的几何资源；
 - 经能力声明控制、由 Provider 自身维护且不暴露原生句柄的运行时资源诊断；
 - 后端资产 Bundle、刚体 USD 转换和物理语义规范化；
 - 用于无 SDK 合同测试的确定性 Fake Reference Backend。
@@ -87,7 +88,7 @@ git clone https://github.com/GitHofee/UniRoboSim-mcp.git
 python -m pip install ./UniRoboSim-usd-converter ./UniRoboSim-studio ./UniRoboSim-mcp
 ```
 
-可复现部署应固定实际验收过的 Core 与 Adapter 版本组合。PyBullet 运行时资源诊断要求 Core `0.7.1` 与 PyBullet Adapter `0.7.1`；未声明该可选能力的其他 Adapter 仍在 `0.7.x` 范围内独立版本化。
+可复现部署应固定实际验收过的 Core 与 Adapter 版本组合。此前已验收的 PyBullet 诊断组合仍是 Core `0.7.1` 与 PyBullet Adapter `0.7.1`；在各 Adapter 独立通过闸门前，不声明其与 Core `0.8.0` 候选版本兼容。
 
 ## 3. EasyAPI：快速使用
 
@@ -344,6 +345,8 @@ dependencies = ["unirobosim>=0.7.1,<0.8"]
 vendor = "unirobosim_vendor:create_provider"
 ```
 
+示例依赖边界有意描述仅验收过 Core 0.7 系列的 Adapter。Adapter 负责人必须先运行原生闸门，才能将其放宽到 Core 0.8。
+
 `VendorSession` 必须实现 `descriptor`、`negotiate()`、`build()`、`close()`；构建出的 `VendorWorld` 必须实现完整基础 `World` Protocol。未声明能力的方法仍须以结构化 `UnsupportedCapabilityError` 失败，不能返回伪造值。
 
 运行时资源诊断是可选的 Provider 扩展。实现该扩展的 Adapter 声明 `runtime.diagnostics@1`，并提供 `runtime_diagnostics() -> RuntimeDiagnostics`。可选能力属性 `connection_modes` 必须是非空、元素唯一的规范模式名 JSON 数组，例如 `["direct", "gui"]`；返回的 `connection_mode` 必须属于该数组。为兼容早期诊断 Provider，省略此属性时不限制模式。计数范围仅限该 Provider 实例拥有的资源，且绝不暴露原生 ID 或句柄。
@@ -369,4 +372,4 @@ coverage run -m pytest
 coverage report
 ```
 
-0.7.1 发布闸门覆盖完整 Core 测试、各 Adapter 测试、全新 wheel smoke test，以及声明相应能力的原生后端验收。
+0.8.0 Core 发布闸门覆盖完整 Core 测试，以及 Python 3.11 与 3.12 上全新的 source、wheel、sdist 安装。该 Core-only 候选版本的原生 GPU、GUI 与后端 Adapter 验收均为未验证，仍须通过独立 Adapter 闸门。

@@ -1,4 +1,4 @@
-"""Stable UniRoboSim 0.7 public API."""
+"""Stable UniRoboSim 0.8 public API."""
 
 from .capabilities import (
     CapabilityDeclaration,

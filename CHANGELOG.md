@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.8.0 - 2026-08-23
+
+- Publish the accepted backend-neutral `planning.scene@2` catalog, state, delta,
+  frame, articulation-topology, attachment, and geometry-resource contracts.
+- Export `PlanningGeometryResourceLayout`, `PlanningGeometryResourceDescriptor`,
+  `PlanningSceneCatalog`, and the related resource/world protocols from both
+  `unirobosim.api` and the top-level package.
+- Keep planning geometry representation exact, catalog-pinned, hash-verified, and
+  free of native backend handles or implicit representation fallback.
+- Preserve `unirobosim.world/v0alpha4`; this Core-only release does not change a
+  FastSim dependency pin or claim native GPU, GUI, or adapter acceptance.
+
 ## 0.7.1 - 2026-08-21
 
 - Add the optional, capability-gated `runtime.diagnostics@1` provider endpoint for

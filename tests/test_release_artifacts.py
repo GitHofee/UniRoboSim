@@ -12,7 +12,7 @@ def _write_nondeterministic_sdist(path: Path, *, timestamp: int) -> None:
     with path.open("wb") as output:
         with gzip.GzipFile(filename=path.name, mode="wb", fileobj=output, mtime=timestamp) as compressed:
             with tarfile.open(fileobj=compressed, mode="w|", format=tarfile.PAX_FORMAT) as archive:
-                root = tarfile.TarInfo("unirobosim-0.7.1")
+                root = tarfile.TarInfo("unirobosim-0.8.0")
                 root.type = tarfile.DIRTYPE
                 root.mode = 0o755
                 root.mtime = timestamp
@@ -22,7 +22,7 @@ def _write_nondeterministic_sdist(path: Path, *, timestamp: int) -> None:
                 root.gname = "builder"
                 archive.addfile(root)
                 payload = b"portable source payload\n"
-                member = tarfile.TarInfo("unirobosim-0.7.1/example.txt")
+                member = tarfile.TarInfo("unirobosim-0.8.0/example.txt")
                 member.mode = 0o644
                 member.mtime = timestamp + 1
                 member.uid = 1000
