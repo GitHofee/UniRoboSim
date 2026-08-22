@@ -1334,13 +1334,12 @@ class FakeWorld:
                 entity_path=entity.path.value,
             ) from None
         return PlanningFrameDescriptor(
-            _planning_id("frame", entity.path.value, "named", declaration.semantic_key),
+            _planning_id("frame", entity.path.value, "named", declaration.name),
             PlanningFrameKind.NAMED,
             parent_frame_id,
             entity_id,
             None if owner_link is None else owner_link.link_id,
-            declaration.role,
-            declaration.semantic_key,
+            declaration.name,
         )
 
     def _planning_environment_for_capture(self, environment_index: int) -> _FakePlanningEnvironmentRuntime:

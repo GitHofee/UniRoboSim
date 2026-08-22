@@ -7,6 +7,7 @@ from dataclasses import fields, replace
 
 import pytest
 
+import unirobosim as public_api
 import unirobosim.api.planning_scene as planning_contract
 from tests.test_planning_scene import entity_by_path, planning_spec
 from unirobosim import (
@@ -22,7 +23,6 @@ from unirobosim import (
     PlanningFrameDeclaration,
     PlanningFrameDescriptor,
     PlanningFrameKind,
-    PlanningFrameRole,
     PlanningFrameSourceKind,
     PlanningFrameState,
     PlanningGeometryContentProfile,
@@ -487,16 +487,14 @@ def test_planning_frame_declaration_projection_is_canonical_and_fail_closed() ->
             "component_sha256": "b" * 64,
             "entries": (
                 {
-                    "semantic_key": "ee.left",
-                    "role": "ee",
+                    "name": "mount_origin",
                     "owner_link": "left wrist",
                     "source": {"kind": "link", "name": "left wrist"},
                 },
                 {
-                    "semantic_key": "tool.tcp",
-                    "role": "tool",
-                    "owner_link": "tool flange",
-                    "source": {"kind": "native_named", "name": "tool0"},
+                    "name": "wrist_origin",
+                    "owner_link": "fixture flange",
+                    "source": {"kind": "native_named", "name": "fixture0"},
                 },
             ),
         }
@@ -505,7 +503,7 @@ def test_planning_frame_declaration_projection_is_canonical_and_fail_closed() ->
     assert declarations is not None
     assert declarations.schema_version == PLANNING_FRAME_DECLARATIONS_SCHEMA_VERSION
     assert declarations.component_sha256 == "b" * 64
-    assert tuple(item.semantic_key for item in declarations.entries) == ("ee.left", "tool.tcp")
+    assert tuple(item.name for item in declarations.entries) == ("mount_origin", "wrist_origin")
     assert declarations.entries[0].source.kind is PlanningFrameSourceKind.LINK
     assert declarations.entries[1].source.kind is PlanningFrameSourceKind.NATIVE_NAMED
     assert parse_planning_frame_declarations(None) is None
@@ -515,7 +513,7 @@ def test_planning_frame_declaration_projection_is_canonical_and_fail_closed() ->
         FrozenMap({"schema": PLANNING_FRAME_DECLARATIONS_SCHEMA_VERSION}),
         FrozenMap(
             {
-                "schema": "unirobosim.planning-frame-declarations/v2",
+                "schema": "unirobosim.planning-frame-declarations/v1",
                 "component_sha256": "b" * 64,
                 "entries": (),
             }
@@ -547,8 +545,7 @@ def test_planning_frame_declaration_projection_is_canonical_and_fail_closed() ->
                 "component_sha256": "b" * 64,
                 "entries": (
                     {
-                        "semantic_key": "tool.bad-source",
-                        "role": "tool",
+                        "name": "bad_source",
                         "owner_link": "base",
                         "source": "not-a-record",
                     },
@@ -568,10 +565,9 @@ def test_planning_frame_declaration_projection_is_canonical_and_fail_closed() ->
                 "component_sha256": "b" * 64,
                 "entries": (
                     {
-                        "semantic_key": "bad",
-                        "role": "camera",
+                        "name": "bad",
                         "owner_link": None,
-                        "source": {"kind": "link", "name": "base"},
+                        "source": {"kind": "unsupported", "name": "base"},
                     },
                 ),
             }
@@ -582,7 +578,169 @@ def test_planning_frame_declaration_projection_is_canonical_and_fail_closed() ->
             parse_planning_frame_declarations(value)
         assert caught.value.operation == "planning_scene.preflight"
     with pytest.raises(PlanningSceneContractError, match="exact source"):
-        PlanningFrameDeclaration("tool.bad", PlanningFrameRole.TOOL, "base", object())
+        PlanningFrameDeclaration("bad_source", "base", object())
+
+
+def test_planning_frame_v2_public_shapes_have_no_legacy_aliases() -> None:
+    assert PLANNING_FRAME_DECLARATIONS_SCHEMA_VERSION == "unirobosim.planning-frame-declarations/v2"
+    assert tuple(field.name for field in fields(PlanningFrameDeclaration)) == ("name", "owner_link_name", "source")
+    assert tuple(field.name for field in fields(PlanningFrameDescriptor)) == (
+        "frame_id",
+        "kind",
+        "parent_frame_id",
+        "owner_entity_id",
+        "owner_link_id",
+        "name",
+    )
+
+    removed_role_type = "PlanningFrame" + "Role"
+    legacy_name_field = "semantic" + "_key"
+    legacy_classification_field = "ro" + "le"
+    assert not hasattr(public_api, removed_role_type)
+    assert not hasattr(planning_contract, removed_role_type)
+
+    source = PlanningFrameSourceKind.LINK
+    valid_source = {"kind": source.value, "name": "base"}
+    for entry in (
+        {
+            legacy_name_field: "base_origin",
+            legacy_classification_field: "legacy",
+            "owner_link": "base",
+            "source": valid_source,
+        },
+        {
+            "name": "base_origin",
+            legacy_name_field: "base_origin",
+            "owner_link": "base",
+            "source": valid_source,
+        },
+        {
+            "name": "base_origin",
+            legacy_classification_field: "legacy",
+            "owner_link": "base",
+            "source": valid_source,
+        },
+    ):
+        projection = FrozenMap(
+            {
+                "schema": PLANNING_FRAME_DECLARATIONS_SCHEMA_VERSION,
+                "component_sha256": "d" * 64,
+                "entries": (entry,),
+            }
+        )
+        with pytest.raises(PlanningSceneIncompleteError, match="declarations are invalid"):
+            parse_planning_frame_declarations(projection)
+
+    declaration = PlanningFrameDeclaration(
+        "base_origin",
+        "base",
+        planning_contract.PlanningFrameSource(PlanningFrameSourceKind.LINK, "base"),
+    )
+    descriptor = PlanningFrameDescriptor(
+        "frame.base_origin",
+        PlanningFrameKind.NAMED,
+        "frame.base",
+        "entity.robot",
+        "link.base",
+        "base_origin",
+    )
+    assert not hasattr(declaration, legacy_name_field)
+    assert not hasattr(declaration, legacy_classification_field)
+    assert not hasattr(descriptor, legacy_name_field)
+    assert not hasattr(descriptor, legacy_classification_field)
+
+
+def test_planning_frame_kind_and_name_hostile_matrix_is_physical_and_bounded() -> None:
+    descriptors = (
+        PlanningFrameDescriptor("frame.world", PlanningFrameKind.WORLD, None, None, None),
+        PlanningFrameDescriptor("frame.entity", PlanningFrameKind.ENTITY, "frame.world", "entity.robot", None),
+        PlanningFrameDescriptor(
+            "frame.link",
+            PlanningFrameKind.LINK,
+            "frame.entity",
+            "entity.robot",
+            "link.base",
+        ),
+        PlanningFrameDescriptor(
+            "frame.joint",
+            PlanningFrameKind.JOINT,
+            "frame.link",
+            "entity.robot",
+            "link.child",
+        ),
+        PlanningFrameDescriptor(
+            "frame.mount",
+            PlanningFrameKind.NAMED,
+            "frame.link",
+            "entity.robot",
+            "link.base",
+            "mount_origin",
+        ),
+    )
+    assert tuple(item.kind for item in descriptors) == tuple(PlanningFrameKind)
+    assert tuple(item.name for item in descriptors) == (None, None, None, None, "mount_origin")
+
+    for descriptor in descriptors[:-1]:
+        with pytest.raises(PlanningSceneContractError, match="cannot declare a name"):
+            replace(descriptor, name="unexpected")
+
+    named = descriptors[-1]
+    for hostile_name in (None, "", "bad name", "é", "x" * 513, object()):
+        with pytest.raises(PlanningSceneContractError):
+            replace(named, name=hostile_name)
+
+    class HostileName(str):
+        calls = 0
+
+        def __len__(self):
+            type(self).calls += 1
+            raise KeyboardInterrupt("hostile length")
+
+        def __str__(self):
+            type(self).calls += 1
+            raise KeyboardInterrupt("hostile string")
+
+    detached = replace(named, name=HostileName("stable_mount"))
+    assert detached.name == "stable_mount" and type(detached.name) is str
+    assert HostileName.calls == 0
+
+
+def test_named_frame_identity_is_owner_and_name_and_hashes_are_name_sensitive(planning_values) -> None:
+    _, catalog, _ = planning_values
+    robot = entity_by_path(catalog, "/robot")
+    payload = entity_by_path(catalog, "/payload")
+    named = next(
+        frame
+        for frame in catalog.frames
+        if frame.owner_entity_id == robot.entity_id and frame.kind is PlanningFrameKind.NAMED
+    )
+    assert named.name is not None
+
+    same_name_other_owner = PlanningFrameDescriptor(
+        "frame.payload.shared_name",
+        PlanningFrameKind.NAMED,
+        payload.root_frame_id,
+        payload.entity_id,
+        None,
+        named.name,
+    )
+    payload_with_named = replace(
+        payload,
+        frame_ids=tuple(sorted((*payload.frame_ids, same_name_other_owner.frame_id))),
+    )
+    cross_owner_catalog = _rebuild_catalog(
+        catalog,
+        entities=_replace_sorted(catalog.entities, payload, payload_with_named, "entity_id"),
+        frames=tuple(sorted((*catalog.frames, same_name_other_owner), key=lambda item: item.frame_id)),
+    )
+    assert cross_owner_catalog.content_sha256 != catalog.content_sha256
+
+    renamed = replace(named, name=f"{named.name}_renamed")
+    renamed_catalog = _rebuild_catalog(
+        catalog,
+        frames=_replace_sorted(catalog.frames, named, renamed, "frame_id"),
+    )
+    assert renamed_catalog.content_sha256 != catalog.content_sha256
 
 
 def test_additional_v2_scalar_halfspace_catalog_and_named_frame_edges(planning_values) -> None:
@@ -648,8 +806,7 @@ def test_additional_v2_scalar_halfspace_catalog_and_named_frame_edges(planning_v
         "frame.unknown",
         robot.entity_id,
         None,
-        PlanningFrameRole.ANNOTATION,
-        "annotation.unknown-parent",
+        "unknown_parent",
     )
     robot_with_unknown_parent = replace(robot, frame_ids=tuple(sorted((*robot.frame_ids, unknown_parent.frame_id))))
     with pytest.raises(PlanningSceneContractError, match="parent is unknown"):
@@ -665,8 +822,7 @@ def test_additional_v2_scalar_halfspace_catalog_and_named_frame_edges(planning_v
         root_link.frame_id,
         robot.entity_id,
         None,
-        PlanningFrameRole.ANNOTATION,
-        "annotation.entity-owned-on-link",
+        "entity_owned_on_link",
     )
     robot_with_entity_owned = replace(
         robot,
@@ -685,8 +841,7 @@ def test_additional_v2_scalar_halfspace_catalog_and_named_frame_edges(planning_v
         child_link.frame_id,
         robot.entity_id,
         root_link.link_id,
-        PlanningFrameRole.TOOL,
-        "tool.wrong-link",
+        "wrong_link",
     )
     robot_with_link_owned = replace(
         robot,
@@ -741,19 +896,18 @@ def test_additional_v2_scalar_halfspace_catalog_and_named_frame_edges(planning_v
         if frame.owner_entity_id == robot.entity_id and frame.kind is PlanningFrameKind.NAMED
     )
     duplicate_named = PlanningFrameDescriptor(
-        "frame.robot.duplicate-semantic",
+        "frame.robot.duplicate-name",
         PlanningFrameKind.NAMED,
         named.parent_frame_id,
         robot.entity_id,
         named.owner_link_id,
-        named.role,
-        named.semantic_key,
+        named.name,
     )
     robot_with_duplicate_named = replace(
         robot,
         frame_ids=tuple(sorted((*robot.frame_ids, duplicate_named.frame_id))),
     )
-    with pytest.raises(PlanningSceneContractError, match="semantic keys"):
+    with pytest.raises(PlanningSceneContractError, match="names"):
         _rebuild_catalog(
             catalog,
             entities=_replace_sorted(catalog.entities, robot, robot_with_duplicate_named, "entity_id"),
@@ -1073,8 +1227,7 @@ def test_catalog_physical_graph_is_bidirectionally_closed(planning_values) -> No
             primary_frame,
             kind=PlanningFrameKind.NAMED,
             owner_link_id=None,
-            role=PlanningFrameRole.EE,
-            semantic_key="invalid-root-link",
+            name="invalid_root_link",
         ),
     ):
         with pytest.raises(PlanningSceneContractError, match="link ownership"):
@@ -1145,20 +1298,18 @@ def test_catalog_physical_graph_is_bidirectionally_closed(planning_values) -> No
         root_link.frame_id,
         robot.entity_id,
         root_link.link_id,
-        PlanningFrameRole.TOOL,
         "mount",
     )
     robot_with_mount = replace(robot, frame_ids=tuple(sorted((*robot.frame_ids, mount.frame_id))))
     invalid_named_frames = (
         replace(mount, owner_entity_id="entity.unknown", owner_link_id=None),
         replace(mount, owner_link_id="link.unknown"),
-        replace(mount, kind=PlanningFrameKind.LINK, role=None, semantic_key=None),
+        replace(mount, kind=PlanningFrameKind.LINK, name=None),
         replace(
             mount,
             kind=PlanningFrameKind.LINK,
             owner_link_id=None,
-            role=None,
-            semantic_key=None,
+            name=None,
         ),
     )
     for invalid_frame in invalid_named_frames:
@@ -1223,8 +1374,7 @@ def test_catalog_requires_exact_root_named_geometry_and_joint_frame_ancestry(pla
         left.root_frame_id,
         robot.entity_id,
         None,
-        PlanningFrameRole.ANNOTATION,
-        "annotation.cross_entity",
+        "cross_entity",
     )
     robot_with_cross_entity_frame = replace(
         robot,
@@ -1238,13 +1388,12 @@ def test_catalog_requires_exact_root_named_geometry_and_joint_frame_ancestry(pla
         )
 
     payload_named = PlanningFrameDescriptor(
-        "frame.payload.annotation",
+        "frame.payload.reference",
         PlanningFrameKind.NAMED,
         payload.root_frame_id,
         payload.entity_id,
         None,
-        PlanningFrameRole.ANNOTATION,
-        "annotation.payload",
+        "payload_reference",
     )
     payload_with_named_frame = replace(
         payload,

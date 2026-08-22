@@ -41,7 +41,6 @@ from unirobosim import (
     PlanningEntityKind,
     PlanningFrameDescriptor,
     PlanningFrameKind,
-    PlanningFrameRole,
     PlanningGeometryAxisConvention,
     PlanningGeometryContentProfile,
     PlanningGeometryDescriptor,
@@ -91,26 +90,22 @@ def planning_frame_declarations() -> dict[str, object]:
         "component_sha256": "a" * 64,
         "entries": (
             {
-                "semantic_key": "annotation.home",
-                "role": "annotation",
+                "name": "base_origin",
                 "owner_link": "robot",
                 "source": {"kind": "link", "name": "robot"},
             },
             {
-                "semantic_key": "ee.left",
-                "role": "ee",
+                "name": "elbow_mount",
                 "owner_link": "肩关节 child",
                 "source": {"kind": "link", "name": "肩关节 child"},
             },
             {
-                "semantic_key": "sensor.wrist",
-                "role": "sensor",
+                "name": "shoulder_mount",
                 "owner_link": "elbow joint child",
                 "source": {"kind": "link", "name": "elbow joint child"},
             },
             {
-                "semantic_key": "tool.tcp",
-                "role": "tool",
+                "name": "wrist_mount",
                 "owner_link": "elbow joint child",
                 "source": {"kind": "link", "name": "elbow joint child"},
             },
@@ -394,8 +389,7 @@ def test_planning_preflight_failures_are_typed_transactional_and_retryable() -> 
         "component_sha256": "a" * 64,
         "entries": (
             {
-                "semantic_key": "tool.missing",
-                "role": "tool",
+                "name": "missing_mount",
                 "owner_link": "missing link",
                 "source": {"kind": "link", "name": "missing link"},
             },
@@ -590,21 +584,10 @@ def test_named_frame_allow_list_comes_only_from_locked_declarations(planning_wor
                 for item in catalog.frames
                 if item.owner_entity_id == robot.entity_id and item.kind is PlanningFrameKind.NAMED
             ),
-            key=lambda item: item.semantic_key or "",
+            key=lambda item: item.name or "",
         )
     )
-    assert tuple(item.semantic_key for item in named) == (
-        "annotation.home",
-        "ee.left",
-        "sensor.wrist",
-        "tool.tcp",
-    )
-    assert {item.role for item in named} == {
-        PlanningFrameRole.ANNOTATION,
-        PlanningFrameRole.EE,
-        PlanningFrameRole.SENSOR,
-        PlanningFrameRole.TOOL,
-    }
+    assert tuple(item.name for item in named) == ("base_origin", "elbow_mount", "shoulder_mount", "wrist_mount")
     link_by_id = {item.link_id: item for item in catalog.links}
     assert all(
         item.owner_link_id is not None and item.parent_frame_id == link_by_id[item.owner_link_id].frame_id
@@ -621,8 +604,7 @@ def test_entity_root_named_frame_is_admitted_from_exact_root_link_source() -> No
         "component_sha256": "c" * 64,
         "entries": (
             {
-                "semantic_key": "annotation.root",
-                "role": "annotation",
+                "name": "payload_origin",
                 "owner_link": None,
                 "source": {"kind": "link", "name": "payload"},
             },
@@ -641,7 +623,7 @@ def test_entity_root_named_frame_is_admitted_from_exact_root_link_source() -> No
     try:
         catalog = world.planning_scene_catalog()
         descriptor = entity_by_path(catalog, "/payload")
-        named = next(item for item in catalog.frames if item.semantic_key == "annotation.root")
+        named = next(item for item in catalog.frames if item.name == "payload_origin")
         assert named.owner_entity_id == descriptor.entity_id
         assert named.owner_link_id is None
         assert named.parent_frame_id == descriptor.root_frame_id
@@ -756,8 +738,7 @@ def test_locked_joint_frame_source_resolves_and_unsupported_native_named_fails_p
     declarations = planning_frame_declarations()
     entries = list(declarations["entries"])
     entries[0] = {
-        "semantic_key": "annotation.home",
-        "role": "annotation",
+        "name": "base_origin",
         "owner_link": "robot",
         "source": {"kind": "joint", "name": "肩关节"},
     }
@@ -774,19 +755,18 @@ def test_locked_joint_frame_source_resolves_and_unsupported_native_named_fails_p
     world = session.build(joint_source_spec)
     try:
         catalog = world.planning_scene_catalog()
-        annotation = next(frame for frame in catalog.frames if frame.semantic_key == "annotation.home")
+        named = next(frame for frame in catalog.frames if frame.name == "base_origin")
         shoulder = next(joint for joint in catalog.joints if joint.authored_name == "肩关节")
-        assert annotation.parent_frame_id == shoulder.axis_frame_id
-        assert annotation.owner_link_id == shoulder.parent_link_id
+        assert named.parent_frame_id == shoulder.axis_frame_id
+        assert named.owner_link_id == shoulder.parent_link_id
     finally:
         session.close()
 
     native_entries = list(entries)
     native_entries[0] = {
-        "semantic_key": "annotation.home",
-        "role": "annotation",
+        "name": "base_origin",
         "owner_link": "robot",
-        "source": {"kind": "native_named", "name": "native_annotation"},
+        "source": {"kind": "native_named", "name": "native_mount"},
     }
     declarations["entries"] = tuple(native_entries)
     metadata["planning_frame_declarations"] = declarations
@@ -925,13 +905,12 @@ def test_named_frame_may_be_owned_by_link_without_being_primary_link_frame(plann
     owner = entity_by_path(catalog, "/robot")
     link = next(item for item in catalog.links if item.link_id == owner.link_ids[0])
     frame = PlanningFrameDescriptor(
-        "frame.robot.ee",
+        "frame.robot.mount",
         PlanningFrameKind.NAMED,
         link.frame_id,
         owner.entity_id,
         link.link_id,
-        PlanningFrameRole.EE,
-        "tcp",
+        "fixture_mount",
     )
     updated_owner = replace(owner, frame_ids=tuple(sorted((*owner.frame_ids, frame.frame_id))))
     entities = tuple(updated_owner if item.entity_id == owner.entity_id else item for item in catalog.entities)
@@ -948,7 +927,7 @@ def test_named_frame_may_be_owned_by_link_without_being_primary_link_frame(plann
         tuple(sorted((*catalog.frames, frame), key=lambda item: item.frame_id)),
         catalog.geometries,
     )
-    assert any(item.frame_id == "frame.robot.ee" for item in rebuilt.frames)
+    assert any(item.frame_id == "frame.robot.mount" for item in rebuilt.frames)
 
 
 def test_compound_parts_keep_nontrivial_geometry_local_poses(planning_world) -> None:

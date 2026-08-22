@@ -31,7 +31,7 @@ from .values import Tick
 
 PLANNING_SCENE_CAPABILITY_ID = "planning.scene@2"
 PLANNING_SCENE_SCHEMA_VERSION = "unirobosim.planning-scene/v2"
-PLANNING_FRAME_DECLARATIONS_SCHEMA_VERSION = "unirobosim.planning-frame-declarations/v1"
+PLANNING_FRAME_DECLARATIONS_SCHEMA_VERSION = "unirobosim.planning-frame-declarations/v2"
 PLANNING_SYSTEM_ENTITY_ID = "system.simulator_effective"
 PLANNING_SYSTEM_ENTITY_PATH = "/system/simulator_effective"
 PLANNING_GEOMETRY_READ_LIMIT_BYTES = 64 * 1024 * 1024
@@ -260,13 +260,6 @@ class PlanningFrameKind(StrEnum):
     NAMED = "named"
 
 
-class PlanningFrameRole(StrEnum):
-    EE = "ee"
-    TOOL = "tool"
-    SENSOR = "sensor"
-    ANNOTATION = "annotation"
-
-
 class PlanningFrameSourceKind(StrEnum):
     LINK = "link"
     JOINT = "joint"
@@ -443,18 +436,16 @@ class PlanningFrameSource(_PlanningValue):
 
 @dataclass(frozen=True, slots=True)
 class PlanningFrameDeclaration(_PlanningValue):
-    semantic_key: str
-    role: PlanningFrameRole
+    name: str
     owner_link_name: str | None
     source: PlanningFrameSource
 
     def __post_init__(self) -> None:
         object.__setattr__(
             self,
-            "semantic_key",
-            _text(self.semantic_key, "planning frame semantic_key", identifier=True),
+            "name",
+            _text(self.name, "planning frame name", identifier=True),
         )
-        object.__setattr__(self, "role", _enum(self.role, PlanningFrameRole, "planning frame role"))
         if self.owner_link_name is not None:
             object.__setattr__(
                 self,
@@ -482,7 +473,7 @@ class PlanningFrameDeclarations(_PlanningValue):
             _sha256(self.component_sha256, "planning frame component_sha256"),
         )
         entries = _typed_tuple(self.entries, PlanningFrameDeclaration, "planning frame declarations")
-        _unique_sorted(entries, "semantic_key", "planning frame declarations")
+        _unique_sorted(entries, "name", "planning frame declarations")
 
 
 @_planning_method_boundary
@@ -490,8 +481,8 @@ def parse_planning_frame_declarations(value: object) -> PlanningFrameDeclaration
     """Validate FastSim's immutable, canonical planning-frame projection.
 
     The metadata record is intentionally narrow.  Adapters receive only locked
-    semantic intent and an exact source selector; they never infer frames from
-    native names or enumerate arbitrary SDK transforms.
+    selected physical frame names and exact source selectors; they never infer
+    frames from native names or enumerate arbitrary SDK transforms.
     """
 
     if value is None:
@@ -512,8 +503,7 @@ def parse_planning_frame_declarations(value: object) -> PlanningFrameDeclaration
         for index in range(tuple.__len__(raw_entries)):
             raw_entry = tuple.__getitem__(raw_entries, index)
             if type(raw_entry) is not FrozenMap or frozenset(raw_entry) != {
-                "semantic_key",
-                "role",
+                "name",
                 "owner_link",
                 "source",
             }:
@@ -523,8 +513,7 @@ def parse_planning_frame_declarations(value: object) -> PlanningFrameDeclaration
                 raise _invalid("planning frame declaration source has an invalid mapping shape") from None
             entries.append(
                 PlanningFrameDeclaration(
-                    raw_entry["semantic_key"],
-                    raw_entry["role"],
+                    raw_entry["name"],
                     raw_entry["owner_link"],
                     PlanningFrameSource(raw_source["kind"], raw_source["name"]),
                 )
@@ -854,8 +843,7 @@ class PlanningFrameDescriptor(_PlanningValue):
     parent_frame_id: str | None
     owner_entity_id: str | None
     owner_link_id: str | None
-    role: PlanningFrameRole | None = None
-    semantic_key: str | None = None
+    name: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "frame_id", _text(self.frame_id, "frame_id", identifier=True))
@@ -873,16 +861,15 @@ class PlanningFrameDescriptor(_PlanningValue):
         if self.parent_frame_id == self.frame_id:
             raise _invalid("a frame cannot parent itself") from None
         if kind is PlanningFrameKind.NAMED:
-            if self.role is None or self.semantic_key is None:
-                raise _invalid("named frames require role and semantic_key") from None
-            object.__setattr__(self, "role", _enum(self.role, PlanningFrameRole, "frame role"))
+            if self.name is None:
+                raise _invalid("named frames require a name") from None
             object.__setattr__(
                 self,
-                "semantic_key",
-                _text(self.semantic_key, "frame semantic_key", identifier=True),
+                "name",
+                _text(self.name, "frame name", identifier=True),
             )
-        elif self.role is not None or self.semantic_key is not None:
-            raise _invalid("physical frames cannot declare role or semantic_key") from None
+        elif self.name is not None:
+            raise _invalid("world/entity/link/joint frames cannot declare a name") from None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1302,10 +1289,10 @@ class PlanningSceneCatalog(_PlanningValue):
         for frame in frames_:
             if frame.kind is not PlanningFrameKind.NAMED:
                 continue
-            assert frame.owner_entity_id is not None and frame.semantic_key is not None
-            key = frame.owner_entity_id, frame.semantic_key
+            assert frame.owner_entity_id is not None and frame.name is not None
+            key = frame.owner_entity_id, frame.name
             if key in named_keys:
-                raise _invalid("named frame semantic keys must be unique within an entity") from None
+                raise _invalid("named frame names must be unique within an entity") from None
             named_keys.add(key)
 
         link_geometry_owner: dict[str, str] = {}
@@ -2288,7 +2275,6 @@ __all__ = [
     "PlanningFrameDeclaration",
     "PlanningFrameDeclarations",
     "PlanningFrameKind",
-    "PlanningFrameRole",
     "PlanningFrameSource",
     "PlanningFrameSourceKind",
     "PlanningFrameState",
