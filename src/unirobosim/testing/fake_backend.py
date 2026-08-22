@@ -14,6 +14,7 @@ import re
 import struct
 import threading
 from collections.abc import Callable, Iterable
+from contextlib import ExitStack
 from dataclasses import dataclass, field
 from functools import wraps
 from types import TracebackType
@@ -315,6 +316,7 @@ class _PointRuntime:
 @dataclass
 class _PlanningLeaseEpoch:
     live: bool = True
+    lock: threading.RLock = field(default_factory=threading.RLock)
 
 
 @dataclass
@@ -348,6 +350,7 @@ class _FakePlanningEnvironmentRuntime:
 class _FakePlanningRuntime:
     authority_thread_id: int
     environments: dict[int, _FakePlanningEnvironmentRuntime]
+    publication_lock: threading.RLock = field(default_factory=threading.RLock)
     storage_cache: dict[tuple[str, PlanningGeometryRepresentation, str], tuple[bytes, str]] = field(
         default_factory=dict
     )
@@ -368,7 +371,62 @@ class _FakePlanningStepSnapshot:
     debug_expirations: dict[tuple[str, str, str], int | None]
 
 
+@dataclass
+class _FakePlanningSceneCommandSnapshot:
+    scene_sequence: int
+    scene_results: dict[str, SceneCommandResult]
+    active_drags: dict[str, tuple[EntityPath, int, Pose]]
+    rigids: dict[
+        EntityPath,
+        tuple[list[list[float]], list[list[float]], list[list[float]], list[list[float]]],
+    ]
+
+
+@dataclass
+class _FakePlanningResetSnapshot:
+    reset_count: int
+    scene_sequence: int
+    articulations: dict[
+        EntityPath,
+        tuple[
+            list[list[float]],
+            list[list[float]],
+            list[list[CommandMode]],
+            list[list[float]],
+        ],
+    ]
+    rigids: dict[
+        EntityPath,
+        tuple[
+            list[list[float]],
+            list[list[float]],
+            list[list[float]],
+            list[list[float]],
+            list[list[float]],
+            list[list[float]],
+        ],
+    ]
+    points: dict[
+        EntityPath,
+        tuple[
+            list[list[list[float]]],
+            list[list[list[float]]],
+            list[list[PointCommandMode]],
+            list[list[list[float]]],
+        ],
+    ]
+    debug_primitives: dict[tuple[str, str, str], DebugPrimitive]
+    debug_expirations: dict[tuple[str, str, str], int | None]
+
+
+@dataclass(frozen=True)
+class _FakePlanningPublication:
+    environments: dict[int, _FakePlanningEnvironmentRuntime]
+    revoke_epochs: tuple[_PlanningLeaseEpoch, ...] = ()
+
+
 _PlanningResultT = TypeVar("_PlanningResultT")
+_PlanningUndoT = TypeVar("_PlanningUndoT")
 
 _PLANNING_ERROR_TYPES: tuple[type[PlanningSceneError], ...] = (
     PlanningSceneContractError,
@@ -436,26 +494,29 @@ class _FakePlanningGeometryLease:
     @property
     def descriptor(self) -> PlanningGeometryResourceDescriptor:
         with self._lock:
-            self._ensure_live()
-            return self._descriptor
+            with self._epoch.lock:
+                self._ensure_live()
+                return self._descriptor
 
     @property
     def closed(self) -> bool:
         with self._lock:
-            return self._closed or not self._epoch.live
+            with self._epoch.lock:
+                return self._closed or not self._epoch.live
 
     @_planning_error_boundary
     def read(self, offset: int = 0, length: int | None = None) -> bytes:
         with self._lock:
-            self._ensure_live()
-            start, count = self._descriptor.read_span(offset, length)
-            result = self._content[start : start + count]
-            if type(result) is not bytes or len(result) != count:
-                raise PlanningSceneContractError(
-                    "planning geometry storage returned an invalid byte span",
-                    operation="planning_geometry.read",
-                ) from None
-            return result
+            with self._epoch.lock:
+                self._ensure_live()
+                start, count = self._descriptor.read_span(offset, length)
+                result = self._content[start : start + count]
+                if type(result) is not bytes or len(result) != count:
+                    raise PlanningSceneContractError(
+                        "planning geometry storage returned an invalid byte span",
+                        operation="planning_geometry.read",
+                    ) from None
+                return result
 
     def close(self) -> None:
         with self._lock:
@@ -802,6 +863,7 @@ class FakeWorld:
     # Installed only by ``FakePlanningWorld``.  A type annotation creates no
     # instance field and keeps the no-demand object layout unchanged.
     _planning_runtime: _FakePlanningRuntime
+    _planning_candidate_environment: tuple[int, _FakePlanningEnvironmentRuntime] | None
 
     def __init__(self, session: FakeSession, spec: WorldSpec, generation: int) -> None:
         self._session = session
@@ -1281,10 +1343,22 @@ class FakeWorld:
             declaration.semantic_key,
         )
 
+    def _planning_environment_for_capture(self, environment_index: int) -> _FakePlanningEnvironmentRuntime:
+        candidate = self._planning_candidate_environment
+        if candidate is not None:
+            if candidate[0] != environment_index:
+                raise PlanningSceneContractError(
+                    "planning candidate environment scope is inconsistent",
+                    operation="planning_scene.commit",
+                    world_id=self.world_id,
+                ) from None
+            return candidate[1]
+        return self._planning_runtime.environments[environment_index]
+
     def _build_planning_catalog(self, environment_index: int) -> PlanningSceneCatalog:
         runtime = self._planning_runtime
         assert runtime is not None
-        environment_runtime = runtime.environments[environment_index]
+        environment_runtime = self._planning_environment_for_capture(environment_index)
         system_frame_id = "frame.system.simulator_effective"
         system_geometry_id = "geometry.system.simulator_effective.ground"
         system_provenance = self._planning_provenance_sha256(
@@ -1611,7 +1685,7 @@ class FakeWorld:
     def _capture_planning_state(self, environment_index: int) -> PlanningSceneState:
         runtime = self._planning_runtime
         assert runtime is not None
-        environment_runtime = runtime.environments[environment_index]
+        environment_runtime = self._planning_environment_for_capture(environment_index)
         catalog = environment_runtime.catalog
         assert catalog is not None
         spec_by_path = {entity.path.value: entity for entity in self._spec.entities}
@@ -1700,9 +1774,7 @@ class FakeWorld:
         state.validate_against(catalog)
         return state
 
-    def _initialize_planning_scene(self, environment_indices: tuple[int, ...] | None = None) -> None:
-        runtime = self._planning_runtime
-        assert runtime is not None
+    def _planning_validate_admission(self) -> None:
         for key, label in (
             ("fake_planning_unmapped_native_colliders", "native collision inventory"),
             ("fake_planning_untracked_constraints", "persistent constraint inventory"),
@@ -1713,12 +1785,156 @@ class FakeWorld:
                     f"fake {label} is incomplete",
                     operation="planning_scene.preflight",
                 ) from None
-        selected = tuple(range(self._spec.environments.count)) if environment_indices is None else environment_indices
-        for environment_index in selected:
-            runtime.environments[environment_index].catalog = self._build_planning_catalog(environment_index)
-        for environment_index in selected:
+
+    def _planning_validate_candidate_state(
+        self,
+        environment_index: int,
+        environment_runtime: _FakePlanningEnvironmentRuntime,
+        state: PlanningSceneState,
+        *,
+        operation: str,
+    ) -> None:
+        catalog = environment_runtime.catalog
+        if type(catalog) is not PlanningSceneCatalog or type(state) is not PlanningSceneState:
+            raise PlanningSceneContractError(
+                "planning candidate publication is incomplete",
+                operation=operation,
+                world_id=self.world_id,
+            ) from None
+        state.validate_against(catalog)
+        if (
+            state.provider_id != self._session.descriptor.provider_id
+            or state.world_id != self.world_id
+            or state.environment_index != environment_index
+            or state.generation != environment_runtime.generation
+            or state.tick != self.tick
+            or state.sequence != environment_runtime.sequence
+            or state.world_revision != environment_runtime.world_revision
+            or state.catalog_revision != environment_runtime.catalog_revision
+            or state.geometry_revision != environment_runtime.geometry_revision
+            or state.catalog_content_sha256 != catalog.content_sha256
+            or state.transform_revision != environment_runtime.transform_revision
+            or state.attachment_revision != environment_runtime.attachment_revision
+        ):
+            raise PlanningSceneContractError(
+                "planning candidate state identity is inconsistent",
+                operation=operation,
+                world_id=self.world_id,
+            ) from None
+
+    def _planning_capture_candidate_state(
+        self,
+        environment_index: int,
+        environment_runtime: _FakePlanningEnvironmentRuntime,
+        *,
+        rebuild_catalog: bool,
+        operation: str,
+    ) -> PlanningSceneState:
+        if self._planning_candidate_environment is not None:
+            raise PlanningSceneContractError(
+                "planning candidate capture cannot be re-entered",
+                operation=operation,
+                world_id=self.world_id,
+            ) from None
+        self._planning_candidate_environment = (environment_index, environment_runtime)
+        try:
+            if rebuild_catalog:
+                environment_runtime.catalog = self._build_planning_catalog(environment_index)
             state = self._capture_planning_state(environment_index)
-            runtime.environments[environment_index].history = {state.sequence: state}
+        finally:
+            self._planning_candidate_environment = None
+        self._planning_validate_candidate_state(
+            environment_index,
+            environment_runtime,
+            state,
+            operation=operation,
+        )
+        return state
+
+    @staticmethod
+    def _planning_clone_environment(
+        environment: _FakePlanningEnvironmentRuntime,
+    ) -> _FakePlanningEnvironmentRuntime:
+        return _FakePlanningEnvironmentRuntime(
+            generation=environment.generation,
+            sequence=environment.sequence,
+            world_revision=environment.world_revision,
+            catalog_revision=environment.catalog_revision,
+            geometry_revision=environment.geometry_revision,
+            transform_revision=environment.transform_revision,
+            attachment_revision=environment.attachment_revision,
+            force_resync=environment.force_resync,
+            lease_serial=environment.lease_serial,
+            lease_epoch=environment.lease_epoch,
+            raw_resources=dict(environment.raw_resources),
+            catalog=environment.catalog,
+            history=dict(environment.history),
+        )
+
+    def _planning_stage_rebuild(
+        self,
+        environment_indices: tuple[int, ...],
+        *,
+        reset: bool,
+        operation: str,
+    ) -> _FakePlanningPublication:
+        runtime = self._planning_runtime
+        staged: dict[int, _FakePlanningEnvironmentRuntime] = {}
+        revoke_epochs: list[_PlanningLeaseEpoch] = []
+        for environment_index in environment_indices:
+            current = runtime.environments[environment_index]
+            if reset:
+                candidate = _FakePlanningEnvironmentRuntime(
+                    generation=current.generation + 1,
+                    force_resync=True,
+                )
+                revoke_epochs.append(current.lease_epoch)
+            else:
+                candidate = self._planning_clone_environment(current)
+                candidate.raw_resources = {}
+                candidate.catalog = None
+                candidate.history = {}
+            state = self._planning_capture_candidate_state(
+                environment_index,
+                candidate,
+                rebuild_catalog=True,
+                operation=operation,
+            )
+            candidate.history = {state.sequence: state}
+            staged[environment_index] = candidate
+        next_environments = dict(runtime.environments)
+        next_environments.update(staged)
+        return _FakePlanningPublication(next_environments, tuple(revoke_epochs))
+
+    def _planning_publish(self, publication: _FakePlanningPublication) -> None:
+        runtime = self._planning_runtime
+        previous_environments = runtime.environments
+        previous_liveness = tuple(epoch.live for epoch in publication.revoke_epochs)
+        with runtime.publication_lock:
+            with ExitStack() as locks:
+                for epoch in publication.revoke_epochs:
+                    locks.enter_context(epoch.lock)
+                try:
+                    runtime.environments = publication.environments
+                    for epoch in publication.revoke_epochs:
+                        epoch.live = False
+                except BaseException:
+                    runtime.environments = previous_environments
+                    for epoch, live in zip(publication.revoke_epochs, previous_liveness, strict=True):
+                        epoch.live = live
+                    raise
+
+    def _initialize_planning_scene(self, environment_indices: tuple[int, ...] | None = None) -> None:
+        runtime = self._planning_runtime
+        assert runtime is not None
+        self._planning_validate_admission()
+        selected = tuple(range(self._spec.environments.count)) if environment_indices is None else environment_indices
+        publication = self._planning_stage_rebuild(
+            selected,
+            reset=False,
+            operation="planning_scene.preflight",
+        )
+        self._planning_publish(publication)
 
     @property
     def world_id(self) -> str:
@@ -1879,10 +2095,17 @@ class FakeWorld:
                 catalog=environment_runtime.catalog,
                 state=current,
             )
-        if (
-            current.attachment_revision != base.attachment_revision
-            and current.transform_revision == base.transform_revision
-        ):
+        attachment_changed = current.attachment_revision != base.attachment_revision
+        transform_changed = current.transform_revision != base.transform_revision
+        if attachment_changed and transform_changed:
+            return self._planning_delta_value(
+                current,
+                current,
+                base_sequence,
+                PlanningSceneDeltaKind.RESYNC,
+                resync_required=True,
+            )
+        if attachment_changed:
             return self._planning_delta_value(
                 current,
                 base,
@@ -2133,41 +2356,130 @@ class FakeWorld:
                 world_id=self.world_id,
             ) from None
 
-    def _planning_commit_state(self, environment_indices: tuple[int, ...] | None = None) -> None:
+    def _planning_stage_commit_state(
+        self,
+        environment_indices: tuple[int, ...] | None = None,
+        *,
+        operation: str = "planning_scene.commit",
+    ) -> _FakePlanningPublication:
         runtime = self._planning_runtime
         selected = tuple(runtime.environments) if environment_indices is None else environment_indices
-        self._planning_require_commit_capacity(selected, operation="planning_scene.commit")
-        staged: list[tuple[int, PlanningSceneState, dict[int, PlanningSceneState], bool]] = []
+        self._planning_require_commit_capacity(selected, operation=operation)
+        staged: dict[int, _FakePlanningEnvironmentRuntime] = {}
         for environment_index in selected:
-            environment_runtime = runtime.environments[environment_index]
-            previous_sequence = environment_runtime.sequence
-            previous_world_revision = environment_runtime.world_revision
-            previous_transform_revision = environment_runtime.transform_revision
-            environment_runtime.sequence += 1
-            environment_runtime.world_revision += 1
-            environment_runtime.transform_revision += 1
-            try:
-                state = self._capture_planning_state(environment_index)
-            finally:
-                environment_runtime.sequence = previous_sequence
-                environment_runtime.world_revision = previous_world_revision
-                environment_runtime.transform_revision = previous_transform_revision
-            history = dict(environment_runtime.history)
-            history[state.sequence] = state
-            while len(history) > 128:
-                del history[next(iter(history))]
-            force_resync = environment_runtime.force_resync or any(
-                counter == _FAKE_PLANNING_MAX_COUNTER
-                for counter in (state.sequence, state.world_revision, state.transform_revision)
+            current = runtime.environments[environment_index]
+            previous = current.history.get(current.sequence)
+            if type(previous) is not PlanningSceneState:
+                raise PlanningSceneContractError(
+                    "planning committed history is incomplete",
+                    operation=operation,
+                    world_id=self.world_id,
+                ) from None
+            candidate = self._planning_clone_environment(current)
+            candidate.sequence += 1
+            candidate.world_revision += 1
+            candidate.transform_revision += 1
+            state = self._planning_capture_candidate_state(
+                environment_index,
+                candidate,
+                rebuild_catalog=False,
+                operation=operation,
             )
-            staged.append((environment_index, state, history, force_resync))
-        for environment_index, state, history, force_resync in staged:
-            environment_runtime = runtime.environments[environment_index]
-            environment_runtime.sequence = state.sequence
-            environment_runtime.world_revision = state.world_revision
-            environment_runtime.transform_revision = state.transform_revision
-            environment_runtime.history = history
-            environment_runtime.force_resync = force_resync
+            attachments_changed = state.attachments != previous.attachments
+            if attachments_changed:
+                if (
+                    type(current.attachment_revision) is not int
+                    or not 1 <= current.attachment_revision < _FAKE_PLANNING_MAX_COUNTER
+                ):
+                    raise PlanningSceneContractError(
+                        "planning attachment identity is exhausted; reset is required",
+                        operation=operation,
+                        world_id=self.world_id,
+                    ) from None
+                candidate.attachment_revision += 1
+                candidate.force_resync = True
+                state = self._planning_capture_candidate_state(
+                    environment_index,
+                    candidate,
+                    rebuild_catalog=False,
+                    operation=operation,
+                )
+                history = {state.sequence: state}
+            else:
+                history = dict(current.history)
+                history[state.sequence] = state
+                while len(history) > 128:
+                    del history[next(iter(history))]
+            candidate.force_resync = candidate.force_resync or any(
+                counter == _FAKE_PLANNING_MAX_COUNTER
+                for counter in (
+                    state.sequence,
+                    state.world_revision,
+                    state.transform_revision,
+                    state.attachment_revision,
+                )
+            )
+            candidate.history = history
+            staged[environment_index] = candidate
+        next_environments = dict(runtime.environments)
+        next_environments.update(staged)
+        return _FakePlanningPublication(next_environments)
+
+    def _planning_commit_state(self, environment_indices: tuple[int, ...] | None = None) -> None:
+        self._planning_publish(self._planning_stage_commit_state(environment_indices))
+
+    def _planning_run_mutation(
+        self,
+        capture_snapshot: Callable[[], _PlanningUndoT],
+        restore_snapshot: Callable[[_PlanningUndoT], None],
+        ordinary_mutation: Callable[[], _PlanningResultT],
+        prepare_publication: Callable[[_PlanningResultT], _FakePlanningPublication | None],
+    ) -> _PlanningResultT:
+        snapshot = capture_snapshot()
+        try:
+            result = ordinary_mutation()
+            publication = prepare_publication(result)
+            if publication is not None:
+                self._planning_publish(publication)
+        except BaseException:
+            restore_snapshot(snapshot)
+            raise
+        return result
+
+    def _planning_capture_scene_command_snapshot(self) -> _FakePlanningSceneCommandSnapshot:
+        return _FakePlanningSceneCommandSnapshot(
+            self._scene_sequence,
+            dict(self._scene_results),
+            dict(self._active_drags),
+            {
+                path: (
+                    _copy_vectors(runtime.positions),
+                    _copy_vectors(runtime.orientations),
+                    _copy_vectors(runtime.linear_velocities),
+                    _copy_vectors(runtime.angular_velocities),
+                )
+                for path, runtime in self._rigids.items()
+            },
+        )
+
+    def _planning_restore_scene_command_snapshot(
+        self,
+        snapshot: _FakePlanningSceneCommandSnapshot,
+    ) -> None:
+        self._scene_sequence = snapshot.scene_sequence
+        self._scene_results = snapshot.scene_results
+        self._active_drags = snapshot.active_drags
+        for path, (
+            positions,
+            orientations,
+            linear_velocities,
+            angular_velocities,
+        ) in snapshot.rigids.items():
+            runtime = self._rigids[path]
+            runtime.positions = positions
+            runtime.orientations = orientations
+            runtime.linear_velocities = linear_velocities
+            runtime.angular_velocities = angular_velocities
 
     def _planning_capture_step_snapshot(self) -> _FakePlanningStepSnapshot:
         return _FakePlanningStepSnapshot(
@@ -2222,26 +2534,95 @@ class FakeWorld:
         self._debug_primitives = snapshot.debug_primitives
         self._debug_expirations = snapshot.debug_expirations
 
-    def _planning_reset(self, environment_indices: tuple[int, ...]) -> None:
-        runtime = self._planning_runtime
+    def _planning_capture_reset_snapshot(self) -> _FakePlanningResetSnapshot:
+        return _FakePlanningResetSnapshot(
+            self._reset_count,
+            self._scene_sequence,
+            {
+                path: (
+                    _copy_vectors(runtime.positions),
+                    _copy_vectors(runtime.velocities),
+                    [list(values) for values in runtime.modes],
+                    _copy_vectors(runtime.targets),
+                )
+                for path, runtime in self._articulations.items()
+            },
+            {
+                path: (
+                    _copy_vectors(runtime.positions),
+                    _copy_vectors(runtime.orientations),
+                    _copy_vectors(runtime.linear_velocities),
+                    _copy_vectors(runtime.angular_velocities),
+                    _copy_vectors(runtime.forces),
+                    _copy_vectors(runtime.torques),
+                )
+                for path, runtime in self._rigids.items()
+            },
+            {
+                path: (
+                    [_copy_vectors(environment) for environment in runtime.positions],
+                    [_copy_vectors(environment) for environment in runtime.velocities],
+                    [list(values) for values in runtime.modes],
+                    [_copy_vectors(environment) for environment in runtime.targets],
+                )
+                for path, runtime in self._points.items()
+            },
+            dict(self._debug_primitives),
+            dict(self._debug_expirations),
+        )
+
+    def _planning_restore_reset_snapshot(self, snapshot: _FakePlanningResetSnapshot) -> None:
+        self._reset_count = snapshot.reset_count
+        self._scene_sequence = snapshot.scene_sequence
+        for path, (positions, velocities, modes, targets) in snapshot.articulations.items():
+            articulation_runtime = self._articulations[path]
+            articulation_runtime.positions = positions
+            articulation_runtime.velocities = velocities
+            articulation_runtime.modes = modes
+            articulation_runtime.targets = targets
+        for path, (
+            positions,
+            orientations,
+            linear_velocities,
+            angular_velocities,
+            forces,
+            torques,
+        ) in snapshot.rigids.items():
+            rigid_runtime = self._rigids[path]
+            rigid_runtime.positions = positions
+            rigid_runtime.orientations = orientations
+            rigid_runtime.linear_velocities = linear_velocities
+            rigid_runtime.angular_velocities = angular_velocities
+            rigid_runtime.forces = forces
+            rigid_runtime.torques = torques
+        for path, (
+            point_positions,
+            point_velocities,
+            point_modes,
+            point_targets,
+        ) in snapshot.points.items():
+            point_runtime = self._points[path]
+            point_runtime.positions = point_positions
+            point_runtime.velocities = point_velocities
+            point_runtime.modes = point_modes
+            point_runtime.targets = point_targets
+        self._debug_primitives = snapshot.debug_primitives
+        self._debug_expirations = snapshot.debug_expirations
+
+    def _planning_stage_reset(
+        self,
+        environment_indices: tuple[int, ...],
+    ) -> _FakePlanningPublication:
         self._planning_require_reset_capacity(environment_indices, operation="world.reset")
-        for index in environment_indices:
-            environment_runtime = runtime.environments[index]
-            environment_runtime.lease_epoch.live = False
-            environment_runtime.lease_epoch = _PlanningLeaseEpoch()
-            environment_runtime.raw_resources.clear()
-            environment_runtime.catalog = None
-            environment_runtime.history.clear()
-            environment_runtime.generation += 1
-            environment_runtime.sequence = 1
-            environment_runtime.world_revision = 1
-            environment_runtime.catalog_revision = 1
-            environment_runtime.geometry_revision = 1
-            environment_runtime.transform_revision = 1
-            environment_runtime.attachment_revision = 1
-            environment_runtime.force_resync = True
-            environment_runtime.lease_serial = 0
-        self._initialize_planning_scene(environment_indices)
+        self._planning_validate_admission()
+        return self._planning_stage_rebuild(
+            environment_indices,
+            reset=True,
+            operation="world.reset",
+        )
+
+    def _planning_reset(self, environment_indices: tuple[int, ...]) -> None:
+        self._planning_publish(self._planning_stage_reset(environment_indices))
 
     def _ensure_ready(self, operation: str) -> None:
         if self._state is not WorldState.READY:
@@ -3091,6 +3472,7 @@ class FakePlanningWorld(FakeWorld):
 
     def __init__(self, session: FakeSession, spec: WorldSpec, generation: int) -> None:
         super().__init__(session, spec, generation)
+        self._planning_candidate_environment = None
         self._planning_runtime = _FakePlanningRuntime(
             threading.get_ident(),
             {index: _FakePlanningEnvironmentRuntime(generation) for index in range(spec.environments.count)},
@@ -3142,6 +3524,7 @@ class FakePlanningWorld(FakeWorld):
     ) -> PlanningGeometryLease:
         return self._resolve_planning_geometry_impl(geometry_id, representation, environment_index)
 
+    @_planning_error_boundary
     def reset(self, environment_indices: Iterable[int] | None = None) -> ResetResult:
         self._ensure_ready("world.reset")
         environments = self._indices(
@@ -3151,10 +3534,21 @@ class FakePlanningWorld(FakeWorld):
             operation="world.reset",
         )
         self._planning_require_reset_capacity(environments, operation="world.reset")
-        result = super().reset(environments)
-        self._planning_reset(result.environment_indices)
-        return result
 
+        def mutate() -> ResetResult:
+            return super(FakePlanningWorld, self).reset(environments)
+
+        def prepare(result: ResetResult) -> _FakePlanningPublication:
+            return self._planning_stage_reset(result.environment_indices)
+
+        return self._planning_run_mutation(
+            self._planning_capture_reset_snapshot,
+            self._planning_restore_reset_snapshot,
+            mutate,
+            prepare,
+        )
+
+    @_planning_error_boundary
     def step(self, count: int = 1) -> Tick:
         self._ensure_ready("world.step")
         canonical_count: object = None
@@ -3185,16 +3579,23 @@ class FakePlanningWorld(FakeWorld):
                 operation="world.step",
                 world_id=self.world_id,
             ) from None
-        snapshot = self._planning_capture_step_snapshot()
-        try:
-            result = super().step(canonical_count)
-            self._planning_commit_state()
-        except BaseException:
-            self._planning_restore_step_snapshot(snapshot)
-            raise
-        return result
+
+        def mutate() -> Tick:
+            return super(FakePlanningWorld, self).step(canonical_count)
+
+        def prepare(_result: Tick) -> _FakePlanningPublication:
+            return self._planning_stage_commit_state(operation="world.step")
+
+        return self._planning_run_mutation(
+            self._planning_capture_step_snapshot,
+            self._planning_restore_step_snapshot,
+            mutate,
+            prepare,
+        )
 
     def _planning_scene_command_will_commit(self, command: object) -> bool:
+        """Compatibility probe only; transactional publication does not depend on it."""
+
         if not isinstance(command, SceneCommand):
             return False
         if command.command_id in self._scene_results or command.expected_generation != self.generation:
@@ -3214,24 +3615,36 @@ class FakePlanningWorld(FakeWorld):
         active = self._active_drags.get(command.drag_id)
         return active is not None and active[:2] == (entity.path, command.environment_index)
 
+    @_planning_error_boundary
     def apply_scene_command(self, command: SceneCommand) -> SceneCommandResult:
-        if self._planning_scene_command_will_commit(command):
-            self._planning_require_commit_capacity(
+        def mutate() -> SceneCommandResult:
+            return super(FakePlanningWorld, self).apply_scene_command(command)
+
+        def prepare(result: SceneCommandResult) -> _FakePlanningPublication | None:
+            if result.status is not SceneCommandStatus.APPLIED:
+                return None
+            return self._planning_stage_commit_state(
                 (command.environment_index,),
                 operation="world.apply_scene_command",
             )
-        result = super().apply_scene_command(command)
-        if result.status is SceneCommandStatus.APPLIED:
-            self._planning_commit_state((command.environment_index,))
-        return result
+
+        return self._planning_run_mutation(
+            self._planning_capture_scene_command_snapshot,
+            self._planning_restore_scene_command_snapshot,
+            mutate,
+            prepare,
+        )
 
     def _close(self, *, notify_session: bool) -> None:
         if self._state is not WorldState.CLOSED:
             runtime = self._planning_runtime
-            for environment_runtime in runtime.environments.values():
-                environment_runtime.lease_epoch.live = False
-                environment_runtime.history.clear()
-                environment_runtime.catalog = None
-                environment_runtime.raw_resources.clear()
-            runtime.storage_cache.clear()
+            with runtime.publication_lock:
+                for environment_runtime in runtime.environments.values():
+                    with environment_runtime.lease_epoch.lock:
+                        environment_runtime.lease_epoch.live = False
+                    environment_runtime.history.clear()
+                    environment_runtime.catalog = None
+                    environment_runtime.raw_resources.clear()
+                runtime.storage_cache.clear()
+            self._planning_candidate_environment = None
         super()._close(notify_session=notify_session)

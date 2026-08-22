@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import gc
 import math
+import tracemalloc
 import unittest
+import weakref
 from collections.abc import Iterator, Mapping
+from unittest import mock
 
+import unirobosim.api.frozen as frozen_contract
 from unirobosim import (
     ArrayValue,
     EntityHandle,
@@ -197,6 +202,190 @@ class FrozenJsonTests(unittest.TestCase):
 
         frozen = FrozenMap(CustomMapping())
         self.assertEqual(frozen, FrozenMap({"payload": (1, 2, 3)}))
+
+    def test_streaming_container_budget_counts_duplicates_and_accepts_exact_boundary(self) -> None:
+        class RepeatingMapping(Mapping[str, object]):
+            def __init__(self, repetitions: int) -> None:
+                self.repetitions = repetitions
+                self.yielded = 0
+
+            def __getitem__(self, key: str) -> object:
+                if key != "key":
+                    raise KeyError(key)
+                return 7
+
+            def __iter__(self) -> Iterator[str]:
+                return iter(("key",))
+
+            def __len__(self) -> int:
+                return 1
+
+            def items(self):
+                for _ in range(self.repetitions):
+                    self.yielded += 1
+                    yield "key", 7
+
+        boundary = RepeatingMapping(100_000)
+        frozen = FrozenMap(boundary)
+        self.assertEqual((boundary.yielded, len(frozen), frozen["key"]), (100_000, 1, 7))
+
+        oversized = RepeatingMapping(200_000)
+        tracemalloc.start()
+        try:
+            with self.assertRaises(ValidationError) as caught:
+                FrozenMap(oversized)
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        self.assertEqual(oversized.yielded, 100_001)
+        self.assertLess(peak, 512 * 1024)
+        self.assertEqual(caught.exception.message, "JSON container item budget exceeded")
+        self.assertIsNone(caught.exception.__cause__)
+        self.assertIsNone(caught.exception.__context__)
+
+    def test_nested_frozen_maps_share_the_same_occurrence_budget(self) -> None:
+        inner = FrozenMap((("payload", [None] * 99_999),))
+        self.assertEqual(FrozenMap(inner), inner)
+        self.assertEqual(freeze_json(inner), inner)
+
+        with self.assertRaises(ValidationError, msg="a nested map adds one pair occurrence") as nested:
+            FrozenMap({"nested": inner})
+        self.assertEqual(nested.exception.message, "JSON container item budget exceeded")
+
+        with self.assertRaises(ValidationError, msg="aliased maps count once per occurrence") as aliased:
+            freeze_json([inner] * 100_000)
+        self.assertEqual(aliased.exception.message, "JSON container item budget exceeded")
+
+    def test_container_hook_failures_are_fixed_typed_and_do_not_retain_source_graph(self) -> None:
+        class Sidecar:
+            pass
+
+        class InterruptingMapping(Mapping[str, object]):
+            def __init__(self, sidecar: object) -> None:
+                self.sidecar = sidecar
+
+            def __getitem__(self, key: str) -> object:
+                raise AssertionError(key)
+
+            def __iter__(self) -> Iterator[str]:
+                raise AssertionError("mapping iteration must not run")
+
+            def __len__(self) -> int:
+                return 1
+
+            def items(self):
+                raise KeyboardInterrupt("private input", self.sidecar)
+
+        sidecar = Sidecar()
+        reference = weakref.ref(sidecar)
+        source = InterruptingMapping(sidecar)
+        failure: ValidationError | None = None
+        try:
+            FrozenMap(source)
+        except ValidationError as caught:
+            failure = caught
+        self.assertIsNotNone(failure)
+        assert failure is not None
+        self.assertEqual(
+            failure.message,
+            "FrozenMap input must contain JSON-compatible string-keyed pairs",
+        )
+        self.assertIsNone(failure.__cause__)
+        self.assertIsNone(failure.__context__)
+        traceback = failure.__traceback__
+        while traceback is not None:
+            if traceback.tb_frame.f_code.co_filename.endswith("frozen.py"):
+                self.assertFalse(any(value is source for value in traceback.tb_frame.f_locals.values()))
+            traceback = traceback.tb_next
+        failure.__traceback__ = None
+        source = None
+        sidecar = None
+        gc.collect()
+        self.assertIsNone(reference())
+
+    def test_iterator_and_pair_baseexceptions_share_the_fixed_failure_boundary(self) -> None:
+        class FailingIterator:
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                raise SystemExit("private iterator payload")
+
+        class Pair:
+            def __iter__(self):
+                raise GeneratorExit("private pair payload")
+
+        for source in (FailingIterator(), (Pair(),)):
+            with self.subTest(source_type=type(source)), self.assertRaises(ValidationError) as caught:
+                FrozenMap(source)  # type: ignore[arg-type]
+            self.assertEqual(
+                caught.exception.message,
+                "FrozenMap input must contain JSON-compatible string-keyed pairs",
+            )
+            self.assertIsNone(caught.exception.__cause__)
+            self.assertIsNone(caught.exception.__context__)
+
+    def test_streaming_detachment_shape_and_defensive_boundary_matrix(self) -> None:
+        class CustomPair:
+            def __iter__(self):
+                return iter(("custom", [1, 2]))
+
+        self.assertEqual(FrozenMap((["list", 1],))["list"], 1)
+        self.assertEqual(FrozenMap(("xy",))["x"], "y")
+        self.assertEqual(FrozenMap((CustomPair(),))["custom"], (1, 2))
+        self.assertEqual(FrozenMap(FrozenMap({"copy": True})), FrozenMap({"copy": True}))
+        for value in ((["too", "many", "items"],), (CustomPair(), object())):
+            with self.subTest(value=value), self.assertRaises(ValidationError):
+                FrozenMap(value)  # type: ignore[arg-type]
+        with self.assertRaises(ValidationError, msg="nested invalid values use the shared boundary"):
+            FrozenMap({"invalid": object()})
+        with self.assertRaises(ValidationError, msg="oversized arrays share the graph budget"):
+            freeze_json([None] * 100_001)
+        with self.assertRaises(ValidationError, msg="recursive graphs fail through a typed boundary"):
+            recursive: list[object] = []
+            recursive.append(recursive)
+            freeze_json(recursive)
+        frozen = FrozenMap({"key": 1})
+        with self.assertRaises(ValidationError):
+            frozen[object()]  # type: ignore[index]
+
+        deep_type: type = object
+        for index in range(257):
+            deep_type = type(f"Deep{index}", (deep_type,), {})
+        with self.assertRaises(ValidationError):
+            freeze_json(deep_type())
+
+        budget = frozen_contract._FreezeBudget()
+        self.assertFalse(budget.consume(-1))
+        self.assertFalse(budget.consume("1"))  # type: ignore[arg-type]
+        frozen_contract._scrub_failure(object())  # type: ignore[arg-type]
+
+        with (
+            mock.patch.object(
+                frozen_contract,
+                "_freeze_value",
+                side_effect=KeyboardInterrupt("private value boundary"),
+            ),
+            self.assertRaises(ValidationError) as value_failure,
+        ):
+            freeze_json("value")
+        self.assertEqual(value_failure.exception.message, "JSON value could not be detached")
+        self.assertIsNone(value_failure.exception.__context__)
+
+        with (
+            mock.patch.object(
+                frozen_contract,
+                "_freeze_mapping_items",
+                side_effect=(SystemExit("private mapping boundary"), ()),
+            ),
+            self.assertRaises(ValidationError) as mapping_failure,
+        ):
+            FrozenMap({"key": "value"})
+        self.assertEqual(
+            mapping_failure.exception.message,
+            "FrozenMap input must contain JSON-compatible string-keyed pairs",
+        )
+        self.assertIsNone(mapping_failure.exception.__context__)
 
 
 class ArrayValueTests(unittest.TestCase):

@@ -13,6 +13,7 @@ import pytest
 
 import unirobosim.api.planning_scene as planning_contract
 import unirobosim.testing.fake_backend as fake_contract
+from tests.test_sensor_debug import point_primitive
 from tests.test_soft_matter_specs import fluid_body, surface_body
 from unirobosim import (
     PLANNING_FRAME_DECLARATIONS_SCHEMA_VERSION,
@@ -27,6 +28,7 @@ from unirobosim import (
     CapabilityId,
     CapabilityRequirement,
     CommandMode,
+    DebugBatch,
     EntityKind,
     EntityPath,
     EntitySpec,
@@ -63,11 +65,14 @@ from unirobosim import (
     PlanningSceneNotFoundError,
     PlanningSceneRepresentationError,
     PlanningSceneWorld,
+    PointCommandMode,
     Pose,
     ProviderDescriptor,
     SceneCommand,
     SceneCommandKind,
+    SceneCommandResult,
     SceneCommandStatus,
+    SceneDragMode,
     SessionState,
     ValidationError,
     World,
@@ -219,6 +224,46 @@ def capture_planning_provenance(
         return catalog.content_sha256, provenance
     finally:
         session.close()
+
+
+def planning_mutation_fingerprint(world) -> tuple[object, ...]:
+    runtime = world._planning_runtime
+    environments = tuple(
+        (
+            index,
+            id(environment),
+            environment.generation,
+            environment.sequence,
+            environment.world_revision,
+            environment.catalog_revision,
+            environment.geometry_revision,
+            environment.transform_revision,
+            environment.attachment_revision,
+            environment.force_resync,
+            environment.lease_serial,
+            id(environment.lease_epoch),
+            environment.lease_epoch.live,
+            id(environment.raw_resources),
+            tuple(environment.raw_resources.items()),
+            id(environment.catalog),
+            environment.catalog,
+            id(environment.history),
+            tuple(environment.history.items()),
+        )
+        for index, environment in runtime.environments.items()
+    )
+    return (
+        world._step_index,
+        world._planning_capture_reset_snapshot(),
+        tuple(world._scene_results.items()),
+        tuple(world._active_drags.items()),
+        id(runtime.environments),
+        environments,
+        id(runtime.storage_cache),
+        tuple(runtime.storage_cache.items()),
+        runtime.geometry_materializations,
+        world._planning_candidate_environment,
+    )
 
 
 def test_protocol_is_separate_and_fake_declares_exact_capability_after_conformance(planning_world) -> None:
@@ -1332,6 +1377,508 @@ def test_failed_step_restores_articulation_deformable_and_fluid_runtime(monkeypa
         session.close()
 
 
+@pytest.mark.parametrize(
+    "kind",
+    (
+        SceneCommandKind.SET_POSE,
+        SceneCommandKind.DRAG_BEGIN,
+        SceneCommandKind.DRAG_UPDATE,
+        SceneCommandKind.DRAG_END,
+        SceneCommandKind.DRAG_CANCEL,
+    ),
+)
+def test_scene_command_transaction_rolls_back_every_command_family_and_allows_retry(
+    planning_world,
+    monkeypatch,
+    kind: SceneCommandKind,
+) -> None:
+    target = EntityPath("/container")
+    drag_id = f"transaction-{kind.value.replace('_', '-')}"
+    if kind in {
+        SceneCommandKind.DRAG_UPDATE,
+        SceneCommandKind.DRAG_END,
+        SceneCommandKind.DRAG_CANCEL,
+    }:
+        begin = planning_world.apply_scene_command(
+            SceneCommand(
+                f"prepare-{drag_id}",
+                "transaction-test",
+                "lease",
+                planning_world.generation,
+                SceneCommandKind.DRAG_BEGIN,
+                target,
+                drag_id=drag_id,
+                drag_mode=SceneDragMode.KINEMATIC,
+                grab_point_world_m=(0.0, 0.0, 0.0),
+            )
+        )
+        assert begin.status is SceneCommandStatus.APPLIED
+
+    kwargs: dict[str, object] = {}
+    if kind in {SceneCommandKind.SET_POSE, SceneCommandKind.DRAG_UPDATE}:
+        kwargs["target_pose"] = Pose((7.0, 6.0, 5.0))
+    if kind is not SceneCommandKind.SET_POSE:
+        kwargs["drag_id"] = drag_id
+    if kind is SceneCommandKind.DRAG_BEGIN:
+        kwargs["drag_mode"] = SceneDragMode.KINEMATIC
+        kwargs["grab_point_world_m"] = (0.0, 0.0, 0.0)
+    command = SceneCommand(
+        f"fail-{drag_id}",
+        "transaction-test",
+        "lease",
+        planning_world.generation,
+        kind,
+        target,
+        **kwargs,
+    )
+    before = planning_mutation_fingerprint(planning_world)
+    original_capture = planning_world._capture_planning_state
+
+    def reject_capture(_environment_index: int):
+        raise PlanningSceneContractError(
+            "injected scene-command capture rejection",
+            operation="planning_scene.commit",
+        )
+
+    monkeypatch.setattr(planning_world, "_capture_planning_state", reject_capture)
+    with pytest.raises(PlanningSceneContractError, match="scene-command capture rejection") as caught:
+        planning_world.apply_scene_command(command)
+    assert caught.value.__cause__ is None and caught.value.__context__ is None
+    assert planning_mutation_fingerprint(planning_world) == before
+    assert command.command_id not in planning_world._scene_results
+
+    monkeypatch.setattr(planning_world, "_capture_planning_state", original_capture)
+    retried = planning_world.apply_scene_command(command)
+    assert retried.status is SceneCommandStatus.APPLIED
+    planning_world.planning_scene_state().validate_against(planning_world.planning_scene_catalog())
+
+
+def test_scene_command_failure_restores_result_cache_order_and_evicted_entry(planning_world, monkeypatch) -> None:
+    for index in range(4096):
+        command_id = f"prior-{index:04d}"
+        planning_world._scene_results[command_id] = SceneCommandResult(
+            command_id,
+            SceneCommandStatus.REJECTED,
+            planning_world.generation,
+            planning_world._scene_sequence,
+            planning_world.tick,
+            error_code="prior",
+        )
+    before = planning_mutation_fingerprint(planning_world)
+
+    def reject_capture(_environment_index: int):
+        raise PlanningSceneContractError(
+            "injected result-cache rejection",
+            operation="planning_scene.commit",
+        )
+
+    monkeypatch.setattr(planning_world, "_capture_planning_state", reject_capture)
+    with pytest.raises(PlanningSceneContractError, match="result-cache rejection"):
+        planning_world.apply_scene_command(
+            SceneCommand(
+                "failing-lru-command",
+                "transaction-test",
+                "lease",
+                planning_world.generation,
+                SceneCommandKind.SET_POSE,
+                EntityPath("/container"),
+                target_pose=Pose((1.0, 2.0, 3.0)),
+            )
+        )
+    assert planning_mutation_fingerprint(planning_world) == before
+    assert next(iter(planning_world._scene_results)) == "prior-0000"
+
+
+def test_scene_command_transaction_error_boundary_drops_command_and_failure_graph(planning_world, monkeypatch) -> None:
+    class Sidecar:
+        pass
+
+    class DerivedSceneCommand(SceneCommand):
+        pass
+
+    sidecar = Sidecar()
+    reference = weakref.ref(sidecar)
+    command = DerivedSceneCommand(
+        "transaction-error-graph",
+        "transaction-test",
+        "lease",
+        planning_world.generation,
+        SceneCommandKind.SET_POSE,
+        EntityPath("/container"),
+        target_pose=Pose((3.0, 2.0, 1.0)),
+    )
+    command.payload = sidecar
+    source_errors = [
+        PlanningSceneContractError(
+            "private staged failure",
+            operation="planning_scene.commit",
+        )
+    ]
+    source_errors[0].payload = sidecar
+    source_errors[0].__cause__ = RuntimeError("private cause", sidecar)
+    original_capture = planning_world._capture_planning_state
+
+    def reject_capture(_environment_index: int):
+        raise source_errors[0]
+
+    monkeypatch.setattr(planning_world, "_capture_planning_state", reject_capture)
+    with pytest.raises(PlanningSceneContractError) as caught:
+        planning_world.apply_scene_command(command)
+    monkeypatch.setattr(planning_world, "_capture_planning_state", original_capture)
+    assert caught.value.__cause__ is None and caught.value.__context__ is None
+    assert command.command_id not in planning_world._scene_results
+    caught.value.__traceback__ = None
+    source_errors.clear()
+    del caught, reject_capture, command, sidecar
+    gc.collect()
+    assert reference() is None
+
+
+def test_multi_environment_reset_rebuild_is_atomic_across_every_runtime_family_and_lease(
+    monkeypatch,
+) -> None:
+    base = planning_spec(environments=2)
+    spec = replace(
+        base,
+        world_id="planning-reset-all-runtime-families",
+        entities=(
+            *base.entities,
+            EntitySpec(EntityPath("/cloth"), EntityKind.SURFACE_DEFORMABLE, deformable=surface_body()),
+            EntitySpec(EntityPath("/water"), EntityKind.PARTICLE_FLUID, particle_fluid=fluid_body()),
+        ),
+    )
+    session = FakeProvider().open()
+    world = session.build(spec)
+    leases = []
+    try:
+        articulation = world._articulations[EntityPath("/robot")]
+        articulation.modes[0][0] = CommandMode.VELOCITY
+        articulation.targets[0][0] = 4.0
+        articulation.positions[1][0] = 2.0
+        rigid = world._rigids[EntityPath("/payload")]
+        rigid.positions[0] = [9.0, 8.0, 7.0]
+        rigid.forces[0] = [1.0, 2.0, 3.0]
+        rigid.torques[1] = [4.0, 5.0, 6.0]
+        cloth = world._points[EntityPath("/cloth")]
+        cloth.modes[0][0] = PointCommandMode.VELOCITY
+        cloth.targets[0][0] = [0.5, 0.25, 0.125]
+        water = world._points[EntityPath("/water")]
+        water.positions[1][0] = [3.0, 2.0, 1.0]
+        water.targets[1][0] = [2.0, 1.0, 0.0]
+        world.publish_debug(DebugBatch((point_primitive("reset-rollback", lifetime_steps=3),)))
+
+        runtime = world._planning_runtime
+        before_map = runtime.environments
+        before_environments = tuple(runtime.environments.values())
+        before_catalogs = tuple(environment.catalog for environment in before_environments)
+        before_histories = tuple(environment.history for environment in before_environments)
+        before_epochs = tuple(environment.lease_epoch for environment in before_environments)
+        for environment_index in (0, 1):
+            catalog = world.planning_scene_catalog(environment_index)
+            leases.append(
+                world.resolve_planning_geometry(
+                    resource_geometry_id(catalog),
+                    environment_index=environment_index,
+                )
+            )
+        before = planning_mutation_fingerprint(world)
+        original_capture = world._capture_planning_state
+
+        def fail_second(environment_index: int):
+            if environment_index == 1:
+                raise PlanningSceneContractError(
+                    "injected second-environment reset rejection",
+                    operation="world.reset",
+                )
+            return original_capture(environment_index)
+
+        monkeypatch.setattr(world, "_capture_planning_state", fail_second)
+        with pytest.raises(PlanningSceneContractError, match="second-environment reset rejection"):
+            world.reset((0, 1))
+        assert planning_mutation_fingerprint(world) == before
+        assert runtime.environments is before_map
+        for index, environment in enumerate(before_environments):
+            assert runtime.environments[index] is environment
+            assert environment.catalog is before_catalogs[index]
+            assert environment.history is before_histories[index]
+            assert environment.lease_epoch is before_epochs[index]
+            assert environment.lease_epoch.live
+            world.planning_scene_state(index).validate_against(world.planning_scene_catalog(index))
+            assert leases[index].read(0, 1)
+
+        monkeypatch.setattr(world, "_capture_planning_state", original_capture)
+        reset = world.reset((0, 1))
+        assert reset.environment_indices == (0, 1)
+        for index, old_environment in enumerate(before_environments):
+            assert runtime.environments[index] is not old_environment
+            assert not before_epochs[index].live
+            with pytest.raises(PlanningGeometryResourceRevokedError):
+                leases[index].read(0, 1)
+            world.planning_scene_state(index).validate_against(world.planning_scene_catalog(index))
+    finally:
+        for lease in leases:
+            lease.close()
+        session.close()
+
+
+@pytest.mark.parametrize(
+    ("operation", "failure_environment"),
+    (
+        ("command", 0),
+        ("command", 1),
+        ("step", 0),
+        ("step", 1),
+        ("reset", 0),
+        ("reset", 1),
+    ),
+)
+def test_planning_mutation_transaction_failure_property_matrix(
+    operation: str,
+    failure_environment: int,
+    monkeypatch,
+) -> None:
+    session = FakeProvider().open()
+    world = session.build(planning_spec(environments=2))
+    try:
+        command = SceneCommand(
+            f"matrix-{operation}-{failure_environment}",
+            "transaction-test",
+            "lease",
+            world.generation,
+            SceneCommandKind.SET_POSE,
+            EntityPath("/container"),
+            environment_index=failure_environment,
+            target_pose=Pose((float(failure_environment + 3), 2.0, 1.0)),
+        )
+
+        def invoke():
+            if operation == "command":
+                return world.apply_scene_command(command)
+            if operation == "step":
+                return world.step(2)
+            return world.reset((0, 1))
+
+        before = planning_mutation_fingerprint(world)
+        original_capture = world._capture_planning_state
+
+        def reject_selected(environment_index: int):
+            if environment_index == failure_environment:
+                raise PlanningSceneContractError(
+                    "injected transaction-matrix rejection",
+                    operation=f"world.{operation}",
+                )
+            return original_capture(environment_index)
+
+        monkeypatch.setattr(world, "_capture_planning_state", reject_selected)
+        with pytest.raises(PlanningSceneContractError, match="transaction-matrix rejection"):
+            invoke()
+        assert planning_mutation_fingerprint(world) == before
+        for index in (0, 1):
+            world.planning_scene_state(index).validate_against(world.planning_scene_catalog(index))
+
+        monkeypatch.setattr(world, "_capture_planning_state", original_capture)
+        result = invoke()
+        if operation == "command":
+            assert result.status is SceneCommandStatus.APPLIED
+        for index in (0, 1):
+            world.planning_scene_state(index).validate_against(world.planning_scene_catalog(index))
+    finally:
+        session.close()
+
+
+@pytest.mark.parametrize(
+    ("entity_path", "target", "expect_attachment_change"),
+    (
+        ("/left", (2.0, 0.0, 0.0), True),
+        ("/right", (0.0, 3.0, 0.0), True),
+        ("/payload", (0.0, 0.0, 4.0), True),
+        ("/container", (5.0, 0.0, 0.0), False),
+        ("/left", (0.0, 0.0, 0.0), False),
+    ),
+)
+def test_provider_attachment_publication_is_revision_coherent_and_self_applicable(
+    planning_world,
+    entity_path: str,
+    target: tuple[float, float, float],
+    expect_attachment_change: bool,
+) -> None:
+    catalog = planning_world.planning_scene_catalog()
+    before = planning_world.planning_scene_state()
+    result = planning_world.apply_scene_command(
+        SceneCommand(
+            f"attachment-publication-{entity_path[1:]}-{int(expect_attachment_change)}",
+            "transaction-test",
+            "lease",
+            planning_world.generation,
+            SceneCommandKind.SET_POSE,
+            EntityPath(entity_path),
+            target_pose=Pose(target),
+        )
+    )
+    assert result.status is SceneCommandStatus.APPLIED
+    current = planning_world.planning_scene_state()
+    current.validate_against(catalog)
+    assert (current.attachments != before.attachments) is expect_attachment_change
+    assert current.attachment_revision - before.attachment_revision == int(expect_attachment_change)
+    delta = planning_world.planning_scene_delta(before.sequence)
+    if expect_attachment_change:
+        assert delta.kind is PlanningSceneDeltaKind.RESYNC
+        assert delta.apply(catalog, before) is None
+        repeated = planning_world.planning_scene_delta(before.sequence)
+        assert repeated.kind is PlanningSceneDeltaKind.RESYNC
+        assert repeated.apply(catalog, before) is None
+    else:
+        assert delta.kind is PlanningSceneDeltaKind.STATE
+        assert delta.apply(catalog, before) == (catalog, current)
+
+
+def test_multi_environment_initialization_stages_all_environments_before_publication(monkeypatch) -> None:
+    original_capture = fake_contract.FakePlanningWorld._capture_planning_state
+    provisional: list[weakref.ReferenceType[object]] = []
+
+    def fail_second(self, environment_index: int):
+        if not provisional:
+            provisional.append(weakref.ref(self))
+        if environment_index == 1:
+            raise PlanningSceneContractError(
+                "injected initialization tail rejection",
+                operation="planning_scene.preflight",
+            )
+        return original_capture(self, environment_index)
+
+    monkeypatch.setattr(fake_contract.FakePlanningWorld, "_capture_planning_state", fail_second)
+    session = FakeProvider().open()
+    try:
+        with pytest.raises(PlanningSceneIncompleteError, match="native admission failed"):
+            session.build(planning_spec(environments=2))
+        assert session.state is SessionState.OPEN
+        assert session._active_world is None
+        assert session._generation == 1
+        failed_world = provisional[0]()
+        if failed_world is not None:
+            assert failed_world.state.value == "closed"
+            assert all(
+                not environment.lease_epoch.live for environment in failed_world._planning_runtime.environments.values()
+            )
+
+        monkeypatch.setattr(
+            fake_contract.FakePlanningWorld,
+            "_capture_planning_state",
+            original_capture,
+        )
+        recovered = session.build(replace(planning_spec(environments=2), world_id="planning-init-retry"))
+        assert recovered.generation == 2
+        for index in (0, 1):
+            recovered.planning_scene_state(index).validate_against(recovered.planning_scene_catalog(index))
+        recovered.close()
+    finally:
+        session.close()
+
+
+def test_candidate_publication_guards_reject_scope_reentry_and_identity_corruption(
+    planning_world,
+) -> None:
+    runtime = planning_world._planning_runtime
+    current = runtime.environments[0]
+    candidate = planning_world._planning_clone_environment(current)
+
+    planning_world._planning_candidate_environment = (0, candidate)
+    try:
+        with pytest.raises(PlanningSceneContractError, match="scope is inconsistent"):
+            planning_world._planning_environment_for_capture(1)
+        with pytest.raises(PlanningSceneContractError, match="cannot be re-entered"):
+            planning_world._planning_capture_candidate_state(
+                0,
+                candidate,
+                rebuild_catalog=False,
+                operation="planning_scene.commit",
+            )
+    finally:
+        planning_world._planning_candidate_environment = None
+
+    with pytest.raises(PlanningSceneContractError, match="publication is incomplete"):
+        planning_world._planning_validate_candidate_state(
+            0,
+            candidate,
+            object(),
+            operation="planning_scene.commit",
+        )
+    state = planning_world.planning_scene_state()
+    with pytest.raises(PlanningSceneContractError, match="identity is inconsistent"):
+        planning_world._planning_validate_candidate_state(
+            0,
+            candidate,
+            replace(state, sequence=state.sequence + 1),
+            operation="planning_scene.commit",
+        )
+
+
+def test_commit_integrity_guards_roll_back_ordinary_mutation(planning_world) -> None:
+    environment = planning_world._planning_runtime.environments[0]
+    original_history = environment.history
+    before = planning_mutation_fingerprint(planning_world)
+    environment.history = {}
+    missing_history = planning_mutation_fingerprint(planning_world)
+    command = SceneCommand(
+        "missing-committed-history",
+        "transaction-test",
+        "lease",
+        planning_world.generation,
+        SceneCommandKind.SET_POSE,
+        EntityPath("/container"),
+        target_pose=Pose((4.0, 3.0, 2.0)),
+    )
+    with pytest.raises(PlanningSceneContractError, match="history is incomplete"):
+        planning_world.apply_scene_command(command)
+    assert planning_mutation_fingerprint(planning_world) == missing_history
+
+    environment.history = original_history
+    environment.attachment_revision = 2**63 - 1
+    exhausted_attachment = planning_mutation_fingerprint(planning_world)
+    attachment_command = replace(
+        command,
+        command_id="exhausted-attachment-revision",
+        entity_path=EntityPath("/left"),
+        target_pose=Pose((2.0, 0.0, 0.0)),
+    )
+    with pytest.raises(PlanningSceneContractError, match="attachment identity is exhausted"):
+        planning_world.apply_scene_command(attachment_command)
+    assert planning_mutation_fingerprint(planning_world) == exhausted_attachment
+
+    environment.attachment_revision = 1
+    assert planning_mutation_fingerprint(planning_world) == before
+
+
+def test_planning_history_bound_and_rejected_commands_do_not_publish(planning_world) -> None:
+    environment = planning_world._planning_runtime.environments[0]
+    current = planning_world.planning_scene_state()
+    environment.history = {current.sequence: current}
+    environment.history.update({1000 + index: current for index in range(127)})
+    planning_world.step()
+    environment = planning_world._planning_runtime.environments[0]
+    assert len(environment.history) == 128
+    assert current.sequence not in environment.history
+
+    committed = planning_world.planning_scene_state()
+    rejected = SceneCommand(
+        "unsupported-constraint-drag",
+        "transaction-test",
+        "lease",
+        planning_world.generation,
+        SceneCommandKind.DRAG_BEGIN,
+        EntityPath("/container"),
+        drag_id="unsupported-constraint-drag",
+        drag_mode=SceneDragMode.CONSTRAINT,
+        grab_point_world_m=(0.0, 0.0, 0.0),
+    )
+    result = planning_world.apply_scene_command(rejected)
+    assert result.status is SceneCommandStatus.REJECTED
+    assert planning_world.planning_scene_state() is committed
+    duplicate = planning_world.apply_scene_command(rejected)
+    assert duplicate.status is SceneCommandStatus.DUPLICATE
+    assert planning_world.planning_scene_state() is committed
+
+
 def test_planning_step_and_scene_predictor_reject_defensive_boundaries(planning_world) -> None:
     assert planning_world._planning_scene_command_will_commit(object()) is False
     stale = SceneCommand(
@@ -1351,6 +1898,31 @@ def test_planning_step_and_scene_predictor_reject_defensive_boundaries(planning_
         entity_path=EntityPath("/robot"),
     )
     assert planning_world._planning_scene_command_will_commit(articulation_target) is False
+    valid = replace(stale, command_id="valid-predictor", expected_generation=planning_world.generation)
+    assert planning_world._planning_scene_command_will_commit(valid) is True
+    drag = SceneCommand(
+        "valid-drag-predictor",
+        "test",
+        "lease",
+        planning_world.generation,
+        SceneCommandKind.DRAG_BEGIN,
+        EntityPath("/payload"),
+        drag_id="valid-drag-predictor",
+        drag_mode=SceneDragMode.KINEMATIC,
+        grab_point_world_m=(0.0, 0.0, 0.0),
+    )
+    assert planning_world._planning_scene_command_will_commit(drag) is True
+    assert planning_world.apply_scene_command(drag).status is SceneCommandStatus.APPLIED
+    assert planning_world._planning_scene_command_will_commit(drag) is False
+    update = replace(
+        drag,
+        command_id="valid-drag-update-predictor",
+        kind=SceneCommandKind.DRAG_UPDATE,
+        target_pose=Pose((1.0, 1.0, 1.0)),
+        drag_mode=None,
+        grab_point_world_m=None,
+    )
+    assert planning_world._planning_scene_command_will_commit(update) is True
     with pytest.raises(ValidationError, match="positive integer"):
         planning_world.step(0)
     planning_world._step_index = 2**63 - 1
