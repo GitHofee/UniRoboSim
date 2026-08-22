@@ -9,9 +9,14 @@ from __future__ import annotations
 import hashlib
 import itertools
 import math
-from collections.abc import Iterable
-from dataclasses import dataclass
+import re
+import struct
+import threading
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass, field
+from functools import wraps
 from types import TracebackType
+from typing import TypeVar, cast
 
 from unirobosim.api.capabilities import (
     CapabilityDeclaration,
@@ -26,12 +31,63 @@ from unirobosim.api.errors import (
     CommandError,
     EntityNotFoundError,
     LifecycleError,
+    PlanningGeometryResourceRevokedError,
+    PlanningSceneContractError,
+    PlanningSceneDeltaContinuityError,
+    PlanningSceneError,
+    PlanningSceneHashMismatchError,
+    PlanningSceneIncompleteError,
+    PlanningSceneNotFoundError,
+    PlanningSceneRepresentationError,
     ProviderSelectionError,
     StaleHandleError,
     ValidationError,
     WorldBuildError,
+    _snapshot_and_scrub_planning_error,
 )
 from unirobosim.api.frozen import FrozenMap
+from unirobosim.api.planning_scene import (
+    PLANNING_SYSTEM_ENTITY_ID,
+    PLANNING_SYSTEM_ENTITY_PATH,
+    PlanningArticulationState,
+    PlanningAttachment,
+    PlanningCompoundGeometry,
+    PlanningCompoundPart,
+    PlanningEntityDescriptor,
+    PlanningEntityKind,
+    PlanningEntityState,
+    PlanningFrameDeclaration,
+    PlanningFrameDescriptor,
+    PlanningFrameKind,
+    PlanningFrameSourceKind,
+    PlanningFrameState,
+    PlanningGeometryAxisConvention,
+    PlanningGeometryContentProfile,
+    PlanningGeometryDescriptor,
+    PlanningGeometryDType,
+    PlanningGeometryLease,
+    PlanningGeometryLocalPose,
+    PlanningGeometryMotionClass,
+    PlanningGeometryPurpose,
+    PlanningGeometryRepresentation,
+    PlanningGeometryResourceDescriptor,
+    PlanningGeometryResourceLayout,
+    PlanningGeometryStorageKind,
+    PlanningGeometryTransform,
+    PlanningHalfspaceGeometry,
+    PlanningJointDescriptor,
+    PlanningJointType,
+    PlanningLinkDescriptor,
+    PlanningLinkState,
+    PlanningPose,
+    PlanningPrimitiveGeometry,
+    PlanningSceneCatalog,
+    PlanningSceneDelta,
+    PlanningSceneDeltaKind,
+    PlanningSceneState,
+    PlanningTwist,
+    parse_planning_frame_declarations,
+)
 from unirobosim.api.reports import (
     ArticulationState,
     BuildFingerprint,
@@ -179,6 +235,20 @@ FAKE_CAPABILITIES = CapabilitySet(
             FrozenMap({"entity_kinds": ["rigid_body"], "modes": ["kinematic"]}),
         ),
         CapabilityDeclaration(CapabilityId("render.browser-scene@1")),
+        CapabilityDeclaration(
+            CapabilityId("planning.scene@2"),
+            FrozenMap(
+                {
+                    "authority_thread": "synchronous",
+                    "axis_convention": "right_handed_z_up",
+                    "geometry_read_limit_bytes": 64 * 1024 * 1024,
+                    "resource_layout": "catalog-pinned-v1",
+                    "single_representation_per_geometry": True,
+                    "representation_fallback": False,
+                }
+            ),
+            limitations=("deterministic contract reference; not a physics-fidelity planning world",),
+        ),
     )
 )
 
@@ -228,6 +298,242 @@ class _PointRuntime:
     velocities: list[list[list[float]]]
     modes: list[list[PointCommandMode]]
     targets: list[list[list[float]]]
+
+
+@dataclass
+class _PlanningLeaseEpoch:
+    live: bool = True
+
+
+@dataclass
+class _FakePlanningRuntime:
+    authority_thread_id: int
+    generation: int
+    sequence: int = 1
+    world_revision: int = 1
+    catalog_revision: int = 1
+    geometry_revision: int = 1
+    transform_revision: int = 1
+    attachment_revision: int = 1
+    force_resync: bool = False
+    lease_serial: int = 0
+    lease_epoch: _PlanningLeaseEpoch = field(default_factory=_PlanningLeaseEpoch)
+    storage_cache: dict[tuple[str, PlanningGeometryRepresentation, str], tuple[bytes, str]] = field(
+        default_factory=dict
+    )
+    geometry_materializations: int = 0
+    raw_resources: dict[
+        str,
+        tuple[
+            bytes,
+            PlanningGeometryRepresentation,
+            str,
+            PlanningGeometryContentProfile,
+            tuple[int, int],
+            tuple[int, int],
+        ],
+    ] = field(default_factory=dict)
+    catalogs: dict[int, PlanningSceneCatalog] = field(default_factory=dict)
+    history: dict[int, dict[int, PlanningSceneState]] = field(default_factory=dict)
+
+
+_PlanningResultT = TypeVar("_PlanningResultT")
+
+_PLANNING_ERROR_TYPES: tuple[type[PlanningSceneError], ...] = (
+    PlanningSceneContractError,
+    PlanningSceneDeltaContinuityError,
+    PlanningSceneNotFoundError,
+    PlanningSceneIncompleteError,
+    PlanningSceneRepresentationError,
+    PlanningSceneHashMismatchError,
+    PlanningGeometryResourceRevokedError,
+    PlanningSceneError,
+)
+
+
+def _planning_error_boundary(
+    function: Callable[..., _PlanningResultT],
+) -> Callable[..., _PlanningResultT]:
+    """Detach public planning failures from caller-controlled arguments."""
+
+    @wraps(function)
+    def wrapped(*args: object, **kwargs: object) -> _PlanningResultT:
+        failure: tuple[type[PlanningSceneError], str, str, str | None, str | None, str | None] | None = None
+        try:
+            return function(*args, **kwargs)
+        except PlanningSceneError as caught:
+            failure = _snapshot_and_scrub_planning_error(caught, _PLANNING_ERROR_TYPES)
+        args = ()
+        kwargs = {}
+        assert failure is not None
+        error_type, message, operation, backend_id, world_id, entity_path = failure
+        raise error_type(
+            message,
+            operation=operation,
+            backend_id=backend_id,
+            world_id=world_id,
+            entity_path=entity_path,
+        ) from None
+
+    return cast(Callable[..., _PlanningResultT], wrapped)
+
+
+class _FakePlanningGeometryLease:
+    """Worker-safe read-only lease over validated immutable bytes."""
+
+    __slots__ = ("_closed", "_content", "_descriptor", "_epoch", "_lock")
+
+    def __init__(
+        self,
+        descriptor: PlanningGeometryResourceDescriptor,
+        content: bytes,
+        epoch: _PlanningLeaseEpoch,
+    ) -> None:
+        self._descriptor = descriptor
+        self._content = content
+        self._epoch = epoch
+        self._closed = False
+        self._lock = threading.RLock()
+
+    def _ensure_live(self) -> None:
+        if self._closed or not self._epoch.live:
+            raise PlanningGeometryResourceRevokedError(
+                "planning geometry resource lease is revoked",
+                operation="planning_geometry.read",
+            ) from None
+
+    @property
+    def descriptor(self) -> PlanningGeometryResourceDescriptor:
+        with self._lock:
+            self._ensure_live()
+            return self._descriptor
+
+    @property
+    def closed(self) -> bool:
+        with self._lock:
+            return self._closed or not self._epoch.live
+
+    @_planning_error_boundary
+    def read(self, offset: int = 0, length: int | None = None) -> bytes:
+        with self._lock:
+            self._ensure_live()
+            start, count = self._descriptor.read_span(offset, length)
+            result = self._content[start : start + count]
+            if type(result) is not bytes or len(result) != count:
+                raise PlanningSceneContractError(
+                    "planning geometry storage returned an invalid byte span",
+                    operation="planning_geometry.read",
+                ) from None
+            return result
+
+    def close(self) -> None:
+        with self._lock:
+            self._closed = True
+
+
+def _planning_id(prefix: str, *parts: str) -> str:
+    digest = hashlib.sha256("\x1f".join(parts).encode("utf-8")).hexdigest()[:20]
+    return f"{prefix}.{digest}"
+
+
+def _planning_actual_base(value: object, allowed: tuple[type, ...]) -> type | None:
+    try:
+        mro = type.mro(type(value))
+    except BaseException:
+        return None
+    if type(mro) is not list or list.__len__(mro) > 256:
+        return None
+    for allowed_base in allowed:
+        for index in range(list.__len__(mro)):
+            if list.__getitem__(mro, index) is allowed_base:
+                return allowed_base
+    return None
+
+
+def _planning_quaternion_multiply(
+    left: tuple[float, float, float, float],
+    right: tuple[float, float, float, float],
+) -> tuple[float, float, float, float]:
+    lx, ly, lz, lw = left
+    rx, ry, rz, rw = right
+    return (
+        lw * rx + lx * rw + ly * rz - lz * ry,
+        lw * ry - lx * rz + ly * rw + lz * rx,
+        lw * rz + lx * ry - ly * rx + lz * rw,
+        lw * rw - lx * rx - ly * ry - lz * rz,
+    )
+
+
+def _planning_rotate(
+    vector: tuple[float, float, float], quaternion: tuple[float, float, float, float]
+) -> tuple[float, float, float]:
+    conjugate = (-quaternion[0], -quaternion[1], -quaternion[2], quaternion[3])
+    pure = (vector[0], vector[1], vector[2], 0.0)
+    result = _planning_quaternion_multiply(_planning_quaternion_multiply(quaternion, pure), conjugate)
+    return result[0], result[1], result[2]
+
+
+def _planning_compose(world_pose: PlanningPose, local_pose: PlanningGeometryLocalPose) -> PlanningPose:
+    offset = _planning_rotate(local_pose.position_m, world_pose.orientation_xyzw)
+    return PlanningPose(
+        world_pose.frame_id,
+        (
+            world_pose.position_m[0] + offset[0],
+            world_pose.position_m[1] + offset[1],
+            world_pose.position_m[2] + offset[2],
+        ),
+        _planning_quaternion_multiply(world_pose.orientation_xyzw, local_pose.orientation_xyzw),
+    )
+
+
+def _planning_relative(parent: PlanningPose, child: PlanningPose, parent_frame_id: str) -> PlanningPose:
+    inverse = (
+        -parent.orientation_xyzw[0],
+        -parent.orientation_xyzw[1],
+        -parent.orientation_xyzw[2],
+        parent.orientation_xyzw[3],
+    )
+    displacement = (
+        child.position_m[0] - parent.position_m[0],
+        child.position_m[1] - parent.position_m[1],
+        child.position_m[2] - parent.position_m[2],
+    )
+    return PlanningPose(
+        parent_frame_id,
+        _planning_rotate(displacement, inverse),
+        _planning_quaternion_multiply(inverse, child.orientation_xyzw),
+    )
+
+
+def _concave_container_mesh_bytes() -> tuple[bytes, tuple[int, int], tuple[int, int]]:
+    """Open box surface: a triangle mesh that preserves a concave container interior."""
+
+    vertices = (
+        (-0.5, -0.5, 0.0),
+        (0.5, -0.5, 0.0),
+        (0.5, 0.5, 0.0),
+        (-0.5, 0.5, 0.0),
+        (-0.5, -0.5, 0.6),
+        (0.5, -0.5, 0.6),
+        (0.5, 0.5, 0.6),
+        (-0.5, 0.5, 0.6),
+    )
+    triangles = (
+        (0, 2, 1),
+        (0, 3, 2),
+        (0, 1, 5),
+        (0, 5, 4),
+        (1, 2, 6),
+        (1, 6, 5),
+        (2, 3, 7),
+        (2, 7, 6),
+        (3, 0, 4),
+        (3, 4, 7),
+    )
+    content = b"".join(struct.pack("<fff", *vertex) for vertex in vertices) + b"".join(
+        struct.pack("<III", *triangle) for triangle in triangles
+    )
+    return content, (len(vertices), 3), (len(triangles), 3)
 
 
 def _vectors(value: ArrayValue) -> list[list[float]]:
@@ -369,7 +675,9 @@ class FakeSession:
                 details={"remaining_injected_failures": self._build_failures},
             )
         self._generation += 1
-        world = FakeWorld(self, spec, self._generation)
+        planning_demanded = CapabilityId("planning.scene@2") in negotiation.matched
+        world_type = FakePlanningWorld if planning_demanded else FakeWorld
+        world = world_type(self, spec, self._generation)
         self._active_world = world
         self._state = SessionState.READY
         return world
@@ -403,6 +711,10 @@ class FakeSession:
 
 
 class FakeWorld:
+    # Installed only by ``FakePlanningWorld``.  A type annotation creates no
+    # instance field and keeps the no-demand object layout unchanged.
+    _planning_runtime: _FakePlanningRuntime
+
     def __init__(self, session: FakeSession, spec: WorldSpec, generation: int) -> None:
         self._session = session
         self._spec = spec
@@ -522,6 +834,597 @@ class FakeWorld:
             targets=targets,
         )
 
+    @staticmethod
+    def _planning_entity_id(path: str) -> str:
+        return _planning_id("entity", path)
+
+    @staticmethod
+    def _planning_link_id(path: str, index: int) -> str:
+        return _planning_id("link", path, str(index))
+
+    @staticmethod
+    def _planning_frame_id(path: str, index: int) -> str:
+        return _planning_id("frame", path, str(index))
+
+    @staticmethod
+    def _planning_entity_frame_id(path: str) -> str:
+        return _planning_id("frame", path, "entity")
+
+    @staticmethod
+    def _planning_joint_frame_id(path: str, index: int) -> str:
+        return _planning_id("frame", path, "joint", str(index))
+
+    @staticmethod
+    def _planning_joint_id(path: str, index: int) -> str:
+        return _planning_id("joint", path, str(index))
+
+    @staticmethod
+    def _planning_geometry_id(path: str) -> str:
+        return _planning_id("geometry", path, "root")
+
+    def _planning_kind(self, entity: EntitySpec) -> PlanningEntityKind:
+        explicit = entity.metadata.get("planning_entity_kind")
+        if explicit == "robot":
+            return PlanningEntityKind.ROBOT
+        if entity.kind is EntityKind.ARTICULATION:
+            return PlanningEntityKind.ARTICULATION
+        if entity.kind is EntityKind.RIGID_BODY:
+            return PlanningEntityKind.RIGID_OBJECT
+        return PlanningEntityKind.OTHER
+
+    def _planning_motion_class(self, entity: EntitySpec) -> PlanningGeometryMotionClass:
+        explicit = entity.metadata.get("planning_motion_class")
+        if explicit == "static":
+            return PlanningGeometryMotionClass.STATIC
+        if explicit == "kinematic":
+            return PlanningGeometryMotionClass.KINEMATIC
+        return PlanningGeometryMotionClass.DYNAMIC
+
+    def _planning_geometry(
+        self,
+        entity: EntitySpec,
+        entity_id: str,
+        root_link_id: str,
+        root_frame_id: str,
+    ) -> PlanningGeometryDescriptor | None:
+        if entity.kind not in {EntityKind.RIGID_BODY, EntityKind.ARTICULATION}:
+            return None
+        runtime = self._planning_runtime
+        assert runtime is not None
+        geometry_id = self._planning_geometry_id(entity.path.value)
+        provenance_source = entity.asset_uri if entity.asset_uri is not None else entity.path.value
+        provenance = hashlib.sha256(provenance_source.encode("utf-8")).hexdigest()
+
+        def descriptor(
+            representation: PlanningGeometryRepresentation,
+            *,
+            inline: PlanningHalfspaceGeometry | PlanningPrimitiveGeometry | PlanningCompoundGeometry | None = None,
+            resource_id: str | None = None,
+            digest: str | None = None,
+            content_profile: PlanningGeometryContentProfile | None = None,
+            resource_layout: PlanningGeometryResourceLayout | None = None,
+        ) -> PlanningGeometryDescriptor:
+            return PlanningGeometryDescriptor(
+                geometry_id=geometry_id,
+                owner_entity_id=entity_id,
+                owner_link_id=root_link_id,
+                parent_frame_id=root_frame_id,
+                purpose=PlanningGeometryPurpose.COLLISION,
+                representation=representation,
+                parent_frame_T_geometry=PlanningGeometryLocalPose(),
+                scale=(1.0, 1.0, 1.0),
+                motion_class=self._planning_motion_class(entity),
+                collision_group=1,
+                collision_mask=2**32 - 1,
+                provenance_sha256=provenance,
+                inline=inline,
+                resource_id=resource_id,
+                sha256=digest,
+                content_profile=content_profile,
+                resource_layout=resource_layout,
+            )
+
+        if entity.kind is EntityKind.ARTICULATION:
+            part_a = PlanningCompoundPart(
+                _planning_id("part", entity.path.value, "body"),
+                PlanningGeometryLocalPose((0.04, -0.03, 0.08), (0.0, 0.0, 0.0, 1.0)),
+                PlanningPrimitiveGeometry(PlanningGeometryRepresentation.BOX, (0.3, 0.2, 0.16)),
+            )
+            half_angle = math.pi / 8.0
+            part_b = PlanningCompoundPart(
+                _planning_id("part", entity.path.value, "column"),
+                PlanningGeometryLocalPose(
+                    (-0.02, 0.05, 0.27),
+                    (0.0, math.sin(half_angle), 0.0, math.cos(half_angle)),
+                ),
+                PlanningPrimitiveGeometry(PlanningGeometryRepresentation.CYLINDER, (0.05, 0.35)),
+            )
+            return descriptor(
+                PlanningGeometryRepresentation.COMPOUND,
+                inline=PlanningCompoundGeometry(tuple(sorted((part_a, part_b), key=lambda item: item.part_id))),
+            )
+        if entity.asset_uri is not None:
+            if entity.metadata.get("fake_planning_collision_authority") != "effective_native":
+                raise PlanningSceneIncompleteError(
+                    "asset-backed fake geometry lacks effective-native collision authority",
+                    operation="planning_scene.preflight",
+                    entity_path=entity.path.value,
+                ) from None
+            content, vertex_shape, index_shape = _concave_container_mesh_bytes()
+            digest = hashlib.sha256(content).hexdigest()
+            resource_id = _planning_id("resource", entity.path.value, digest)
+            layout = PlanningGeometryResourceLayout(
+                PlanningGeometryRepresentation.TRIANGLE_MESH,
+                PlanningGeometryContentProfile.MESH_TRIANGLES_RAW_LE_V1,
+                PlanningGeometryDType.FLOAT32,
+                vertex_shape,
+                PlanningGeometryDType.UINT32,
+                index_shape,
+            )
+            runtime.raw_resources[geometry_id] = (
+                content,
+                PlanningGeometryRepresentation.TRIANGLE_MESH,
+                resource_id,
+                PlanningGeometryContentProfile.MESH_TRIANGLES_RAW_LE_V1,
+                vertex_shape,
+                index_shape,
+            )
+            return descriptor(
+                PlanningGeometryRepresentation.TRIANGLE_MESH,
+                resource_id=resource_id,
+                digest=digest,
+                content_profile=PlanningGeometryContentProfile.MESH_TRIANGLES_RAW_LE_V1,
+                resource_layout=layout,
+            )
+        dimensions = (0.5, 0.5, 0.5) if entity.box is None else entity.box.dimensions_m
+        return descriptor(
+            PlanningGeometryRepresentation.BOX,
+            inline=PlanningPrimitiveGeometry(PlanningGeometryRepresentation.BOX, dimensions),
+        )
+
+    @staticmethod
+    def _planning_named_frame(
+        entity: EntitySpec,
+        entity_id: str,
+        declaration: PlanningFrameDeclaration,
+        links: tuple[PlanningLinkDescriptor, ...],
+        joints: tuple[PlanningJointDescriptor, ...],
+        frames: tuple[PlanningFrameDescriptor, ...],
+    ) -> PlanningFrameDescriptor:
+        link_by_id = {item.link_id: item for item in links}
+        frame_by_id = {item.frame_id: item for item in frames}
+        owner_matches = (
+            ()
+            if declaration.owner_link_name is None
+            else tuple(item for item in links if item.authored_name == declaration.owner_link_name)
+        )
+        if declaration.owner_link_name is None or len(owner_matches) != 1:
+            raise PlanningSceneIncompleteError(
+                "planning frame owner link does not resolve uniquely",
+                operation="planning_scene.preflight",
+                entity_path=entity.path.value,
+            ) from None
+        owner_link = owner_matches[0]
+
+        if declaration.source.kind is PlanningFrameSourceKind.LINK:
+            link_source_matches = tuple(item for item in links if item.authored_name == declaration.source.name)
+            if len(link_source_matches) != 1 or link_source_matches[0].link_id != owner_link.link_id:
+                raise PlanningSceneIncompleteError(
+                    "planning frame link source does not match its locked owner",
+                    operation="planning_scene.preflight",
+                    entity_path=entity.path.value,
+                ) from None
+            parent_frame_id = link_source_matches[0].frame_id
+        elif declaration.source.kind is PlanningFrameSourceKind.JOINT:
+            joint_source_matches = tuple(item for item in joints if item.authored_name == declaration.source.name)
+            if len(joint_source_matches) != 1:
+                raise PlanningSceneIncompleteError(
+                    "planning frame joint source does not resolve uniquely",
+                    operation="planning_scene.preflight",
+                    entity_path=entity.path.value,
+                ) from None
+            axis_frame = frame_by_id[joint_source_matches[0].axis_frame_id]
+            if axis_frame.owner_link_id != owner_link.link_id:
+                raise PlanningSceneIncompleteError(
+                    "planning frame joint source does not match its locked owner",
+                    operation="planning_scene.preflight",
+                    entity_path=entity.path.value,
+                ) from None
+            parent_frame_id = axis_frame.frame_id
+        else:
+            raise PlanningSceneIncompleteError(
+                "fake planning profile has no authoritative native-named frame registry",
+                operation="planning_scene.preflight",
+                entity_path=entity.path.value,
+            ) from None
+
+        if link_by_id[owner_link.link_id].entity_id != entity_id:
+            raise PlanningSceneIncompleteError(
+                "planning frame owner does not belong to its entity",
+                operation="planning_scene.preflight",
+                entity_path=entity.path.value,
+            ) from None
+        return PlanningFrameDescriptor(
+            _planning_id("frame", entity.path.value, "named", declaration.semantic_key),
+            PlanningFrameKind.NAMED,
+            parent_frame_id,
+            entity_id,
+            owner_link.link_id,
+            declaration.role,
+            declaration.semantic_key,
+        )
+
+    def _build_planning_catalog(self, environment_index: int) -> PlanningSceneCatalog:
+        runtime = self._planning_runtime
+        assert runtime is not None
+        system_frame_id = "frame.system.simulator_effective"
+        system_geometry_id = "geometry.system.simulator_effective.ground"
+        system_provenance = hashlib.sha256(
+            b"reference.fake@0.7.1|provider-owned-ground|halfspace|fake-effective-collision-v1"
+        ).hexdigest()
+        entities: list[PlanningEntityDescriptor] = [
+            PlanningEntityDescriptor(
+                PLANNING_SYSTEM_ENTITY_ID,
+                PLANNING_SYSTEM_ENTITY_PATH,
+                PlanningEntityKind.OTHER,
+                True,
+                system_frame_id,
+                (),
+                (system_frame_id,),
+                (system_geometry_id,),
+                (),
+            )
+        ]
+        links: list[PlanningLinkDescriptor] = []
+        joints: list[PlanningJointDescriptor] = []
+        frames: list[PlanningFrameDescriptor] = [
+            PlanningFrameDescriptor("frame.world", PlanningFrameKind.WORLD, None, None, None),
+            PlanningFrameDescriptor(
+                system_frame_id,
+                PlanningFrameKind.ENTITY,
+                "frame.world",
+                PLANNING_SYSTEM_ENTITY_ID,
+                None,
+            ),
+        ]
+        geometries: list[PlanningGeometryDescriptor] = [
+            PlanningGeometryDescriptor(
+                system_geometry_id,
+                PLANNING_SYSTEM_ENTITY_ID,
+                None,
+                system_frame_id,
+                PlanningGeometryPurpose.COLLISION,
+                PlanningGeometryRepresentation.HALFSPACE,
+                PlanningGeometryLocalPose(),
+                (1.0, 1.0, 1.0),
+                PlanningGeometryMotionClass.STATIC,
+                1,
+                2**32 - 1,
+                system_provenance,
+                PlanningHalfspaceGeometry(),
+            )
+        ]
+        for entity in self._spec.entities:
+            path = entity.path.value
+            entity_id = self._planning_entity_id(path)
+            entity_frame_id = self._planning_entity_frame_id(path)
+            joint_count = len(entity.joint_names) if entity.kind is EntityKind.ARTICULATION else 0
+            link_count = joint_count + 1
+            link_ids = tuple(self._planning_link_id(path, index) for index in range(link_count))
+            frame_ids = tuple(self._planning_frame_id(path, index) for index in range(link_count))
+            joint_ids = tuple(self._planning_joint_id(path, index) for index in range(joint_count))
+            geometry = self._planning_geometry(entity, entity_id, link_ids[0], frame_ids[0])
+            geometry_ids = () if geometry is None else (geometry.geometry_id,)
+            entity_frames: list[PlanningFrameDescriptor] = [
+                PlanningFrameDescriptor(
+                    entity_frame_id,
+                    PlanningFrameKind.ENTITY,
+                    "frame.world",
+                    entity_id,
+                    None,
+                )
+            ]
+            entity_links: list[PlanningLinkDescriptor] = []
+            for index, (link_id, frame_id) in enumerate(zip(link_ids, frame_ids, strict=True)):
+                parent_link_id = None if index == 0 else link_ids[index - 1]
+                authored_name = entity.path.name if index == 0 else f"{entity.joint_names[index - 1]} child"
+                link_geometry_ids = geometry_ids if index == 0 else ()
+                entity_links.append(
+                    PlanningLinkDescriptor(
+                        link_id,
+                        entity_id,
+                        authored_name,
+                        frame_id,
+                        parent_link_id,
+                        link_geometry_ids,
+                    )
+                )
+                entity_frames.append(
+                    PlanningFrameDescriptor(
+                        frame_id,
+                        PlanningFrameKind.LINK,
+                        entity_frame_id if index == 0 else frame_ids[index - 1],
+                        entity_id,
+                        link_id,
+                    )
+                )
+            entity_joints: list[PlanningJointDescriptor] = []
+            for index, (joint_name, joint_id) in enumerate(zip(entity.joint_names, joint_ids, strict=True)):
+                max_effort = entity.joint_effort_limits[index] if entity.joint_effort_limits else None
+                entity_joints.append(
+                    PlanningJointDescriptor(
+                        joint_id,
+                        entity_id,
+                        joint_name,
+                        link_ids[index],
+                        link_ids[index + 1],
+                        PlanningJointType.REVOLUTE,
+                        frame_ids[index],
+                        (0.0, 0.0, 1.0),
+                        "rad",
+                        None,
+                        None,
+                        None,
+                        max_effort,
+                    )
+                )
+            declarations = parse_planning_frame_declarations(entity.metadata.get("planning_frame_declarations"))
+            if declarations is not None:
+                physical_frames = tuple(entity_frames)
+                for declaration in declarations.entries:
+                    entity_frames.append(
+                        self._planning_named_frame(
+                            entity,
+                            entity_id,
+                            declaration,
+                            tuple(entity_links),
+                            tuple(entity_joints),
+                            physical_frames,
+                        )
+                    )
+            entities.append(
+                PlanningEntityDescriptor(
+                    entity_id,
+                    path,
+                    self._planning_kind(entity),
+                    True,
+                    entity_frame_id,
+                    tuple(sorted(link_ids)),
+                    tuple(sorted(frame.frame_id for frame in entity_frames)),
+                    geometry_ids,
+                    joint_ids,
+                )
+            )
+            links.extend(entity_links)
+            joints.extend(entity_joints)
+            frames.extend(entity_frames)
+            if geometry is not None:
+                geometries.append(geometry)
+        return PlanningSceneCatalog.build(
+            self._session.descriptor.provider_id,
+            self.world_id,
+            runtime.generation,
+            environment_index,
+            runtime.catalog_revision,
+            runtime.geometry_revision,
+            tuple(sorted(entities, key=lambda item: item.entity_id)),
+            tuple(sorted(links, key=lambda item: item.link_id)),
+            tuple(sorted(joints, key=lambda item: item.joint_id)),
+            tuple(sorted(frames, key=lambda item: item.frame_id)),
+            tuple(sorted(geometries, key=lambda item: item.geometry_id)),
+        )
+
+    def _planning_entity_pose_and_twist(
+        self,
+        entity: EntitySpec,
+        environment_index: int,
+        world_frame_id: str,
+    ) -> tuple[PlanningPose, PlanningTwist]:
+        if entity.kind is EntityKind.RIGID_BODY:
+            runtime = self._rigids[entity.path]
+            position = runtime.positions[environment_index]
+            orientation = runtime.orientations[environment_index]
+            linear = runtime.linear_velocities[environment_index]
+            angular = runtime.angular_velocities[environment_index]
+            pose = PlanningPose(
+                world_frame_id,
+                (position[0], position[1], position[2]),
+                (orientation[0], orientation[1], orientation[2], orientation[3]),
+            )
+            twist = PlanningTwist(
+                world_frame_id,
+                (linear[0], linear[1], linear[2]),
+                (angular[0], angular[1], angular[2]),
+            )
+            return pose, twist
+        return (
+            PlanningPose(world_frame_id, entity.pose.position, entity.pose.orientation_xyzw),
+            PlanningTwist(world_frame_id),
+        )
+
+    def _planning_attachment_values(
+        self,
+        catalog: PlanningSceneCatalog,
+        frame_states: tuple[PlanningFrameState, ...],
+    ) -> tuple[PlanningAttachment, ...]:
+        raw = self._spec.metadata.get("planning_attachments", ())
+        if type(raw) is not tuple:
+            raise PlanningSceneContractError(
+                "fake planning attachment metadata must be an immutable tuple",
+                operation="fake.planning_scene.build",
+            ) from None
+        if raw and self._spec.metadata.get("planning_attachment_authority") != "exclusive_registry":
+            raise PlanningSceneIncompleteError(
+                "fake planning attachments lack an exclusive authoritative registry",
+                operation="planning_scene.preflight",
+            ) from None
+        entity_by_path = {entity.path: entity for entity in catalog.entities}
+        frame_pose = {frame.frame_id: frame.world_pose for frame in frame_states}
+        result: list[PlanningAttachment] = []
+        for index, item in enumerate(raw):
+            if type(item) is not FrozenMap:
+                raise PlanningSceneContractError(
+                    "fake planning attachment metadata contains an invalid record",
+                    operation="fake.planning_scene.build",
+                ) from None
+            parent_path = item.get("parent_path")
+            child_path = item.get("child_path")
+            if type(parent_path) is not str or type(child_path) is not str:
+                raise PlanningSceneContractError(
+                    "fake planning attachment paths must be exact strings",
+                    operation="fake.planning_scene.build",
+                ) from None
+            parent = entity_by_path.get(parent_path)
+            child = entity_by_path.get(child_path)
+            if parent is None or child is None:
+                raise PlanningSceneContractError(
+                    "fake planning attachment references an unknown entity path",
+                    operation="fake.planning_scene.build",
+                ) from None
+            attachment_id_value = item.get("attachment_id")
+            attachment_id = (
+                _planning_id("attachment", parent_path, child_path, str(index))
+                if attachment_id_value is None
+                else attachment_id_value
+            )
+            if type(attachment_id) is not str:
+                raise PlanningSceneContractError(
+                    "fake planning attachment ID must be an exact string",
+                    operation="fake.planning_scene.build",
+                ) from None
+            parent_link = next(link for link in catalog.links if link.link_id == parent.link_ids[0])
+            child_link = next(link for link in catalog.links if link.link_id == child.link_ids[0])
+            parent_frame = parent_link.frame_id
+            child_frame = child_link.frame_id
+            if not child.geometry_ids:
+                raise PlanningSceneContractError(
+                    "fake planning attachment child has no planning geometry",
+                    operation="fake.planning_scene.build",
+                ) from None
+            result.append(
+                PlanningAttachment(
+                    attachment_id,
+                    parent.entity_id,
+                    child.entity_id,
+                    parent_frame,
+                    child_frame,
+                    _planning_relative(frame_pose[parent_frame], frame_pose[child_frame], parent_frame),
+                    child.geometry_ids,
+                    parent_link.link_id,
+                    child_link.link_id,
+                )
+            )
+        return tuple(sorted(result, key=lambda item: item.attachment_id))
+
+    def _capture_planning_state(self, environment_index: int) -> PlanningSceneState:
+        runtime = self._planning_runtime
+        assert runtime is not None
+        catalog = runtime.catalogs[environment_index]
+        spec_by_path = {entity.path.value: entity for entity in self._spec.entities}
+        entity_states: list[PlanningEntityState] = []
+        link_states: list[PlanningLinkState] = []
+        frame_states: list[PlanningFrameState] = [
+            PlanningFrameState("frame.world", PlanningPose("frame.world", (0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0)))
+        ]
+        pose_by_entity: dict[str, PlanningPose] = {}
+        twist_by_entity: dict[str, PlanningTwist] = {}
+        for descriptor in catalog.entities:
+            if descriptor.entity_id == PLANNING_SYSTEM_ENTITY_ID:
+                pose = PlanningPose(
+                    catalog.world_frame_id,
+                    (0.0, 0.0, 0.0),
+                    (0.0, 0.0, 0.0, 1.0),
+                )
+                twist = PlanningTwist(catalog.world_frame_id)
+            else:
+                spec = spec_by_path[descriptor.path]
+                pose, twist = self._planning_entity_pose_and_twist(spec, environment_index, catalog.world_frame_id)
+            pose_by_entity[descriptor.entity_id] = pose
+            twist_by_entity[descriptor.entity_id] = twist
+            entity_states.append(PlanningEntityState(descriptor.entity_id, pose, twist))
+        for link in catalog.links:
+            pose = pose_by_entity[link.entity_id]
+            twist = twist_by_entity[link.entity_id]
+            link_states.append(PlanningLinkState(link.link_id, pose, twist))
+        for frame in catalog.frames:
+            if frame.kind is PlanningFrameKind.WORLD:
+                continue
+            assert frame.owner_entity_id is not None
+            frame_states.append(PlanningFrameState(frame.frame_id, pose_by_entity[frame.owner_entity_id]))
+        sorted_frames = tuple(sorted(frame_states, key=lambda item: item.frame_id))
+        frame_pose = {frame.frame_id: frame.world_pose for frame in sorted_frames}
+        articulation_states: list[PlanningArticulationState] = []
+        joint_by_id = {joint.joint_id: joint for joint in catalog.joints}
+        for descriptor in catalog.entities:
+            if not descriptor.joint_ids:
+                continue
+            spec = spec_by_path[descriptor.path]
+            articulation_runtime = self._articulations[spec.path]
+            articulation_states.append(
+                PlanningArticulationState(
+                    descriptor.entity_id,
+                    descriptor.joint_ids,
+                    tuple(articulation_runtime.positions[environment_index]),
+                    tuple(articulation_runtime.velocities[environment_index]),
+                    tuple(joint_by_id[joint_id].position_unit for joint_id in descriptor.joint_ids),
+                )
+            )
+        transforms = tuple(
+            sorted(
+                (
+                    PlanningGeometryTransform(
+                        geometry.geometry_id,
+                        _planning_compose(frame_pose[geometry.parent_frame_id], geometry.parent_frame_T_geometry),
+                    )
+                    for geometry in catalog.geometries
+                ),
+                key=lambda item: item.geometry_id,
+            )
+        )
+        attachments = self._planning_attachment_values(catalog, sorted_frames)
+        state = PlanningSceneState(
+            self._session.descriptor.provider_id,
+            self.world_id,
+            runtime.generation,
+            environment_index,
+            self.tick,
+            runtime.sequence,
+            runtime.world_revision,
+            runtime.catalog_revision,
+            runtime.geometry_revision,
+            catalog.content_sha256,
+            runtime.transform_revision,
+            runtime.attachment_revision,
+            catalog.world_frame_id,
+            tuple(sorted(entity_states, key=lambda item: item.entity_id)),
+            tuple(sorted(link_states, key=lambda item: item.link_id)),
+            sorted_frames,
+            tuple(sorted(articulation_states, key=lambda item: item.entity_id)),
+            transforms,
+            attachments,
+        )
+        state.validate_against(catalog)
+        return state
+
+    def _initialize_planning_scene(self) -> None:
+        runtime = self._planning_runtime
+        assert runtime is not None
+        for key, label in (
+            ("fake_planning_unmapped_native_colliders", "native collision inventory"),
+            ("fake_planning_untracked_constraints", "persistent constraint inventory"),
+        ):
+            value = self._spec.metadata.get(key, 0)
+            if type(value) is not int or value != 0:
+                raise PlanningSceneIncompleteError(
+                    f"fake {label} is incomplete",
+                    operation="planning_scene.preflight",
+                ) from None
+        for environment_index in range(self._spec.environments.count):
+            runtime.catalogs[environment_index] = self._build_planning_catalog(environment_index)
+        for environment_index in range(self._spec.environments.count):
+            state = self._capture_planning_state(environment_index)
+            runtime.history[environment_index] = {state.sequence: state}
+
     @property
     def world_id(self) -> str:
         return self._spec.world_id
@@ -541,6 +1444,383 @@ class FakeWorld:
     @property
     def build_report(self) -> BuildReport:
         return self._build_report
+
+    def _planning_require_authority(self, operation: str) -> _FakePlanningRuntime:
+        runtime = self._planning_runtime
+        if threading.get_ident() != runtime.authority_thread_id:
+            raise PlanningSceneContractError(
+                "planning-scene world calls require the authority thread",
+                operation=operation,
+                world_id=self.world_id,
+            ) from None
+        if self._state is not WorldState.READY:
+            raise PlanningSceneContractError(
+                "planning-scene world is no longer live",
+                operation=operation,
+                world_id=self.world_id,
+            ) from None
+        return runtime
+
+    def _planning_environment(self, value: object, operation: str) -> int:
+        if _planning_actual_base(value, (bool, int)) is not int:
+            raise PlanningSceneContractError(
+                "planning environment index must be an integer",
+                operation=operation,
+                world_id=self.world_id,
+            ) from None
+        try:
+            result = int.__int__(value)  # type: ignore[arg-type]
+        except BaseException:
+            result = -1
+        if type(result) is not int or not 0 <= result < self._spec.environments.count:
+            raise PlanningSceneContractError(
+                "planning environment index is out of range",
+                operation=operation,
+                world_id=self.world_id,
+            ) from None
+        return result
+
+    def _planning_scene_catalog_impl(self, environment_index: int = 0) -> PlanningSceneCatalog:
+        operation = "world.planning_scene_catalog"
+        runtime = self._planning_require_authority(operation)
+        environment = self._planning_environment(environment_index, operation)
+        return runtime.catalogs[environment]
+
+    def _planning_scene_state_impl(self, environment_index: int = 0) -> PlanningSceneState:
+        operation = "world.planning_scene_state"
+        runtime = self._planning_require_authority(operation)
+        environment = self._planning_environment(environment_index, operation)
+        return runtime.history[environment][runtime.sequence]
+
+    @staticmethod
+    def _planning_sequence_value(value: object) -> int:
+        result: object = None
+        if _planning_actual_base(value, (bool, int)) is int:
+            try:
+                result = int.__int__(value)  # type: ignore[arg-type]
+            except BaseException:
+                result = None
+        if type(result) is not int or not 1 <= result <= 2**63 - 1:
+            raise PlanningSceneContractError(
+                "planning delta base_sequence must be a positive bounded integer",
+                operation="world.planning_scene_delta",
+            ) from None
+        return result
+
+    @staticmethod
+    def _planning_delta_value(
+        current: PlanningSceneState,
+        previous: PlanningSceneState,
+        base_sequence: int,
+        kind: PlanningSceneDeltaKind,
+        *,
+        catalog: PlanningSceneCatalog | None = None,
+        state: PlanningSceneState | None = None,
+        attachments: tuple[PlanningAttachment, ...] = (),
+        resync_required: bool = False,
+    ) -> PlanningSceneDelta:
+        return PlanningSceneDelta(
+            provider_id=current.provider_id,
+            world_id=current.world_id,
+            generation=current.generation,
+            environment_index=current.environment_index,
+            tick=current.tick,
+            base_sequence=base_sequence,
+            sequence=current.sequence,
+            previous_world_revision=previous.world_revision,
+            world_revision=current.world_revision,
+            previous_catalog_revision=previous.catalog_revision,
+            catalog_revision=current.catalog_revision,
+            previous_catalog_content_sha256=(
+                None if kind is PlanningSceneDeltaKind.RESYNC else previous.catalog_content_sha256
+            ),
+            catalog_content_sha256=None if kind is PlanningSceneDeltaKind.RESYNC else current.catalog_content_sha256,
+            previous_geometry_revision=previous.geometry_revision,
+            geometry_revision=current.geometry_revision,
+            previous_transform_revision=previous.transform_revision,
+            transform_revision=current.transform_revision,
+            previous_attachment_revision=previous.attachment_revision,
+            attachment_revision=current.attachment_revision,
+            kind=kind,
+            catalog=catalog,
+            state=state,
+            attachments=attachments,
+            resync_required=resync_required,
+        )
+
+    def _planning_scene_delta_impl(self, base_sequence: int, environment_index: int = 0) -> PlanningSceneDelta:
+        operation = "world.planning_scene_delta"
+        runtime = self._planning_require_authority(operation)
+        environment = self._planning_environment(environment_index, operation)
+        base_sequence = self._planning_sequence_value(base_sequence)
+        current = runtime.history[environment][runtime.sequence]
+        base = runtime.history[environment].get(base_sequence)
+        if runtime.force_resync or base is None:
+            delta = self._planning_delta_value(
+                current,
+                current,
+                base_sequence,
+                PlanningSceneDeltaKind.RESYNC,
+                resync_required=True,
+            )
+            runtime.force_resync = False
+            return delta
+        if base.sequence == current.sequence:
+            raise PlanningSceneDeltaContinuityError(
+                "no committed planning delta exists after base_sequence",
+                operation=operation,
+                world_id=self.world_id,
+            ) from None
+        if current.catalog_revision != base.catalog_revision:
+            return self._planning_delta_value(
+                current,
+                base,
+                base_sequence,
+                PlanningSceneDeltaKind.STRUCTURAL,
+                catalog=runtime.catalogs[environment],
+                state=current,
+            )
+        if (
+            current.attachment_revision != base.attachment_revision
+            and current.transform_revision == base.transform_revision
+        ):
+            return self._planning_delta_value(
+                current,
+                base,
+                base_sequence,
+                PlanningSceneDeltaKind.ATTACHMENT,
+                attachments=current.attachments,
+            )
+        return self._planning_delta_value(
+            current,
+            base,
+            base_sequence,
+            PlanningSceneDeltaKind.STATE,
+            state=current,
+        )
+
+    @staticmethod
+    def _planning_requested_representation(value: object) -> PlanningGeometryRepresentation:
+        if type(value) is PlanningGeometryRepresentation:
+            return value
+        canonical: object = None
+        if _planning_actual_base(value, (str,)) is str:
+            try:
+                source_length = str.__len__(value)  # type: ignore[arg-type]
+                if source_length <= 512:
+                    canonical = str.__str__(value)
+            except BaseException:
+                canonical = None
+        if (
+            type(canonical) is str
+            and 0 < len(canonical) <= 512
+            and "\x00" not in canonical
+            and not any(0xD800 <= ord(character) <= 0xDFFF for character in canonical)
+            and len(canonical.encode("utf-8")) <= 4096
+        ):
+            for representation in PlanningGeometryRepresentation:
+                if representation.value == canonical:
+                    return representation
+        raise PlanningSceneRepresentationError(
+            "requested planning geometry representation is unavailable",
+            operation="world.resolve_planning_geometry",
+        ) from None
+
+    @staticmethod
+    def _planning_geometry_identity(value: object) -> str:
+        canonical: object = None
+        if _planning_actual_base(value, (str,)) is str:
+            try:
+                source_length = str.__len__(value)  # type: ignore[arg-type]
+                if source_length <= 512:
+                    canonical = str.__str__(value)
+            except BaseException:
+                canonical = None
+        valid_text = (
+            type(canonical) is str
+            and 0 < len(canonical) <= 512
+            and "\x00" not in canonical
+            and not any(0xD800 <= ord(character) <= 0xDFFF for character in canonical)
+        )
+        if not valid_text:
+            raise PlanningSceneContractError(
+                "planning geometry ID is invalid",
+                operation="world.resolve_planning_geometry",
+            ) from None
+        assert type(canonical) is str
+        if len(canonical.encode("utf-8")) > 1024 or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:/-]*", canonical) is None:
+            raise PlanningSceneContractError(
+                "planning geometry ID is invalid",
+                operation="world.resolve_planning_geometry",
+            ) from None
+        return canonical
+
+    def _resolve_planning_geometry_impl(
+        self,
+        geometry_id: str,
+        representation: PlanningGeometryRepresentation | None = None,
+        environment_index: int = 0,
+    ) -> PlanningGeometryLease:
+        operation = "world.resolve_planning_geometry"
+        runtime = self._planning_require_authority(operation)
+        environment = self._planning_environment(environment_index, operation)
+        identity = self._planning_geometry_identity(geometry_id)
+        catalog = runtime.catalogs[environment]
+        geometry = next((item for item in catalog.geometries if item.geometry_id == identity), None)
+        if geometry is None:
+            raise PlanningSceneNotFoundError(
+                "planning geometry ID does not exist",
+                operation=operation,
+                world_id=self.world_id,
+            ) from None
+        requested = (
+            geometry.representation
+            if representation is None
+            else self._planning_requested_representation(representation)
+        )
+        if requested is not geometry.representation or geometry.resolution_key is None:
+            raise PlanningSceneRepresentationError(
+                "requested planning geometry representation is unavailable",
+                operation=operation,
+                world_id=self.world_id,
+            ) from None
+        raw = runtime.raw_resources.get(identity)
+        if raw is None:
+            raise PlanningSceneRepresentationError(
+                "planning geometry has no materializable resource",
+                operation=operation,
+                world_id=self.world_id,
+            ) from None
+        if type(raw) is not tuple or len(raw) != 6:
+            raise PlanningSceneContractError(
+                "planning geometry resource metadata is invalid",
+                operation=operation,
+                world_id=self.world_id,
+            ) from None
+        content, raw_representation, resource_id, profile, vertex_shape, index_shape = raw
+        layout = geometry.resource_layout
+        assert type(layout) is PlanningGeometryResourceLayout
+        if type(content) is not bytes or raw_representation is not requested:
+            raise PlanningSceneHashMismatchError(
+                "planning geometry content hash does not match the catalog",
+                operation=operation,
+                world_id=self.world_id,
+            ) from None
+        digest = hashlib.sha256(content).hexdigest()
+        if digest != geometry.sha256:
+            raise PlanningSceneHashMismatchError(
+                "planning geometry content hash does not match the catalog",
+                operation=operation,
+                world_id=self.world_id,
+            ) from None
+        exact_mesh_shapes = (
+            type(vertex_shape) is tuple
+            and len(vertex_shape) == 2
+            and all(type(value) is int for value in vertex_shape)
+            and type(index_shape) is tuple
+            and len(index_shape) == 2
+            and all(type(value) is int for value in index_shape)
+        )
+        if (
+            type(resource_id) is not str
+            or resource_id != geometry.resource_id
+            or profile is not geometry.content_profile
+            or not exact_mesh_shapes
+            or vertex_shape != layout.vertex_shape
+            or index_shape != layout.index_shape
+        ):
+            raise PlanningSceneContractError(
+                "planning geometry resource metadata does not match the catalog layout",
+                operation=operation,
+                world_id=self.world_id,
+            ) from None
+        key = geometry.resolution_key
+        assert key is not None
+        cached = runtime.storage_cache.get(key)
+        if cached is None:
+            locator = _planning_id("cache", identity, requested.value, digest)
+            cached = bytes(content), locator
+            if hashlib.sha256(cached[0]).hexdigest() != digest:
+                raise PlanningSceneHashMismatchError(
+                    "planning geometry cache verification failed",
+                    operation=operation,
+                    world_id=self.world_id,
+                ) from None
+            runtime.storage_cache[key] = cached
+            runtime.geometry_materializations += 1
+        immutable_content, locator = cached
+        runtime.lease_serial += 1
+        lease_token = _planning_id("lease", self.world_id, str(runtime.generation), identity, str(runtime.lease_serial))
+        descriptor = PlanningGeometryResourceDescriptor(
+            self._session.descriptor.provider_id,
+            self.world_id,
+            runtime.generation,
+            environment,
+            catalog.catalog_revision,
+            catalog.geometry_revision,
+            catalog.content_sha256,
+            lease_token,
+            resource_id,
+            identity,
+            requested,
+            PlanningGeometryStorageKind.IMMUTABLE_MEMORY,
+            locator,
+            profile,
+            "m",
+            PlanningGeometryAxisConvention.RIGHT_HANDED_Z_UP,
+            layout,
+            len(immutable_content),
+            digest,
+        )
+        descriptor.validate_against(catalog)
+        return _FakePlanningGeometryLease(descriptor, immutable_content, runtime.lease_epoch)
+
+    def _planning_commit_state(self) -> None:
+        runtime = self._planning_runtime
+        counters = (
+            runtime.sequence,
+            runtime.world_revision,
+            runtime.transform_revision,
+        )
+        if any(counter >= 2**63 - 1 for counter in counters):
+            runtime.force_resync = True
+            for environment_index in range(self._spec.environments.count):
+                state = self._capture_planning_state(environment_index)
+                runtime.history[environment_index] = {state.sequence: state}
+            return
+        runtime.sequence += 1
+        runtime.world_revision += 1
+        runtime.transform_revision += 1
+        for environment_index in range(self._spec.environments.count):
+            state = self._capture_planning_state(environment_index)
+            history = runtime.history[environment_index]
+            history[state.sequence] = state
+            while len(history) > 128:
+                del history[next(iter(history))]
+
+    def _planning_reset(self) -> None:
+        runtime = self._planning_runtime
+        runtime.lease_epoch.live = False
+        runtime.lease_epoch = _PlanningLeaseEpoch()
+        runtime.storage_cache.clear()
+        runtime.raw_resources.clear()
+        runtime.catalogs.clear()
+        runtime.history.clear()
+        if runtime.generation >= 2**63 - 1:
+            raise PlanningSceneContractError(
+                "planning generation is exhausted",
+                operation="world.reset",
+                world_id=self.world_id,
+            ) from None
+        runtime.generation += 1
+        runtime.sequence = 1
+        runtime.world_revision = 1
+        runtime.catalog_revision = 1
+        runtime.geometry_revision = 1
+        runtime.transform_revision = 1
+        runtime.attachment_revision = 1
+        runtime.force_resync = True
+        self._initialize_planning_scene()
 
     def _ensure_ready(self, operation: str) -> None:
         if self._state is not WorldState.READY:
@@ -1378,3 +2658,85 @@ class FakeWorld:
         traceback: TracebackType | None,
     ) -> None:
         self.close()
+
+
+class FakePlanningWorld(FakeWorld):
+    """Demand-only FakeWorld variant implementing ``planning.scene@2``.
+
+    Selecting a separate concrete type keeps the ordinary ``FakeWorld``
+    object layout and its reset/step/scene-command paths free of planning
+    state, callbacks, lookups and branches.
+    """
+
+    def __init__(self, session: FakeSession, spec: WorldSpec, generation: int) -> None:
+        super().__init__(session, spec, generation)
+        self._planning_runtime = _FakePlanningRuntime(threading.get_ident(), generation)
+        admission_failed = False
+        try:
+            self._initialize_planning_scene()
+        except PlanningSceneError as caught:
+            _snapshot_and_scrub_planning_error(caught, _PLANNING_ERROR_TYPES)
+            admission_failed = True
+        except Exception as caught:
+            try:
+                BaseException.__setattr__(caught, "__traceback__", None)
+                BaseException.__setattr__(caught, "__cause__", None)
+                BaseException.__setattr__(caught, "__context__", None)
+            except BaseException:
+                pass
+            admission_failed = True
+        if admission_failed:
+            self._close(notify_session=False)
+            raise PlanningSceneIncompleteError(
+                "planning-scene native admission failed",
+                operation="planning_scene.preflight",
+                backend_id=session.descriptor.provider_id,
+                world_id=spec.world_id,
+            ) from None
+
+    @_planning_error_boundary
+    def planning_scene_catalog(self, environment_index: int = 0) -> PlanningSceneCatalog:
+        return self._planning_scene_catalog_impl(environment_index)
+
+    @_planning_error_boundary
+    def planning_scene_state(self, environment_index: int = 0) -> PlanningSceneState:
+        return self._planning_scene_state_impl(environment_index)
+
+    @_planning_error_boundary
+    def planning_scene_delta(self, base_sequence: int, environment_index: int = 0) -> PlanningSceneDelta:
+        return self._planning_scene_delta_impl(base_sequence, environment_index)
+
+    @_planning_error_boundary
+    def resolve_planning_geometry(
+        self,
+        geometry_id: str,
+        representation: PlanningGeometryRepresentation | None = None,
+        environment_index: int = 0,
+    ) -> PlanningGeometryLease:
+        return self._resolve_planning_geometry_impl(geometry_id, representation, environment_index)
+
+    def reset(self, environment_indices: Iterable[int] | None = None) -> ResetResult:
+        result = super().reset(environment_indices)
+        self._planning_reset()
+        return result
+
+    def step(self, count: int = 1) -> Tick:
+        result = super().step(count)
+        self._planning_commit_state()
+        return result
+
+    def apply_scene_command(self, command: SceneCommand) -> SceneCommandResult:
+        result = super().apply_scene_command(command)
+        if result.status is SceneCommandStatus.APPLIED:
+            self._planning_commit_state()
+        return result
+
+    def _close(self, *, notify_session: bool) -> None:
+        if self._state is not WorldState.CLOSED:
+            runtime = self._planning_runtime
+            runtime.lease_epoch.live = False
+            runtime.storage_cache.clear()
+            runtime.history.clear()
+            runtime.catalogs.clear()
+            runtime.raw_resources.clear()
+        super()._close(notify_session=notify_session)
