@@ -565,6 +565,143 @@ def test_named_frame_allow_list_comes_only_from_locked_declarations(planning_wor
     assert not any("camera" in item.frame_id or "xform" in item.frame_id for item in catalog.frames)
 
 
+def test_entity_root_named_frame_is_admitted_from_exact_root_link_source() -> None:
+    base = planning_spec(environments=1)
+    payload = next(item for item in base.entities if item.path == EntityPath("/payload"))
+    declaration = {
+        "schema": PLANNING_FRAME_DECLARATIONS_SCHEMA_VERSION,
+        "component_sha256": "c" * 64,
+        "entries": (
+            {
+                "semantic_key": "annotation.root",
+                "role": "annotation",
+                "owner_link": None,
+                "source": {"kind": "link", "name": "payload"},
+            },
+        ),
+    }
+    metadata = payload.metadata.to_dict()
+    metadata["planning_frame_declarations"] = declaration
+    changed_payload = replace(payload, metadata=FrozenMap(metadata))
+    spec = replace(
+        base,
+        world_id="planning-entity-root-named-frame",
+        entities=tuple(changed_payload if item.path == payload.path else item for item in base.entities),
+    )
+    session = FakeProvider().open()
+    world = session.build(spec)
+    try:
+        catalog = world.planning_scene_catalog()
+        descriptor = entity_by_path(catalog, "/payload")
+        named = next(item for item in catalog.frames if item.semantic_key == "annotation.root")
+        assert named.owner_entity_id == descriptor.entity_id
+        assert named.owner_link_id is None
+        assert named.parent_frame_id == descriptor.root_frame_id
+        world.planning_scene_state().validate_against(catalog)
+    finally:
+        session.close()
+
+
+def test_planning_metadata_scalar_and_key_subclasses_are_detached_before_inspection() -> None:
+    class SteeringText(str):
+        equality_calls = 0
+
+        def __eq__(self, other):
+            del other
+            type(self).equality_calls += 1
+            raise KeyboardInterrupt("metadata equality must not run")
+
+        __hash__ = str.__hash__
+
+    base = planning_spec(environments=1)
+    payload = next(item for item in base.entities if item.path == EntityPath("/payload"))
+    metadata = payload.metadata.to_dict()
+    metadata["planning_motion_class"] = SteeringText("static")
+    changed_payload = replace(payload, metadata=FrozenMap(metadata))
+    stored = changed_payload.metadata["planning_motion_class"]
+    assert type(stored) is str
+    spec = replace(
+        base,
+        world_id="planning-detached-metadata-scalar",
+        entities=tuple(changed_payload if item.path == payload.path else item for item in base.entities),
+    )
+    session = FakeProvider().open()
+    world = session.build(spec)
+    try:
+        catalog = world.planning_scene_catalog()
+        payload_descriptor = entity_by_path(catalog, "/payload")
+        geometry = next(item for item in catalog.geometries if item.owner_entity_id == payload_descriptor.entity_id)
+        assert geometry.motion_class is PlanningGeometryMotionClass.STATIC
+        assert SteeringText.equality_calls == 0
+    finally:
+        session.close()
+
+    class HostileKey(str):
+        armed = False
+        hash_calls = 0
+
+        def __hash__(self):
+            if type(self).armed:
+                type(self).hash_calls += 1
+                raise KeyboardInterrupt("metadata key hash must not run")
+            return str.__hash__(self)
+
+    keys = tuple(HostileKey(value) for value in ("schema", "component_sha256", "entries"))
+    declarations = FrozenMap(
+        {
+            keys[0]: PLANNING_FRAME_DECLARATIONS_SCHEMA_VERSION,
+            keys[1]: "a" * 64,
+            keys[2]: (),
+        }
+    )
+    HostileKey.armed = True
+    parsed = planning_contract.parse_planning_frame_declarations(declarations)
+    assert parsed is not None and parsed.entries == ()
+    assert HostileKey.hash_calls == 0
+
+
+def test_attachment_default_endpoint_uses_topology_root_not_opaque_id_order() -> None:
+    spec = WorldSpec(
+        "planning-attachment-topology-root",
+        (
+            EntitySpec(EntityPath("/anchor"), EntityKind.RIGID_BODY, box=BoxGeometrySpec()),
+            EntitySpec(
+                EntityPath("/microwave"),
+                EntityKind.ARTICULATION,
+                joint_names=("hinge", "dial"),
+            ),
+        ),
+        environments=EnvironmentSpec(1),
+        requirements=(planning_requirement(),),
+        metadata=FrozenMap(
+            {
+                "planning_attachment_authority": "exclusive_registry",
+                "planning_attachments": (
+                    {
+                        "attachment_id": "attachment.anchor_microwave",
+                        "parent_path": "/anchor",
+                        "child_path": "/microwave",
+                    },
+                ),
+            }
+        ),
+    )
+    session = FakeProvider().open()
+    world = session.build(spec)
+    try:
+        catalog = world.planning_scene_catalog()
+        target = entity_by_path(catalog, "/microwave")
+        root_link = next(
+            item for item in catalog.links if item.entity_id == target.entity_id and item.parent_link_id is None
+        )
+        assert target.link_ids[0] != root_link.link_id
+        attachment = world.planning_scene_state().attachments[0]
+        assert attachment.child_link_id == root_link.link_id
+        assert attachment.child_frame_id == root_link.frame_id
+    finally:
+        session.close()
+
+
 def test_locked_joint_frame_source_resolves_and_unsupported_native_named_fails_preflight() -> None:
     base = planning_spec(environments=1)
     robot = next(item for item in base.entities if item.path == EntityPath("/robot"))
@@ -696,6 +833,37 @@ def test_every_geometry_provenance_binds_provider_version_and_effective_paramete
     assert original_digest != effective_digest
 
 
+def test_articulation_geometry_provenance_binds_locked_asset_source() -> None:
+    def capture(asset_uri: str) -> tuple[str, str]:
+        spec = WorldSpec(
+            "planning-articulation-provenance",
+            (
+                EntitySpec(
+                    EntityPath("/machine"),
+                    EntityKind.ARTICULATION,
+                    asset_uri=asset_uri,
+                    joint_names=("hinge",),
+                ),
+            ),
+            environments=EnvironmentSpec(1),
+            requirements=(planning_requirement(),),
+        )
+        session = FakeProvider().open()
+        world = session.build(spec)
+        try:
+            catalog = world.planning_scene_catalog()
+            machine = entity_by_path(catalog, "/machine")
+            geometry = next(item for item in catalog.geometries if item.owner_entity_id == machine.entity_id)
+            return catalog.content_sha256, geometry.provenance_sha256
+        finally:
+            session.close()
+
+    first = capture("asset://fixture/model-a")
+    second = capture("asset://fixture/model-b")
+    assert first[0] != second[0]
+    assert first[1] != second[1]
+
+
 def test_logical_path_validation_accepts_absolute_paths_and_rejects_invalid_paths(planning_world) -> None:
     descriptor = entity_by_path(planning_world.planning_scene_catalog(), "/payload")
     assert descriptor.path == "/payload"
@@ -793,7 +961,7 @@ def test_reset_loses_delta_continuity_and_revokes_existing_leases(planning_world
     assert delta.previous_catalog_revision == delta.catalog_revision
     assert delta.previous_geometry_revision == delta.geometry_revision
     assert delta.catalog is None and delta.state is None and delta.attachments == ()
-    assert delta.apply(after_catalog, before) is None
+    assert delta.apply(before_catalog, before) is None
     with pytest.raises(PlanningGeometryResourceRevokedError):
         _ = lease.descriptor
     with pytest.raises(PlanningGeometryResourceRevokedError):
@@ -933,7 +1101,7 @@ def test_partial_reset_resource_isolation_stress(planning_world) -> None:
     assert runtime.geometry_materializations == 1
 
 
-def test_overflow_produces_terminal_resync(planning_world) -> None:
+def test_counter_saturation_produces_one_terminal_resync_then_rejects_mutation_atomically(planning_world) -> None:
     maximum = 2**63 - 1
     runtime = planning_world._planning_runtime
     assert runtime is not None
@@ -941,18 +1109,210 @@ def test_overflow_produces_terminal_resync(planning_world) -> None:
         current = planning_world.planning_scene_state(environment_index)
         saturated = replace(
             current,
-            sequence=maximum,
-            world_revision=maximum,
-            transform_revision=maximum,
+            sequence=maximum - 1,
+            world_revision=maximum - 1,
+            transform_revision=maximum - 1,
         )
-        environment_runtime.sequence = maximum
-        environment_runtime.world_revision = maximum
-        environment_runtime.transform_revision = maximum
-        environment_runtime.history = {maximum: saturated}
+        environment_runtime.sequence = maximum - 1
+        environment_runtime.world_revision = maximum - 1
+        environment_runtime.transform_revision = maximum - 1
+        environment_runtime.history = {maximum - 1: saturated}
     planning_world._planning_commit_state()
-    delta = planning_world.planning_scene_delta(maximum)
+    delta = planning_world.planning_scene_delta(maximum - 1)
     assert delta.kind is PlanningSceneDeltaKind.RESYNC
     assert delta.resync_required and delta.catalog is None and delta.state is None and not delta.attachments
+
+    payload_runtime = planning_world._rigids[EntityPath("/payload")]
+    position_before = tuple(payload_runtime.positions[0])
+    state_before = planning_world.planning_scene_state(0)
+    scene_sequence_before = planning_world._scene_sequence
+
+    class DerivedSceneCommand(SceneCommand):
+        pass
+
+    with pytest.raises(PlanningSceneContractError, match="identity is exhausted") as caught:
+        planning_world.apply_scene_command(
+            DerivedSceneCommand(
+                "saturated-command",
+                "test",
+                "lease",
+                planning_world.generation,
+                SceneCommandKind.SET_POSE,
+                EntityPath("/payload"),
+                target_pose=Pose((10.0, 0.0, 0.0)),
+            )
+        )
+    assert caught.value.__cause__ is None and caught.value.__context__ is None
+    assert tuple(payload_runtime.positions[0]) == position_before
+    assert planning_world.planning_scene_state(0) is state_before
+    assert planning_world._scene_sequence == scene_sequence_before
+
+    step_index_before = planning_world._step_index
+    velocity_before = tuple(payload_runtime.linear_velocities[0])
+    with pytest.raises(PlanningSceneContractError, match="identity is exhausted"):
+        planning_world.step()
+    assert planning_world._step_index == step_index_before
+    assert tuple(payload_runtime.positions[0]) == position_before
+    assert tuple(payload_runtime.linear_velocities[0]) == velocity_before
+    assert planning_world.planning_scene_state(0) is state_before
+
+
+def test_geometry_lease_identity_exhaustion_is_bounded_and_cache_atomic(planning_world) -> None:
+    maximum = 2**63 - 1
+    catalog = planning_world.planning_scene_catalog()
+    geometry_id = resource_geometry_id(catalog)
+    runtime = planning_world._planning_runtime
+    environment_runtime = runtime.environments[0]
+    environment_runtime.lease_serial = maximum
+    cache_before = dict(runtime.storage_cache)
+    materializations_before = runtime.geometry_materializations
+
+    with pytest.raises(PlanningSceneContractError, match="lease identity is exhausted") as caught:
+        planning_world.resolve_planning_geometry(geometry_id)
+    assert caught.value.__cause__ is None and caught.value.__context__ is None
+    assert environment_runtime.lease_serial == maximum
+    assert runtime.storage_cache == cache_before
+    assert runtime.geometry_materializations == materializations_before
+
+
+@pytest.mark.parametrize(
+    ("time_step_seconds", "gravity_m_s2", "count", "message"),
+    (
+        (1.0e308, (0.0, 0.0, 0.0), 2, "simulation time"),
+        (1.0e200, (0.0, 0.0, -9.81), 1, "finite"),
+    ),
+)
+def test_failed_numeric_step_rolls_back_physics_clock_and_planning_publication(
+    time_step_seconds: float,
+    gravity_m_s2: tuple[float, float, float],
+    count: int,
+    message: str,
+) -> None:
+    spec = WorldSpec(
+        "planning-numeric-step-atomicity",
+        (EntitySpec(EntityPath("/payload"), EntityKind.RIGID_BODY, box=BoxGeometrySpec()),),
+        environments=EnvironmentSpec(1),
+        physics=PhysicsSpec(time_step_seconds=time_step_seconds, gravity_m_s2=gravity_m_s2),
+        requirements=(planning_requirement(),),
+    )
+    session = FakeProvider().open()
+    world = session.build(spec)
+    try:
+        environment_runtime = world._planning_runtime.environments[0]
+        state_before = world.planning_scene_state()
+        history_before = dict(environment_runtime.history)
+        payload_runtime = world._rigids[EntityPath("/payload")]
+        physical_before = (
+            tuple(payload_runtime.positions[0]),
+            tuple(payload_runtime.orientations[0]),
+            tuple(payload_runtime.linear_velocities[0]),
+            tuple(payload_runtime.angular_velocities[0]),
+        )
+        counters_before = (
+            world._step_index,
+            world._scene_sequence,
+            environment_runtime.sequence,
+            environment_runtime.world_revision,
+            environment_runtime.transform_revision,
+        )
+
+        with pytest.raises(PlanningSceneContractError, match=message) as caught:
+            world.step(count)
+        assert caught.value.__cause__ is None and caught.value.__context__ is None
+        assert (
+            tuple(payload_runtime.positions[0]),
+            tuple(payload_runtime.orientations[0]),
+            tuple(payload_runtime.linear_velocities[0]),
+            tuple(payload_runtime.angular_velocities[0]),
+        ) == physical_before
+        assert (
+            world._step_index,
+            world._scene_sequence,
+            environment_runtime.sequence,
+            environment_runtime.world_revision,
+            environment_runtime.transform_revision,
+        ) == counters_before
+        assert environment_runtime.history == history_before
+        assert world.planning_scene_state() is state_before
+    finally:
+        session.close()
+
+
+def test_multi_environment_commit_capture_failure_publishes_no_partial_identity(planning_world, monkeypatch) -> None:
+    runtime = planning_world._planning_runtime
+    before = {
+        index: (
+            environment.sequence,
+            environment.world_revision,
+            environment.transform_revision,
+            environment.history,
+            environment.force_resync,
+        )
+        for index, environment in runtime.environments.items()
+    }
+    capture = planning_world._capture_planning_state
+
+    def fail_second_environment(environment_index: int):
+        if environment_index == 1:
+            raise PlanningSceneContractError(
+                "injected staged capture failure",
+                operation="planning_scene.commit",
+            )
+        return capture(environment_index)
+
+    monkeypatch.setattr(planning_world, "_capture_planning_state", fail_second_environment)
+    with pytest.raises(PlanningSceneContractError, match="injected staged capture failure"):
+        planning_world._planning_commit_state()
+
+    for index, environment in runtime.environments.items():
+        previous = before[index]
+        assert (
+            environment.sequence,
+            environment.world_revision,
+            environment.transform_revision,
+        ) == previous[:3]
+        assert environment.history is previous[3]
+        assert environment.force_resync is previous[4]
+
+
+def test_generation_exhaustion_rejects_reset_before_physics_mutation(planning_world) -> None:
+    maximum = 2**63 - 1
+    planning_world.apply_scene_command(
+        SceneCommand(
+            "pose-before-exhausted-reset",
+            "test",
+            "lease",
+            planning_world.generation,
+            SceneCommandKind.SET_POSE,
+            EntityPath("/payload"),
+            environment_index=0,
+            target_pose=Pose((9.0, 8.0, 7.0)),
+        )
+    )
+    environment_runtime = planning_world._planning_runtime.environments[0]
+    catalog = planning_world.planning_scene_catalog(0)
+    state = planning_world.planning_scene_state(0)
+    saturated_catalog = replace(catalog, generation=maximum, content_sha256="")
+    saturated_state = replace(
+        state,
+        generation=maximum,
+        catalog_content_sha256=saturated_catalog.content_sha256,
+    )
+    saturated_state.validate_against(saturated_catalog)
+    environment_runtime.generation = maximum
+    environment_runtime.catalog = saturated_catalog
+    environment_runtime.history = {saturated_state.sequence: saturated_state}
+
+    payload_runtime = planning_world._rigids[EntityPath("/payload")]
+    physical_before = tuple(payload_runtime.positions[0])
+    reset_count_before = planning_world._reset_count
+    scene_sequence_before = planning_world._scene_sequence
+    with pytest.raises(PlanningSceneContractError, match="generation is exhausted"):
+        planning_world.reset((0,))
+    assert tuple(payload_runtime.positions[0]) == physical_before
+    assert planning_world.planning_scene_state(0) is saturated_state
+    assert planning_world._reset_count == reset_count_before
+    assert planning_world._scene_sequence == scene_sequence_before
 
 
 def test_concave_triangle_mesh_resource_metadata_chunk_read_and_cache_reuse(planning_world) -> None:

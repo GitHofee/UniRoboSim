@@ -1760,7 +1760,7 @@ def _attachment_delta(state: PlanningSceneState) -> PlanningSceneDelta:
         state.attachment_revision,
         state.attachment_revision + 1,
         PlanningSceneDeltaKind.ATTACHMENT,
-        attachments=state.attachments,
+        attachments=state.attachments[:-1],
     )
 
 
@@ -1902,7 +1902,7 @@ def test_structural_attachment_delta_apply_and_invalid_payload_matrix(planning_v
     attachment = _attachment_delta(before)
     attachment_result = attachment.apply(catalog, before)
     assert attachment_result is not None
-    assert attachment_result[1].attachments == before.attachments
+    assert attachment_result[1].attachments == before.attachments[:-1]
     assert attachment_result[1].attachment_revision == before.attachment_revision + 1
 
     world.step()
@@ -1954,6 +1954,21 @@ def test_structural_attachment_delta_apply_and_invalid_payload_matrix(planning_v
     with pytest.raises(PlanningSceneContractError, match="state revisions"):
         replace(state_delta, state=mismatched_state)
 
+    changed_state_attachments = replace(state_delta.state, attachments=state_delta.state.attachments[:-1])
+    changed_state_delta = replace(state_delta, state=changed_state_attachments)
+    with pytest.raises(PlanningSceneContractError, match="attachment values and attachment_revision"):
+        changed_state_delta.apply(catalog, before)
+
+    assert structural.state is not None
+    changed_structural_state = replace(structural.state, attachments=structural.state.attachments[:-1])
+    changed_structural = replace(structural, state=changed_structural_state)
+    with pytest.raises(PlanningSceneContractError, match="attachment values and attachment_revision"):
+        changed_structural.apply(catalog, before)
+
+    unchanged_attachment_delta = replace(attachment, attachments=before.attachments)
+    with pytest.raises(PlanningSceneContractError, match="attachment values and attachment_revision"):
+        unchanged_attachment_delta.apply(catalog, before)
+
     resync = PlanningSceneDelta(
         before.provider_id,
         before.world_id,
@@ -1982,6 +1997,25 @@ def test_structural_attachment_delta_apply_and_invalid_payload_matrix(planning_v
         replace(resync, catalog_revision=resync.previous_catalog_revision + 1)
     with pytest.raises(PlanningSceneContractError, match="geometry revision"):
         replace(resync, geometry_revision=resync.previous_geometry_revision + 1)
+
+    forward_generation = replace(resync, generation=before.generation + 1)
+    assert forward_generation.apply(catalog, before) is None
+    for override in (
+        {"provider_id": "provider.other"},
+        {"world_id": "world.other"},
+        {"environment_index": before.environment_index + 1},
+    ):
+        with pytest.raises(PlanningSceneContractError, match="envelope"):
+            replace(resync, **override).apply(catalog, before)
+    stale_generation = replace(resync, generation=before.generation)
+    newer_catalog = replace(catalog, generation=before.generation + 1, content_sha256="")
+    newer_state = replace(
+        before,
+        generation=before.generation + 1,
+        catalog_content_sha256=newer_catalog.content_sha256,
+    )
+    with pytest.raises(PlanningSceneStaleGenerationError, match="older"):
+        stale_generation.apply(newer_catalog, newer_state)
 
 
 def test_delta_apply_rejects_wrong_type_envelope_and_continuity(planning_values) -> None:

@@ -1965,20 +1965,25 @@ class PlanningSceneDelta(_PlanningValue):
 
         if type(catalog) is not PlanningSceneCatalog or type(state) is not PlanningSceneState:
             raise _invalid("delta apply requires exact catalog and state values") from None
-        if self.kind is PlanningSceneDeltaKind.RESYNC:
-            return None
-        if self.generation != state.generation:
-            raise PlanningSceneStaleGenerationError(
-                "delta and prior state generations do not match",
-                operation="planning_scene.delta.apply",
-            ) from None
+        state.validate_against(catalog)
         if (
             self.provider_id != state.provider_id
             or self.world_id != state.world_id
             or self.environment_index != state.environment_index
         ):
             raise _invalid("delta envelope does not match prior state") from None
-        state.validate_against(catalog)
+        if self.kind is PlanningSceneDeltaKind.RESYNC:
+            if self.generation < state.generation:
+                raise PlanningSceneStaleGenerationError(
+                    "resync delta generation is older than the prior state",
+                    operation="planning_scene.delta.apply",
+                ) from None
+            return None
+        if self.generation != state.generation:
+            raise PlanningSceneStaleGenerationError(
+                "delta and prior state generations do not match",
+                operation="planning_scene.delta.apply",
+            ) from None
         if (
             self.base_sequence != state.sequence
             or self.previous_world_revision != state.world_revision
@@ -2016,6 +2021,10 @@ class PlanningSceneDelta(_PlanningValue):
                 attachments=self.attachments,
             )
         next_state.validate_against(next_catalog)
+        attachments_changed = next_state.attachments != state.attachments
+        attachment_revision_changed = self.attachment_revision != self.previous_attachment_revision
+        if attachments_changed != attachment_revision_changed:
+            raise _invalid("attachment values and attachment_revision must change together") from None
         return next_catalog, next_state
 
 

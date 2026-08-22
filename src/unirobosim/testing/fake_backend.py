@@ -272,6 +272,8 @@ _FAKE_PLANNING_ADAPTER_VERSION = "planning-scene-v2"
 _FAKE_PLANNING_NATIVE_PROFILE = "fake-native-collision/v1"
 _FAKE_PLANNING_COMPILER_PROFILE = "python-struct-little-endian/v1"
 _FAKE_PLANNING_CANONICALIZATION_ALGORITHM = "json-utf8-sort-keys-compact-sha256/v1"
+_FAKE_PLANNING_MAX_COUNTER = 2**63 - 1
+_FAKE_PLANNING_MAX_METADATA_ITEMS = 100_000
 
 
 @dataclass
@@ -350,6 +352,20 @@ class _FakePlanningRuntime:
         default_factory=dict
     )
     geometry_materializations: int = 0
+
+
+@dataclass
+class _FakePlanningStepSnapshot:
+    step_index: int
+    scene_sequence: int
+    articulations: dict[EntityPath, tuple[list[list[float]], list[list[float]]]]
+    rigids: dict[
+        EntityPath,
+        tuple[list[list[float]], list[list[float]], list[list[float]], list[list[float]]],
+    ]
+    points: dict[EntityPath, tuple[list[list[list[float]]], list[list[list[float]]]]]
+    debug_primitives: dict[tuple[str, str, str], DebugPrimitive]
+    debug_expirations: dict[tuple[str, str, str], int | None]
 
 
 _PlanningResultT = TypeVar("_PlanningResultT")
@@ -1084,13 +1100,18 @@ class FakeWorld:
                 ),
                 PlanningPrimitiveGeometry(PlanningGeometryRepresentation.CYLINDER, (0.05, 0.35)),
             )
+            articulation_source: dict[str, object] = {
+                "entity_path": path,
+                "profile": "fake-articulation-compound/v1",
+            }
+            source_kind = "authored-procedural-articulation"
+            if entity.asset_uri is not None:
+                articulation_source["asset_uri"] = _planning_exact_text(entity.asset_uri, "asset URI")
+                source_kind = "locked-asset-procedural-articulation"
             return descriptor(
                 PlanningGeometryRepresentation.COMPOUND,
-                source_kind="authored-procedural-articulation",
-                source_parameters={
-                    "entity_path": path,
-                    "profile": "fake-articulation-compound/v1",
-                },
+                source_kind=source_kind,
+                source_parameters=articulation_source,
                 cooking_profile="fake-inline-compound-cooking/v1",
                 effective_shape={
                     "parts": tuple(
@@ -1175,29 +1196,53 @@ class FakeWorld:
     ) -> PlanningFrameDescriptor:
         link_by_id = {item.link_id: item for item in links}
         frame_by_id = {item.frame_id: item for item in frames}
-        owner_matches = (
-            ()
-            if declaration.owner_link_name is None
-            else tuple(item for item in links if item.authored_name == declaration.owner_link_name)
-        )
-        if declaration.owner_link_name is None or len(owner_matches) != 1:
-            raise PlanningSceneIncompleteError(
-                "planning frame owner link does not resolve uniquely",
-                operation="planning_scene.preflight",
-                entity_path=entity.path.value,
-            ) from None
-        owner_link = owner_matches[0]
+        owner_link: PlanningLinkDescriptor | None = None
+        if declaration.owner_link_name is None:
+            entity_roots = tuple(
+                item
+                for item in frames
+                if item.kind is PlanningFrameKind.ENTITY
+                and item.owner_entity_id == entity_id
+                and item.owner_link_id is None
+            )
+            if len(entity_roots) != 1:
+                raise PlanningSceneIncompleteError(
+                    "planning frame entity-root owner does not resolve uniquely",
+                    operation="planning_scene.preflight",
+                    entity_path=entity.path.value,
+                ) from None
+            parent_frame_id = entity_roots[0].frame_id
+        else:
+            owner_matches = tuple(item for item in links if item.authored_name == declaration.owner_link_name)
+            if len(owner_matches) != 1:
+                raise PlanningSceneIncompleteError(
+                    "planning frame owner link does not resolve uniquely",
+                    operation="planning_scene.preflight",
+                    entity_path=entity.path.value,
+                ) from None
+            owner_link = owner_matches[0]
+            parent_frame_id = owner_link.frame_id
 
         if declaration.source.kind is PlanningFrameSourceKind.LINK:
             link_source_matches = tuple(item for item in links if item.authored_name == declaration.source.name)
-            if len(link_source_matches) != 1 or link_source_matches[0].link_id != owner_link.link_id:
+            source_matches_owner = len(link_source_matches) == 1 and (
+                link_source_matches[0].parent_link_id is None
+                if owner_link is None
+                else link_source_matches[0].link_id == owner_link.link_id
+            )
+            if not source_matches_owner:
                 raise PlanningSceneIncompleteError(
                     "planning frame link source does not match its locked owner",
                     operation="planning_scene.preflight",
                     entity_path=entity.path.value,
                 ) from None
-            parent_frame_id = link_source_matches[0].frame_id
         elif declaration.source.kind is PlanningFrameSourceKind.JOINT:
+            if owner_link is None:
+                raise PlanningSceneIncompleteError(
+                    "an entity-root planning frame cannot use a joint source",
+                    operation="planning_scene.preflight",
+                    entity_path=entity.path.value,
+                ) from None
             joint_source_matches = tuple(item for item in joints if item.authored_name == declaration.source.name)
             if len(joint_source_matches) != 1:
                 raise PlanningSceneIncompleteError(
@@ -1220,7 +1265,7 @@ class FakeWorld:
                 entity_path=entity.path.value,
             ) from None
 
-        if link_by_id[owner_link.link_id].entity_id != entity_id:
+        if owner_link is not None and link_by_id[owner_link.link_id].entity_id != entity_id:
             raise PlanningSceneIncompleteError(
                 "planning frame owner does not belong to its entity",
                 operation="planning_scene.preflight",
@@ -1231,7 +1276,7 @@ class FakeWorld:
             PlanningFrameKind.NAMED,
             parent_frame_id,
             entity_id,
-            owner_link.link_id,
+            None if owner_link is None else owner_link.link_id,
             declaration.role,
             declaration.semantic_key,
         )
@@ -1452,9 +1497,9 @@ class FakeWorld:
         frame_states: tuple[PlanningFrameState, ...],
     ) -> tuple[PlanningAttachment, ...]:
         raw = self._spec.metadata.get("planning_attachments", ())
-        if type(raw) is not tuple:
+        if type(raw) is not tuple or tuple.__len__(raw) > _FAKE_PLANNING_MAX_METADATA_ITEMS:
             raise PlanningSceneContractError(
-                "fake planning attachment metadata must be an immutable tuple",
+                "fake planning attachment metadata must be a bounded immutable tuple",
                 operation="fake.planning_scene.build",
             ) from None
         if raw and self._spec.metadata.get("planning_attachment_authority") != "exclusive_registry":
@@ -1464,11 +1509,28 @@ class FakeWorld:
             ) from None
         entity_by_path = {entity.path: entity for entity in catalog.entities}
         frame_pose = {frame.frame_id: frame.world_pose for frame in frame_states}
+        links_by_entity: dict[str, tuple[PlanningLinkDescriptor, ...]] = {
+            entity.entity_id: tuple(link for link in catalog.links if link.entity_id == entity.entity_id)
+            for entity in catalog.entities
+        }
         result: list[PlanningAttachment] = []
         for index, item in enumerate(raw):
             if type(item) is not FrozenMap:
                 raise PlanningSceneContractError(
                     "fake planning attachment metadata contains an invalid record",
+                    operation="fake.planning_scene.build",
+                ) from None
+            if not frozenset(item).issubset(
+                {
+                    "attachment_id",
+                    "parent_path",
+                    "child_path",
+                    "parent_link_name",
+                    "child_link_name",
+                }
+            ):
+                raise PlanningSceneContractError(
+                    "fake planning attachment metadata contains unsupported fields",
                     operation="fake.planning_scene.build",
                 ) from None
             parent_path = item.get("parent_path")
@@ -1496,13 +1558,39 @@ class FakeWorld:
                     "fake planning attachment ID must be an exact string",
                     operation="fake.planning_scene.build",
                 ) from None
-            parent_link = next(link for link in catalog.links if link.link_id == parent.link_ids[0])
-            child_link = next(link for link in catalog.links if link.link_id == child.link_ids[0])
+
+            def endpoint_link(
+                record: FrozenMap,
+                descriptor: PlanningEntityDescriptor,
+                field_name: str,
+            ) -> PlanningLinkDescriptor:
+                authored_name = record.get(field_name)
+                candidates = links_by_entity[descriptor.entity_id]
+                if authored_name is None:
+                    matches = tuple(link for link in candidates if link.parent_link_id is None)
+                elif type(authored_name) is str:
+                    matches = tuple(link for link in candidates if link.authored_name == authored_name)
+                else:
+                    matches = ()
+                if len(matches) != 1:
+                    raise PlanningSceneContractError(
+                        "fake planning attachment endpoint does not resolve uniquely",
+                        operation="fake.planning_scene.build",
+                    ) from None
+                return matches[0]
+
+            parent_link = endpoint_link(item, parent, "parent_link_name")
+            child_link = endpoint_link(item, child, "child_link_name")
             parent_frame = parent_link.frame_id
             child_frame = child_link.frame_id
-            if not child.geometry_ids:
+            child_geometry_ids = tuple(
+                geometry.geometry_id
+                for geometry in catalog.geometries
+                if geometry.owner_entity_id == child.entity_id and geometry.owner_link_id == child_link.link_id
+            )
+            if not child_geometry_ids:
                 raise PlanningSceneContractError(
-                    "fake planning attachment child has no planning geometry",
+                    "fake planning attachment child endpoint has no planning geometry",
                     operation="fake.planning_scene.build",
                 ) from None
             result.append(
@@ -1513,7 +1601,7 @@ class FakeWorld:
                     parent_frame,
                     child_frame,
                     _planning_relative(frame_pose[parent_frame], frame_pose[child_frame], parent_frame),
-                    child.geometry_ids,
+                    child_geometry_ids,
                     parent_link.link_id,
                     child_link.link_id,
                 )
@@ -1947,6 +2035,15 @@ class FakeWorld:
                 operation=operation,
                 world_id=self.world_id,
             ) from None
+        if (
+            type(environment_runtime.lease_serial) is not int
+            or not 0 <= environment_runtime.lease_serial < _FAKE_PLANNING_MAX_COUNTER
+        ):
+            raise PlanningSceneContractError(
+                "planning geometry lease identity is exhausted",
+                operation=operation,
+                world_id=self.world_id,
+            ) from None
         key = geometry.resolution_key
         assert key is not None
         cached = runtime.storage_cache.get(key)
@@ -1995,38 +2092,139 @@ class FakeWorld:
         descriptor.validate_against(catalog)
         return _FakePlanningGeometryLease(descriptor, immutable_content, environment_runtime.lease_epoch)
 
+    def _planning_require_commit_capacity(
+        self,
+        environment_indices: tuple[int, ...],
+        *,
+        operation: str,
+    ) -> None:
+        runtime = self._planning_runtime
+        for environment_index in environment_indices:
+            environment_runtime = runtime.environments[environment_index]
+            if any(
+                type(counter) is not int or not 1 <= counter < _FAKE_PLANNING_MAX_COUNTER
+                for counter in (
+                    environment_runtime.sequence,
+                    environment_runtime.world_revision,
+                    environment_runtime.transform_revision,
+                )
+            ):
+                raise PlanningSceneContractError(
+                    "planning state identity is exhausted; reset is required",
+                    operation=operation,
+                    world_id=self.world_id,
+                ) from None
+
+    def _planning_require_reset_capacity(
+        self,
+        environment_indices: tuple[int, ...],
+        *,
+        operation: str,
+    ) -> None:
+        runtime = self._planning_runtime
+        if any(
+            type(runtime.environments[index].generation) is not int
+            or not 1 <= runtime.environments[index].generation < _FAKE_PLANNING_MAX_COUNTER
+            for index in environment_indices
+        ):
+            raise PlanningSceneContractError(
+                "planning generation is exhausted",
+                operation=operation,
+                world_id=self.world_id,
+            ) from None
+
     def _planning_commit_state(self, environment_indices: tuple[int, ...] | None = None) -> None:
         runtime = self._planning_runtime
         selected = tuple(runtime.environments) if environment_indices is None else environment_indices
+        self._planning_require_commit_capacity(selected, operation="planning_scene.commit")
+        staged: list[tuple[int, PlanningSceneState, dict[int, PlanningSceneState], bool]] = []
         for environment_index in selected:
             environment_runtime = runtime.environments[environment_index]
-            counters = (
-                environment_runtime.sequence,
-                environment_runtime.world_revision,
-                environment_runtime.transform_revision,
-            )
-            if any(counter >= 2**63 - 1 for counter in counters):
-                environment_runtime.force_resync = True
-                state = self._capture_planning_state(environment_index)
-                environment_runtime.history = {state.sequence: state}
-                continue
+            previous_sequence = environment_runtime.sequence
+            previous_world_revision = environment_runtime.world_revision
+            previous_transform_revision = environment_runtime.transform_revision
             environment_runtime.sequence += 1
             environment_runtime.world_revision += 1
             environment_runtime.transform_revision += 1
-            state = self._capture_planning_state(environment_index)
-            history = environment_runtime.history
+            try:
+                state = self._capture_planning_state(environment_index)
+            finally:
+                environment_runtime.sequence = previous_sequence
+                environment_runtime.world_revision = previous_world_revision
+                environment_runtime.transform_revision = previous_transform_revision
+            history = dict(environment_runtime.history)
             history[state.sequence] = state
             while len(history) > 128:
                 del history[next(iter(history))]
+            force_resync = environment_runtime.force_resync or any(
+                counter == _FAKE_PLANNING_MAX_COUNTER
+                for counter in (state.sequence, state.world_revision, state.transform_revision)
+            )
+            staged.append((environment_index, state, history, force_resync))
+        for environment_index, state, history, force_resync in staged:
+            environment_runtime = runtime.environments[environment_index]
+            environment_runtime.sequence = state.sequence
+            environment_runtime.world_revision = state.world_revision
+            environment_runtime.transform_revision = state.transform_revision
+            environment_runtime.history = history
+            environment_runtime.force_resync = force_resync
+
+    def _planning_capture_step_snapshot(self) -> _FakePlanningStepSnapshot:
+        return _FakePlanningStepSnapshot(
+            self._step_index,
+            self._scene_sequence,
+            {
+                path: (_copy_vectors(runtime.positions), _copy_vectors(runtime.velocities))
+                for path, runtime in self._articulations.items()
+            },
+            {
+                path: (
+                    _copy_vectors(runtime.positions),
+                    _copy_vectors(runtime.orientations),
+                    _copy_vectors(runtime.linear_velocities),
+                    _copy_vectors(runtime.angular_velocities),
+                )
+                for path, runtime in self._rigids.items()
+            },
+            {
+                path: (
+                    [_copy_vectors(environment) for environment in runtime.positions],
+                    [_copy_vectors(environment) for environment in runtime.velocities],
+                )
+                for path, runtime in self._points.items()
+            },
+            dict(self._debug_primitives),
+            dict(self._debug_expirations),
+        )
+
+    def _planning_restore_step_snapshot(self, snapshot: _FakePlanningStepSnapshot) -> None:
+        self._step_index = snapshot.step_index
+        self._scene_sequence = snapshot.scene_sequence
+        for path, (articulation_positions, articulation_velocities) in snapshot.articulations.items():
+            articulation_runtime = self._articulations[path]
+            articulation_runtime.positions = articulation_positions
+            articulation_runtime.velocities = articulation_velocities
+        for path, (
+            rigid_positions,
+            rigid_orientations,
+            linear_velocities,
+            angular_velocities,
+        ) in snapshot.rigids.items():
+            rigid_runtime = self._rigids[path]
+            rigid_runtime.positions = rigid_positions
+            rigid_runtime.orientations = rigid_orientations
+            rigid_runtime.linear_velocities = linear_velocities
+            rigid_runtime.angular_velocities = angular_velocities
+        for path, (point_positions, point_velocities) in snapshot.points.items():
+            point_runtime = self._points[path]
+            point_runtime.positions = point_positions
+            point_runtime.velocities = point_velocities
+        self._debug_primitives = snapshot.debug_primitives
+        self._debug_expirations = snapshot.debug_expirations
 
     def _planning_reset(self, environment_indices: tuple[int, ...]) -> None:
         runtime = self._planning_runtime
-        if any(runtime.environments[index].generation >= 2**63 - 1 for index in environment_indices):
-            raise PlanningSceneContractError(
-                "planning generation is exhausted",
-                operation="world.reset",
-                world_id=self.world_id,
-            ) from None
+        self._planning_require_reset_capacity(environment_indices, operation="world.reset")
         for index in environment_indices:
             environment_runtime = runtime.environments[index]
             environment_runtime.lease_epoch.live = False
@@ -2945,16 +3143,83 @@ class FakePlanningWorld(FakeWorld):
         return self._resolve_planning_geometry_impl(geometry_id, representation, environment_index)
 
     def reset(self, environment_indices: Iterable[int] | None = None) -> ResetResult:
-        result = super().reset(environment_indices)
+        self._ensure_ready("world.reset")
+        environments = self._indices(
+            environment_indices,
+            self._spec.environments.count,
+            "environment_indices",
+            operation="world.reset",
+        )
+        self._planning_require_reset_capacity(environments, operation="world.reset")
+        result = super().reset(environments)
         self._planning_reset(result.environment_indices)
         return result
 
     def step(self, count: int = 1) -> Tick:
-        result = super().step(count)
-        self._planning_commit_state()
+        self._ensure_ready("world.step")
+        canonical_count: object = None
+        if _planning_actual_base(count, (bool, int)) is int:
+            try:
+                canonical_count = int.__int__(count)
+            except BaseException:
+                canonical_count = None
+        if type(canonical_count) is not int or canonical_count <= 0:
+            raise ValidationError("step count must be a positive integer", operation="world.step") from None
+        selected = tuple(self._planning_runtime.environments)
+        self._planning_require_commit_capacity(selected, operation="world.step")
+        if (
+            type(self._step_index) is not int
+            or self._step_index < 0
+            or self._step_index > _FAKE_PLANNING_MAX_COUNTER - canonical_count
+        ):
+            raise PlanningSceneContractError(
+                "planning tick identity is exhausted; reset is required",
+                operation="world.step",
+                world_id=self.world_id,
+            ) from None
+        next_step_index = self._step_index + canonical_count
+        next_sim_time = next_step_index * self._spec.physics.time_step_seconds
+        if not math.isfinite(next_sim_time):
+            raise PlanningSceneContractError(
+                "planning simulation time is outside its finite range",
+                operation="world.step",
+                world_id=self.world_id,
+            ) from None
+        snapshot = self._planning_capture_step_snapshot()
+        try:
+            result = super().step(canonical_count)
+            self._planning_commit_state()
+        except BaseException:
+            self._planning_restore_step_snapshot(snapshot)
+            raise
         return result
 
+    def _planning_scene_command_will_commit(self, command: object) -> bool:
+        if not isinstance(command, SceneCommand):
+            return False
+        if command.command_id in self._scene_results or command.expected_generation != self.generation:
+            return False
+        entity = self._entities.get(command.entity_path)
+        if (
+            entity is None
+            or command.environment_index >= self._spec.environments.count
+            or entity.kind is not EntityKind.RIGID_BODY
+        ):
+            return False
+        if command.kind is SceneCommandKind.SET_POSE:
+            return True
+        assert command.drag_id is not None
+        if command.kind is SceneCommandKind.DRAG_BEGIN:
+            return command.drag_mode is SceneDragMode.KINEMATIC and command.drag_id not in self._active_drags
+        active = self._active_drags.get(command.drag_id)
+        return active is not None and active[:2] == (entity.path, command.environment_index)
+
     def apply_scene_command(self, command: SceneCommand) -> SceneCommandResult:
+        if self._planning_scene_command_will_commit(command):
+            self._planning_require_commit_capacity(
+                (command.environment_index,),
+                operation="world.apply_scene_command",
+            )
         result = super().apply_scene_command(command)
         if result.status is SceneCommandStatus.APPLIED:
             self._planning_commit_state((command.environment_index,))
