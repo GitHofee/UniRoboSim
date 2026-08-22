@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import gc
 import math
-from dataclasses import replace
+import weakref
+from dataclasses import fields, replace
 
 import pytest
 
@@ -25,13 +27,16 @@ from unirobosim import (
     PlanningFrameState,
     PlanningGeometryContentProfile,
     PlanningGeometryDType,
+    PlanningGeometryLocalPose,
     PlanningGeometryMotionClass,
     PlanningGeometryRepresentation,
     PlanningGeometryResourceDescriptor,
     PlanningGeometryResourceLayout,
     PlanningGeometryStorageKind,
     PlanningGeometryTransform,
+    PlanningJointDescriptor,
     PlanningJointType,
+    PlanningLinkDescriptor,
     PlanningLinkState,
     PlanningPose,
     PlanningPrimitiveGeometry,
@@ -57,6 +62,148 @@ def planning_values():
         yield world, world.planning_scene_catalog(), world.planning_scene_state()
     finally:
         session.close()
+
+
+def _joint_topology_catalog(
+    *,
+    child_parent_frame_id: str,
+    joint_parent_frame_id: str | None,
+    joint_owner_link_id: str = "link.child",
+    include_joint_frame: bool = True,
+    include_orphan_joint_frame: bool = False,
+) -> PlanningSceneCatalog:
+    entity_id = "entity.robot"
+    world_frame_id = "frame.world"
+    entity_frame_id = "frame.entity"
+    parent_link_id = "link.parent"
+    child_link_id = "link.child"
+    parent_frame_id = "frame.parent"
+    child_frame_id = "frame.child"
+    joint_frame_id = "frame.joint"
+    joint_id = "joint.hinge"
+    frames_ = [
+        PlanningFrameDescriptor(world_frame_id, PlanningFrameKind.WORLD, None, None, None),
+        PlanningFrameDescriptor(
+            entity_frame_id,
+            PlanningFrameKind.ENTITY,
+            world_frame_id,
+            entity_id,
+            None,
+        ),
+        PlanningFrameDescriptor(
+            parent_frame_id,
+            PlanningFrameKind.LINK,
+            entity_frame_id,
+            entity_id,
+            parent_link_id,
+        ),
+        PlanningFrameDescriptor(
+            child_frame_id,
+            PlanningFrameKind.LINK,
+            child_parent_frame_id,
+            entity_id,
+            child_link_id,
+        ),
+    ]
+    if include_joint_frame:
+        assert joint_parent_frame_id is not None
+        frames_.append(
+            PlanningFrameDescriptor(
+                joint_frame_id,
+                PlanningFrameKind.JOINT,
+                joint_parent_frame_id,
+                entity_id,
+                joint_owner_link_id,
+            )
+        )
+    if include_orphan_joint_frame:
+        frames_.append(
+            PlanningFrameDescriptor(
+                "frame.joint.orphan",
+                PlanningFrameKind.JOINT,
+                parent_frame_id,
+                entity_id,
+                child_link_id,
+            )
+        )
+    entity_frame_ids = tuple(sorted(frame.frame_id for frame in frames_ if frame.kind is not PlanningFrameKind.WORLD))
+    entity = PlanningEntityDescriptor(
+        entity_id,
+        "/robot",
+        PlanningEntityKind.ROBOT,
+        True,
+        entity_frame_id,
+        (child_link_id, parent_link_id),
+        entity_frame_ids,
+        (),
+        (joint_id,),
+    )
+    links = (
+        PlanningLinkDescriptor(child_link_id, entity_id, "child", child_frame_id, parent_link_id),
+        PlanningLinkDescriptor(parent_link_id, entity_id, "parent", parent_frame_id),
+    )
+    joint = PlanningJointDescriptor(
+        joint_id,
+        entity_id,
+        "hinge",
+        parent_link_id,
+        child_link_id,
+        PlanningJointType.REVOLUTE,
+        joint_frame_id if include_joint_frame else parent_frame_id,
+        (0.0, 0.0, 1.0),
+        "rad",
+    )
+    return PlanningSceneCatalog.build(
+        "reference.fake",
+        "joint-topology",
+        1,
+        0,
+        1,
+        1,
+        (entity,),
+        links,
+        (joint,),
+        tuple(sorted(frames_, key=lambda item: item.frame_id)),
+        (),
+    )
+
+
+def test_catalog_accepts_only_endpoint_or_parent_joint_child_physical_frame_chains() -> None:
+    endpoint = _joint_topology_catalog(
+        child_parent_frame_id="frame.parent",
+        joint_parent_frame_id=None,
+        include_joint_frame=False,
+    )
+    dedicated = _joint_topology_catalog(
+        child_parent_frame_id="frame.joint",
+        joint_parent_frame_id="frame.parent",
+    )
+    assert endpoint.joints[0].axis_frame_id == "frame.parent"
+    assert dedicated.joints[0].axis_frame_id == "frame.joint"
+
+    invalid = (
+        {
+            "child_parent_frame_id": "frame.parent",
+            "joint_parent_frame_id": "frame.parent",
+        },
+        {
+            "child_parent_frame_id": "frame.parent",
+            "joint_parent_frame_id": "frame.child",
+        },
+        {
+            "child_parent_frame_id": "frame.joint",
+            "joint_parent_frame_id": "frame.parent",
+            "joint_owner_link_id": "link.parent",
+        },
+        {
+            "child_parent_frame_id": "frame.joint",
+            "joint_parent_frame_id": "frame.parent",
+            "include_orphan_joint_frame": True,
+        },
+    )
+    for arguments in invalid:
+        with pytest.raises(PlanningSceneContractError):
+            _joint_topology_catalog(**arguments)
 
 
 def test_scalar_container_enum_and_hash_validation_is_closed(planning_values) -> None:
@@ -92,6 +239,174 @@ def test_scalar_container_enum_and_hash_validation_is_closed(planning_values) ->
     for construct in failures:
         with pytest.raises(PlanningSceneContractError):
             construct()
+
+
+def test_state_tick_is_rebuilt_from_exact_detached_scalar_leaves(planning_values) -> None:
+    _, _, state = planning_values
+
+    class Sidecar:
+        pass
+
+    class IntegerScalar(int):
+        def __new__(cls, value: int, sidecar: object):
+            instance = super().__new__(cls, value)
+            instance.sidecar = sidecar
+            return instance
+
+    sidecar = Sidecar()
+    reference = weakref.ref(sidecar)
+    source_step = IntegerScalar(state.tick.step_index, sidecar)
+    source_tick = Tick(source_step, state.tick.sim_time_seconds)
+    detached = replace(state, tick=source_tick)
+    del source_tick, source_step, sidecar
+    gc.collect()
+
+    assert type(detached.tick) is Tick
+    assert type(detached.tick.step_index) is int
+    assert type(detached.tick.sim_time_seconds) is float
+    assert reference() is None
+
+
+def test_resource_descriptor_uses_exact_v2_resource_layout_field_without_shim(planning_values) -> None:
+    world, catalog, _ = planning_values
+    geometry_id = next(
+        geometry.geometry_id
+        for geometry in catalog.geometries
+        if geometry.representation is PlanningGeometryRepresentation.TRIANGLE_MESH
+    )
+    lease = world.resolve_planning_geometry(geometry_id)
+    try:
+        descriptor = lease.descriptor
+        field_names = tuple(field.name for field in fields(PlanningGeometryResourceDescriptor))
+        assert "resource_layout" in field_names
+        assert "layout" not in field_names
+        assert descriptor.resource_layout == next(
+            geometry.resource_layout for geometry in catalog.geometries if geometry.geometry_id == geometry_id
+        )
+        assert not hasattr(descriptor, "layout")
+    finally:
+        lease.close()
+
+
+def test_catalog_dependent_state_validation_enforces_numeric_transform_closure(planning_values) -> None:
+    _, catalog, state = planning_values
+    container = entity_by_path(catalog, "/container")
+    link = next(item for item in catalog.links if item.entity_id == container.entity_id)
+    geometry = next(item for item in catalog.geometries if item.owner_entity_id == container.entity_id)
+    entity_state = next(item for item in state.entities if item.entity_id == container.entity_id)
+    link_state = next(item for item in state.links if item.link_id == link.link_id)
+    parent_pose = PlanningPose(
+        catalog.world_frame_id,
+        (2.0, 3.0, 4.0),
+        (0.0, 0.0, math.sqrt(0.5), math.sqrt(0.5)),
+    )
+    local_pose = PlanningGeometryLocalPose(
+        (1.0, 2.0, 0.0),
+        (0.0, 0.0, math.sqrt(0.5), math.sqrt(0.5)),
+    )
+    expected_geometry_pose = PlanningPose(
+        catalog.world_frame_id,
+        (0.0, 4.0, 4.0),
+        (0.0, 0.0, 1.0, 0.0),
+    )
+    changed_geometry = replace(geometry, parent_frame_T_geometry=local_pose)
+    changed_catalog = _rebuild_catalog(
+        catalog,
+        catalog_revision=catalog.catalog_revision + 1,
+        geometry_revision=catalog.geometry_revision + 1,
+        geometries=_replace_sorted(
+            catalog.geometries,
+            geometry,
+            changed_geometry,
+            "geometry_id",
+        ),
+    )
+    changed_entity_state = replace(entity_state, pose=parent_pose)
+    changed_link_state = replace(link_state, pose=parent_pose)
+    changed_frames = tuple(
+        replace(item, world_pose=parent_pose) if item.frame_id in {container.root_frame_id, link.frame_id} else item
+        for item in state.frames
+    )
+    original_transform = next(item for item in state.geometry_transforms if item.geometry_id == geometry.geometry_id)
+    changed_transform = replace(original_transform, world_pose=expected_geometry_pose)
+    coherent = replace(
+        state,
+        catalog_revision=changed_catalog.catalog_revision,
+        geometry_revision=changed_catalog.geometry_revision,
+        catalog_content_sha256=changed_catalog.content_sha256,
+        entities=_replace_sorted(
+            state.entities,
+            entity_state,
+            changed_entity_state,
+            "entity_id",
+        ),
+        links=_replace_sorted(state.links, link_state, changed_link_state, "link_id"),
+        frames=changed_frames,
+        geometry_transforms=_replace_sorted(
+            state.geometry_transforms,
+            original_transform,
+            changed_transform,
+            "geometry_id",
+        ),
+    )
+    coherent.validate_against(changed_catalog)
+
+    contradictory_entity = replace(
+        changed_entity_state,
+        pose=replace(parent_pose, position_m=(123.0, 0.0, 0.0)),
+    )
+    with pytest.raises(PlanningSceneContractError, match="entity pose"):
+        replace(
+            coherent,
+            entities=_replace_sorted(
+                coherent.entities,
+                changed_entity_state,
+                contradictory_entity,
+                "entity_id",
+            ),
+        ).validate_against(changed_catalog)
+
+    contradictory_link = replace(
+        changed_link_state,
+        pose=replace(parent_pose, position_m=(0.0, 456.0, 0.0)),
+    )
+    with pytest.raises(PlanningSceneContractError, match="link pose"):
+        replace(
+            coherent,
+            links=_replace_sorted(coherent.links, changed_link_state, contradictory_link, "link_id"),
+        ).validate_against(changed_catalog)
+
+    contradictory_transform = replace(changed_transform, world_pose=parent_pose)
+    with pytest.raises(PlanningSceneContractError, match="geometry world pose"):
+        replace(
+            coherent,
+            geometry_transforms=_replace_sorted(
+                coherent.geometry_transforms,
+                changed_transform,
+                contradictory_transform,
+                "geometry_id",
+            ),
+        ).validate_against(changed_catalog)
+
+    attachment = state.attachments[0]
+    replace(state, attachments=state.attachments).validate_against(catalog)
+    contradictory_attachment = replace(
+        attachment,
+        parent_T_child=replace(
+            attachment.parent_T_child,
+            position_m=(123.0, 456.0, 789.0),
+        ),
+    )
+    with pytest.raises(PlanningSceneContractError, match="attachment relative pose"):
+        replace(
+            state,
+            attachments=_replace_sorted(
+                state.attachments,
+                attachment,
+                contradictory_attachment,
+                "attachment_id",
+            ),
+        )
 
 
 def test_quaternion_canonicalization_and_compound_validation(planning_values) -> None:
@@ -571,7 +886,12 @@ def test_resource_mesh_and_grid_schema_negative_matrix(planning_values) -> None:
     mesh_failures = (
         {"representation": PlanningGeometryRepresentation.BOX},
         {"units": "cm"},
-        {"layout": replace(mesh.layout, representation=PlanningGeometryRepresentation.CONVEX_MESH)},
+        {
+            "resource_layout": replace(
+                mesh.resource_layout,
+                representation=PlanningGeometryRepresentation.CONVEX_MESH,
+            )
+        },
         {"byte_size": mesh.byte_size - 1},
     )
     for override in mesh_failures:
@@ -585,7 +905,7 @@ def test_resource_mesh_and_grid_schema_negative_matrix(planning_values) -> None:
         {"grid_dtype": PlanningGeometryDType.FLOAT32},
     ):
         with pytest.raises(PlanningSceneContractError):
-            replace(mesh.layout, **override)
+            replace(mesh.resource_layout, **override)
     sdf_layout = PlanningGeometryResourceLayout(
         PlanningGeometryRepresentation.SDF,
         PlanningGeometryContentProfile.SDF_DENSE_RAW_LE_V1,
@@ -616,7 +936,7 @@ def test_resource_mesh_and_grid_schema_negative_matrix(planning_values) -> None:
         "0" * 64,
     )
     with pytest.raises(PlanningSceneContractError):
-        replace(sdf.layout, vertex_dtype=PlanningGeometryDType.FLOAT32)
+        replace(sdf.resource_layout, vertex_dtype=PlanningGeometryDType.FLOAT32)
     assert mesh.resolution_key == (mesh.geometry_id, mesh.representation, mesh.sha256)
     with pytest.raises(PlanningSceneContractError):
         mesh.read_span(mesh.byte_size + 1)

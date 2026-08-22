@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import itertools
+import json
 import math
 import re
 import struct
@@ -47,6 +48,8 @@ from unirobosim.api.errors import (
 )
 from unirobosim.api.frozen import FrozenMap
 from unirobosim.api.planning_scene import (
+    PLANNING_SCENE_CAPABILITY_ID,
+    PLANNING_SCENE_SCHEMA_VERSION,
     PLANNING_SYSTEM_ENTITY_ID,
     PLANNING_SYSTEM_ENTITY_PATH,
     PlanningArticulationState,
@@ -263,6 +266,13 @@ FAKE_DESCRIPTOR = ProviderDescriptor(
 
 _SESSION_IDS = itertools.count(1)
 
+_FAKE_PLANNING_PROVENANCE_SCHEMA = "unirobosim.planning-geometry-provenance/v1"
+_FAKE_PLANNING_ADAPTER_ID = "unirobosim.reference.fake"
+_FAKE_PLANNING_ADAPTER_VERSION = "planning-scene-v2"
+_FAKE_PLANNING_NATIVE_PROFILE = "fake-native-collision/v1"
+_FAKE_PLANNING_COMPILER_PROFILE = "python-struct-little-endian/v1"
+_FAKE_PLANNING_CANONICALIZATION_ALGORITHM = "json-utf8-sort-keys-compact-sha256/v1"
+
 
 @dataclass
 class _ArticulationRuntime:
@@ -306,8 +316,7 @@ class _PlanningLeaseEpoch:
 
 
 @dataclass
-class _FakePlanningRuntime:
-    authority_thread_id: int
+class _FakePlanningEnvironmentRuntime:
     generation: int
     sequence: int = 1
     world_revision: int = 1
@@ -318,10 +327,6 @@ class _FakePlanningRuntime:
     force_resync: bool = False
     lease_serial: int = 0
     lease_epoch: _PlanningLeaseEpoch = field(default_factory=_PlanningLeaseEpoch)
-    storage_cache: dict[tuple[str, PlanningGeometryRepresentation, str], tuple[bytes, str]] = field(
-        default_factory=dict
-    )
-    geometry_materializations: int = 0
     raw_resources: dict[
         str,
         tuple[
@@ -333,8 +338,18 @@ class _FakePlanningRuntime:
             tuple[int, int],
         ],
     ] = field(default_factory=dict)
-    catalogs: dict[int, PlanningSceneCatalog] = field(default_factory=dict)
-    history: dict[int, dict[int, PlanningSceneState]] = field(default_factory=dict)
+    catalog: PlanningSceneCatalog | None = None
+    history: dict[int, PlanningSceneState] = field(default_factory=dict)
+
+
+@dataclass
+class _FakePlanningRuntime:
+    authority_thread_id: int
+    environments: dict[int, _FakePlanningEnvironmentRuntime]
+    storage_cache: dict[tuple[str, PlanningGeometryRepresentation, str], tuple[bytes, str]] = field(
+        default_factory=dict
+    )
+    geometry_materializations: int = 0
 
 
 _PlanningResultT = TypeVar("_PlanningResultT")
@@ -448,6 +463,39 @@ def _planning_actual_base(value: object, allowed: tuple[type, ...]) -> type | No
             if list.__getitem__(mro, index) is allowed_base:
                 return allowed_base
     return None
+
+
+def _planning_exact_text(value: object, label: str) -> str:
+    """Detach accepted text without invoking caller-provided methods."""
+
+    if _planning_actual_base(value, (str,)) is not str:
+        raise PlanningSceneIncompleteError(
+            f"fake planning {label} is not portable text",
+            operation="planning_scene.preflight",
+        ) from None
+    source_length = str.__len__(value)  # type: ignore[arg-type]
+    if source_length == 0 or source_length > 512:
+        raise PlanningSceneIncompleteError(
+            f"fake planning {label} exceeds its text budget",
+            operation="planning_scene.preflight",
+        ) from None
+    canonical = str.__str__(value)
+    if (
+        type(canonical) is not str
+        or "\x00" in canonical
+        or any(0xD800 <= ord(character) <= 0xDFFF for character in canonical)
+        or len(canonical.encode("utf-8")) > 4096
+    ):
+        raise PlanningSceneIncompleteError(
+            f"fake planning {label} is not bounded portable text",
+            operation="planning_scene.preflight",
+        ) from None
+    return canonical
+
+
+def _planning_record_sha256(value: dict[str, object]) -> str:
+    canonical = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _planning_quaternion_multiply(
@@ -677,7 +725,31 @@ class FakeSession:
         self._generation += 1
         planning_demanded = CapabilityId("planning.scene@2") in negotiation.matched
         world_type = FakePlanningWorld if planning_demanded else FakeWorld
-        world = world_type(self, spec, self._generation)
+        planning_failure: (
+            tuple[
+                type[PlanningSceneError],
+                str,
+                str,
+                str | None,
+                str | None,
+                str | None,
+            ]
+            | None
+        ) = None
+        try:
+            world = world_type(self, spec, self._generation)
+        except PlanningSceneError as caught:
+            planning_failure = _snapshot_and_scrub_planning_error(caught, _PLANNING_ERROR_TYPES)
+        if planning_failure is not None:
+            del spec
+            error_type, message, operation, backend_id, world_id, entity_path = planning_failure
+            raise error_type(
+                message,
+                operation=operation,
+                backend_id=backend_id,
+                world_id=world_id,
+                entity_path=entity_path,
+            ) from None
         self._active_world = world
         self._state = SessionState.READY
         return world
@@ -880,30 +952,103 @@ class FakeWorld:
             return PlanningGeometryMotionClass.KINEMATIC
         return PlanningGeometryMotionClass.DYNAMIC
 
+    def _planning_provenance_sha256(
+        self,
+        *,
+        source_kind: str,
+        source_parameters: dict[str, object],
+        representation: PlanningGeometryRepresentation,
+        cooking_profile: str,
+        effective_parameters: dict[str, object],
+        canonical_content_profile: str,
+    ) -> str:
+        provider = self._session.descriptor
+        record: dict[str, object] = {
+            "schema": _FAKE_PLANNING_PROVENANCE_SCHEMA,
+            "source": {
+                "kind": source_kind,
+                "sha256": _planning_record_sha256(source_parameters),
+            },
+            "provider": {
+                "id": _planning_exact_text(provider.provider_id, "provider ID"),
+                "version": _planning_exact_text(provider.version, "provider version"),
+            },
+            "adapter": {
+                "id": _FAKE_PLANNING_ADAPTER_ID,
+                "version": _FAKE_PLANNING_ADAPTER_VERSION,
+            },
+            "contract": {
+                "provider_contract_version": _planning_exact_text(
+                    provider.contract_version,
+                    "provider contract version",
+                ),
+                "capability": PLANNING_SCENE_CAPABILITY_ID,
+                "catalog_schema": PLANNING_SCENE_SCHEMA_VERSION,
+            },
+            "native": {
+                "profile": _FAKE_PLANNING_NATIVE_PROFILE,
+                "compiler_profile": _FAKE_PLANNING_COMPILER_PROFILE,
+                "cooking_profile": cooking_profile,
+            },
+            "effective_parameters": {
+                "representation": representation.value,
+                **effective_parameters,
+            },
+            "canonicalization": {
+                "algorithm": _FAKE_PLANNING_CANONICALIZATION_ALGORITHM,
+                "content_profile": canonical_content_profile,
+            },
+        }
+        return _planning_record_sha256(record)
+
     def _planning_geometry(
         self,
         entity: EntitySpec,
         entity_id: str,
         root_link_id: str,
         root_frame_id: str,
+        environment_runtime: _FakePlanningEnvironmentRuntime,
     ) -> PlanningGeometryDescriptor | None:
         if entity.kind not in {EntityKind.RIGID_BODY, EntityKind.ARTICULATION}:
             return None
-        runtime = self._planning_runtime
-        assert runtime is not None
-        geometry_id = self._planning_geometry_id(entity.path.value)
-        provenance_source = entity.asset_uri if entity.asset_uri is not None else entity.path.value
-        provenance = hashlib.sha256(provenance_source.encode("utf-8")).hexdigest()
+        path = _planning_exact_text(entity.path.value, "entity path")
+        geometry_id = self._planning_geometry_id(path)
+        motion_class = self._planning_motion_class(entity)
 
         def descriptor(
             representation: PlanningGeometryRepresentation,
             *,
+            source_kind: str,
+            source_parameters: dict[str, object],
+            cooking_profile: str,
+            effective_shape: dict[str, object],
             inline: PlanningHalfspaceGeometry | PlanningPrimitiveGeometry | PlanningCompoundGeometry | None = None,
             resource_id: str | None = None,
             digest: str | None = None,
             content_profile: PlanningGeometryContentProfile | None = None,
             resource_layout: PlanningGeometryResourceLayout | None = None,
         ) -> PlanningGeometryDescriptor:
+            canonical_content_profile = "inline-portable-values/v1"
+            if content_profile is not None:
+                canonical_content_profile = content_profile.value
+            provenance = self._planning_provenance_sha256(
+                source_kind=source_kind,
+                source_parameters=source_parameters,
+                representation=representation,
+                cooking_profile=cooking_profile,
+                effective_parameters={
+                    "parent_frame_T_geometry": {
+                        "position_m": (0.0, 0.0, 0.0),
+                        "orientation_xyzw": (0.0, 0.0, 0.0, 1.0),
+                    },
+                    "scale": (1.0, 1.0, 1.0),
+                    "motion_class": motion_class.value,
+                    "collision_group": 1,
+                    "collision_mask": 2**32 - 1,
+                    "shape": effective_shape,
+                },
+                canonical_content_profile=canonical_content_profile,
+            )
             return PlanningGeometryDescriptor(
                 geometry_id=geometry_id,
                 owner_entity_id=entity_id,
@@ -913,7 +1058,7 @@ class FakeWorld:
                 representation=representation,
                 parent_frame_T_geometry=PlanningGeometryLocalPose(),
                 scale=(1.0, 1.0, 1.0),
-                motion_class=self._planning_motion_class(entity),
+                motion_class=motion_class,
                 collision_group=1,
                 collision_mask=2**32 - 1,
                 provenance_sha256=provenance,
@@ -941,6 +1086,24 @@ class FakeWorld:
             )
             return descriptor(
                 PlanningGeometryRepresentation.COMPOUND,
+                source_kind="authored-procedural-articulation",
+                source_parameters={
+                    "entity_path": path,
+                    "profile": "fake-articulation-compound/v1",
+                },
+                cooking_profile="fake-inline-compound-cooking/v1",
+                effective_shape={
+                    "parts": tuple(
+                        {
+                            "part_id": part.part_id,
+                            "position_m": part.local_pose.position_m,
+                            "orientation_xyzw": part.local_pose.orientation_xyzw,
+                            "representation": part.primitive.representation.value,
+                            "dimensions_m": part.primitive.dimensions_m,
+                        }
+                        for part in (part_a, part_b)
+                    )
+                },
                 inline=PlanningCompoundGeometry(tuple(sorted((part_a, part_b), key=lambda item: item.part_id))),
             )
         if entity.asset_uri is not None:
@@ -961,7 +1124,7 @@ class FakeWorld:
                 PlanningGeometryDType.UINT32,
                 index_shape,
             )
-            runtime.raw_resources[geometry_id] = (
+            environment_runtime.raw_resources[geometry_id] = (
                 content,
                 PlanningGeometryRepresentation.TRIANGLE_MESH,
                 resource_id,
@@ -971,6 +1134,18 @@ class FakeWorld:
             )
             return descriptor(
                 PlanningGeometryRepresentation.TRIANGLE_MESH,
+                source_kind="locked-asset-uri",
+                source_parameters={
+                    "asset_uri": _planning_exact_text(entity.asset_uri, "asset URI"),
+                },
+                cooking_profile="fake-concave-container-triangle-mesh-cooking/v1",
+                effective_shape={
+                    "resource_sha256": digest,
+                    "vertex_dtype": PlanningGeometryDType.FLOAT32.value,
+                    "vertex_shape": vertex_shape,
+                    "index_dtype": PlanningGeometryDType.UINT32.value,
+                    "index_shape": index_shape,
+                },
                 resource_id=resource_id,
                 digest=digest,
                 content_profile=PlanningGeometryContentProfile.MESH_TRIANGLES_RAW_LE_V1,
@@ -979,6 +1154,13 @@ class FakeWorld:
         dimensions = (0.5, 0.5, 0.5) if entity.box is None else entity.box.dimensions_m
         return descriptor(
             PlanningGeometryRepresentation.BOX,
+            source_kind="authored-procedural-box",
+            source_parameters={
+                "entity_path": path,
+                "dimensions_m": dimensions,
+            },
+            cooking_profile="fake-inline-box-cooking/v1",
+            effective_shape={"dimensions_m": dimensions},
             inline=PlanningPrimitiveGeometry(PlanningGeometryRepresentation.BOX, dimensions),
         )
 
@@ -1057,11 +1239,27 @@ class FakeWorld:
     def _build_planning_catalog(self, environment_index: int) -> PlanningSceneCatalog:
         runtime = self._planning_runtime
         assert runtime is not None
+        environment_runtime = runtime.environments[environment_index]
         system_frame_id = "frame.system.simulator_effective"
         system_geometry_id = "geometry.system.simulator_effective.ground"
-        system_provenance = hashlib.sha256(
-            b"reference.fake@0.7.1|provider-owned-ground|halfspace|fake-effective-collision-v1"
-        ).hexdigest()
+        system_provenance = self._planning_provenance_sha256(
+            source_kind="provider-owned-effective-collider",
+            source_parameters={"identity": "implicit-ground"},
+            representation=PlanningGeometryRepresentation.HALFSPACE,
+            cooking_profile="fake-inline-halfspace-cooking/v1",
+            effective_parameters={
+                "parent_frame_T_geometry": {
+                    "position_m": (0.0, 0.0, 0.0),
+                    "orientation_xyzw": (0.0, 0.0, 0.0, 1.0),
+                },
+                "scale": (1.0, 1.0, 1.0),
+                "motion_class": PlanningGeometryMotionClass.STATIC.value,
+                "collision_group": 1,
+                "collision_mask": 2**32 - 1,
+                "shape": {"occupied_region": "local-z-less-than-or-equal-zero"},
+            },
+            canonical_content_profile="inline-halfspace/v1",
+        )
         entities: list[PlanningEntityDescriptor] = [
             PlanningEntityDescriptor(
                 PLANNING_SYSTEM_ENTITY_ID,
@@ -1113,7 +1311,13 @@ class FakeWorld:
             link_ids = tuple(self._planning_link_id(path, index) for index in range(link_count))
             frame_ids = tuple(self._planning_frame_id(path, index) for index in range(link_count))
             joint_ids = tuple(self._planning_joint_id(path, index) for index in range(joint_count))
-            geometry = self._planning_geometry(entity, entity_id, link_ids[0], frame_ids[0])
+            geometry = self._planning_geometry(
+                entity,
+                entity_id,
+                link_ids[0],
+                frame_ids[0],
+                environment_runtime,
+            )
             geometry_ids = () if geometry is None else (geometry.geometry_id,)
             entity_frames: list[PlanningFrameDescriptor] = [
                 PlanningFrameDescriptor(
@@ -1203,10 +1407,10 @@ class FakeWorld:
         return PlanningSceneCatalog.build(
             self._session.descriptor.provider_id,
             self.world_id,
-            runtime.generation,
+            environment_runtime.generation,
             environment_index,
-            runtime.catalog_revision,
-            runtime.geometry_revision,
+            environment_runtime.catalog_revision,
+            environment_runtime.geometry_revision,
             tuple(sorted(entities, key=lambda item: item.entity_id)),
             tuple(sorted(links, key=lambda item: item.link_id)),
             tuple(sorted(joints, key=lambda item: item.joint_id)),
@@ -1319,7 +1523,9 @@ class FakeWorld:
     def _capture_planning_state(self, environment_index: int) -> PlanningSceneState:
         runtime = self._planning_runtime
         assert runtime is not None
-        catalog = runtime.catalogs[environment_index]
+        environment_runtime = runtime.environments[environment_index]
+        catalog = environment_runtime.catalog
+        assert catalog is not None
         spec_by_path = {entity.path.value: entity for entity in self._spec.entities}
         entity_states: list[PlanningEntityState] = []
         link_states: list[PlanningLinkState] = []
@@ -1385,16 +1591,16 @@ class FakeWorld:
         state = PlanningSceneState(
             self._session.descriptor.provider_id,
             self.world_id,
-            runtime.generation,
+            environment_runtime.generation,
             environment_index,
             self.tick,
-            runtime.sequence,
-            runtime.world_revision,
-            runtime.catalog_revision,
-            runtime.geometry_revision,
+            environment_runtime.sequence,
+            environment_runtime.world_revision,
+            environment_runtime.catalog_revision,
+            environment_runtime.geometry_revision,
             catalog.content_sha256,
-            runtime.transform_revision,
-            runtime.attachment_revision,
+            environment_runtime.transform_revision,
+            environment_runtime.attachment_revision,
             catalog.world_frame_id,
             tuple(sorted(entity_states, key=lambda item: item.entity_id)),
             tuple(sorted(link_states, key=lambda item: item.link_id)),
@@ -1406,7 +1612,7 @@ class FakeWorld:
         state.validate_against(catalog)
         return state
 
-    def _initialize_planning_scene(self) -> None:
+    def _initialize_planning_scene(self, environment_indices: tuple[int, ...] | None = None) -> None:
         runtime = self._planning_runtime
         assert runtime is not None
         for key, label in (
@@ -1419,11 +1625,12 @@ class FakeWorld:
                     f"fake {label} is incomplete",
                     operation="planning_scene.preflight",
                 ) from None
-        for environment_index in range(self._spec.environments.count):
-            runtime.catalogs[environment_index] = self._build_planning_catalog(environment_index)
-        for environment_index in range(self._spec.environments.count):
+        selected = tuple(range(self._spec.environments.count)) if environment_indices is None else environment_indices
+        for environment_index in selected:
+            runtime.environments[environment_index].catalog = self._build_planning_catalog(environment_index)
+        for environment_index in selected:
             state = self._capture_planning_state(environment_index)
-            runtime.history[environment_index] = {state.sequence: state}
+            runtime.environments[environment_index].history = {state.sequence: state}
 
     @property
     def world_id(self) -> str:
@@ -1484,13 +1691,16 @@ class FakeWorld:
         operation = "world.planning_scene_catalog"
         runtime = self._planning_require_authority(operation)
         environment = self._planning_environment(environment_index, operation)
-        return runtime.catalogs[environment]
+        catalog = runtime.environments[environment].catalog
+        assert catalog is not None
+        return catalog
 
     def _planning_scene_state_impl(self, environment_index: int = 0) -> PlanningSceneState:
         operation = "world.planning_scene_state"
         runtime = self._planning_require_authority(operation)
         environment = self._planning_environment(environment_index, operation)
-        return runtime.history[environment][runtime.sequence]
+        environment_runtime = runtime.environments[environment]
+        return environment_runtime.history[environment_runtime.sequence]
 
     @staticmethod
     def _planning_sequence_value(value: object) -> int:
@@ -1552,10 +1762,11 @@ class FakeWorld:
         operation = "world.planning_scene_delta"
         runtime = self._planning_require_authority(operation)
         environment = self._planning_environment(environment_index, operation)
+        environment_runtime = runtime.environments[environment]
         base_sequence = self._planning_sequence_value(base_sequence)
-        current = runtime.history[environment][runtime.sequence]
-        base = runtime.history[environment].get(base_sequence)
-        if runtime.force_resync or base is None:
+        current = environment_runtime.history[environment_runtime.sequence]
+        base = environment_runtime.history.get(base_sequence)
+        if environment_runtime.force_resync or base is None:
             delta = self._planning_delta_value(
                 current,
                 current,
@@ -1563,7 +1774,7 @@ class FakeWorld:
                 PlanningSceneDeltaKind.RESYNC,
                 resync_required=True,
             )
-            runtime.force_resync = False
+            environment_runtime.force_resync = False
             return delta
         if base.sequence == current.sequence:
             raise PlanningSceneDeltaContinuityError(
@@ -1577,7 +1788,7 @@ class FakeWorld:
                 base,
                 base_sequence,
                 PlanningSceneDeltaKind.STRUCTURAL,
-                catalog=runtime.catalogs[environment],
+                catalog=environment_runtime.catalog,
                 state=current,
             )
         if (
@@ -1664,8 +1875,10 @@ class FakeWorld:
         operation = "world.resolve_planning_geometry"
         runtime = self._planning_require_authority(operation)
         environment = self._planning_environment(environment_index, operation)
+        environment_runtime = runtime.environments[environment]
         identity = self._planning_geometry_identity(geometry_id)
-        catalog = runtime.catalogs[environment]
+        catalog = environment_runtime.catalog
+        assert catalog is not None
         geometry = next((item for item in catalog.geometries if item.geometry_id == identity), None)
         if geometry is None:
             raise PlanningSceneNotFoundError(
@@ -1684,7 +1897,7 @@ class FakeWorld:
                 operation=operation,
                 world_id=self.world_id,
             ) from None
-        raw = runtime.raw_resources.get(identity)
+        raw = environment_runtime.raw_resources.get(identity)
         if raw is None:
             raise PlanningSceneRepresentationError(
                 "planning geometry has no materializable resource",
@@ -1749,12 +1962,19 @@ class FakeWorld:
             runtime.storage_cache[key] = cached
             runtime.geometry_materializations += 1
         immutable_content, locator = cached
-        runtime.lease_serial += 1
-        lease_token = _planning_id("lease", self.world_id, str(runtime.generation), identity, str(runtime.lease_serial))
+        environment_runtime.lease_serial += 1
+        lease_token = _planning_id(
+            "lease",
+            self.world_id,
+            str(environment_runtime.generation),
+            str(environment),
+            identity,
+            str(environment_runtime.lease_serial),
+        )
         descriptor = PlanningGeometryResourceDescriptor(
             self._session.descriptor.provider_id,
             self.world_id,
-            runtime.generation,
+            environment_runtime.generation,
             environment,
             catalog.catalog_revision,
             catalog.geometry_revision,
@@ -1773,54 +1993,57 @@ class FakeWorld:
             digest,
         )
         descriptor.validate_against(catalog)
-        return _FakePlanningGeometryLease(descriptor, immutable_content, runtime.lease_epoch)
+        return _FakePlanningGeometryLease(descriptor, immutable_content, environment_runtime.lease_epoch)
 
-    def _planning_commit_state(self) -> None:
+    def _planning_commit_state(self, environment_indices: tuple[int, ...] | None = None) -> None:
         runtime = self._planning_runtime
-        counters = (
-            runtime.sequence,
-            runtime.world_revision,
-            runtime.transform_revision,
-        )
-        if any(counter >= 2**63 - 1 for counter in counters):
-            runtime.force_resync = True
-            for environment_index in range(self._spec.environments.count):
+        selected = tuple(runtime.environments) if environment_indices is None else environment_indices
+        for environment_index in selected:
+            environment_runtime = runtime.environments[environment_index]
+            counters = (
+                environment_runtime.sequence,
+                environment_runtime.world_revision,
+                environment_runtime.transform_revision,
+            )
+            if any(counter >= 2**63 - 1 for counter in counters):
+                environment_runtime.force_resync = True
                 state = self._capture_planning_state(environment_index)
-                runtime.history[environment_index] = {state.sequence: state}
-            return
-        runtime.sequence += 1
-        runtime.world_revision += 1
-        runtime.transform_revision += 1
-        for environment_index in range(self._spec.environments.count):
+                environment_runtime.history = {state.sequence: state}
+                continue
+            environment_runtime.sequence += 1
+            environment_runtime.world_revision += 1
+            environment_runtime.transform_revision += 1
             state = self._capture_planning_state(environment_index)
-            history = runtime.history[environment_index]
+            history = environment_runtime.history
             history[state.sequence] = state
             while len(history) > 128:
                 del history[next(iter(history))]
 
-    def _planning_reset(self) -> None:
+    def _planning_reset(self, environment_indices: tuple[int, ...]) -> None:
         runtime = self._planning_runtime
-        runtime.lease_epoch.live = False
-        runtime.lease_epoch = _PlanningLeaseEpoch()
-        runtime.storage_cache.clear()
-        runtime.raw_resources.clear()
-        runtime.catalogs.clear()
-        runtime.history.clear()
-        if runtime.generation >= 2**63 - 1:
+        if any(runtime.environments[index].generation >= 2**63 - 1 for index in environment_indices):
             raise PlanningSceneContractError(
                 "planning generation is exhausted",
                 operation="world.reset",
                 world_id=self.world_id,
             ) from None
-        runtime.generation += 1
-        runtime.sequence = 1
-        runtime.world_revision = 1
-        runtime.catalog_revision = 1
-        runtime.geometry_revision = 1
-        runtime.transform_revision = 1
-        runtime.attachment_revision = 1
-        runtime.force_resync = True
-        self._initialize_planning_scene()
+        for index in environment_indices:
+            environment_runtime = runtime.environments[index]
+            environment_runtime.lease_epoch.live = False
+            environment_runtime.lease_epoch = _PlanningLeaseEpoch()
+            environment_runtime.raw_resources.clear()
+            environment_runtime.catalog = None
+            environment_runtime.history.clear()
+            environment_runtime.generation += 1
+            environment_runtime.sequence = 1
+            environment_runtime.world_revision = 1
+            environment_runtime.catalog_revision = 1
+            environment_runtime.geometry_revision = 1
+            environment_runtime.transform_revision = 1
+            environment_runtime.attachment_revision = 1
+            environment_runtime.force_resync = True
+            environment_runtime.lease_serial = 0
+        self._initialize_planning_scene(environment_indices)
 
     def _ensure_ready(self, operation: str) -> None:
         if self._state is not WorldState.READY:
@@ -2670,7 +2893,10 @@ class FakePlanningWorld(FakeWorld):
 
     def __init__(self, session: FakeSession, spec: WorldSpec, generation: int) -> None:
         super().__init__(session, spec, generation)
-        self._planning_runtime = _FakePlanningRuntime(threading.get_ident(), generation)
+        self._planning_runtime = _FakePlanningRuntime(
+            threading.get_ident(),
+            {index: _FakePlanningEnvironmentRuntime(generation) for index in range(spec.environments.count)},
+        )
         admission_failed = False
         try:
             self._initialize_planning_scene()
@@ -2685,6 +2911,9 @@ class FakePlanningWorld(FakeWorld):
             except BaseException:
                 pass
             admission_failed = True
+        except BaseException:
+            self._close(notify_session=False)
+            raise
         if admission_failed:
             self._close(notify_session=False)
             raise PlanningSceneIncompleteError(
@@ -2717,7 +2946,7 @@ class FakePlanningWorld(FakeWorld):
 
     def reset(self, environment_indices: Iterable[int] | None = None) -> ResetResult:
         result = super().reset(environment_indices)
-        self._planning_reset()
+        self._planning_reset(result.environment_indices)
         return result
 
     def step(self, count: int = 1) -> Tick:
@@ -2728,15 +2957,16 @@ class FakePlanningWorld(FakeWorld):
     def apply_scene_command(self, command: SceneCommand) -> SceneCommandResult:
         result = super().apply_scene_command(command)
         if result.status is SceneCommandStatus.APPLIED:
-            self._planning_commit_state()
+            self._planning_commit_state((command.environment_index,))
         return result
 
     def _close(self, *, notify_session: bool) -> None:
         if self._state is not WorldState.CLOSED:
             runtime = self._planning_runtime
-            runtime.lease_epoch.live = False
+            for environment_runtime in runtime.environments.values():
+                environment_runtime.lease_epoch.live = False
+                environment_runtime.history.clear()
+                environment_runtime.catalog = None
+                environment_runtime.raw_resources.clear()
             runtime.storage_cache.clear()
-            runtime.history.clear()
-            runtime.catalogs.clear()
-            runtime.raw_resources.clear()
         super()._close(notify_session=notify_session)

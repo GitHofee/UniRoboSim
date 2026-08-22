@@ -62,6 +62,7 @@ from unirobosim import (
     PlanningSceneRepresentationError,
     PlanningSceneWorld,
     Pose,
+    ProviderDescriptor,
     SceneCommand,
     SceneCommandKind,
     SceneCommandStatus,
@@ -69,7 +70,7 @@ from unirobosim import (
     World,
     WorldSpec,
 )
-from unirobosim.testing import FAKE_DESCRIPTOR, FakeProvider, FakeWorld
+from unirobosim.testing import FAKE_DESCRIPTOR, FakeProvider, FakeSession, FakeWorld
 
 
 def planning_requirement() -> CapabilityRequirement:
@@ -200,6 +201,21 @@ def resource_geometry_id(catalog: PlanningSceneCatalog) -> str:
         for geometry in catalog.geometries
         if geometry.representation is PlanningGeometryRepresentation.TRIANGLE_MESH
     )
+
+
+def capture_planning_provenance(
+    descriptor: ProviderDescriptor,
+    spec: WorldSpec,
+) -> tuple[str, dict[str, str]]:
+    session = FakeSession(descriptor)
+    world = session.build(spec)
+    try:
+        catalog = world.planning_scene_catalog()
+        paths = {entity.entity_id: entity.path for entity in catalog.entities}
+        provenance = {paths[geometry.owner_entity_id]: geometry.provenance_sha256 for geometry in catalog.geometries}
+        return catalog.content_sha256, provenance
+    finally:
+        session.close()
 
 
 def test_protocol_is_separate_and_fake_declares_exact_capability_after_conformance(planning_world) -> None:
@@ -410,6 +426,67 @@ def test_planning_preflight_failures_are_typed_transactional_and_retryable() -> 
             session.close()
 
 
+def test_preflight_failure_detaches_caller_graph_and_closes_provisional_world(monkeypatch) -> None:
+    class Sidecar:
+        pass
+
+    class AssetText(str):
+        def __new__(cls, value: str, sidecar: object):
+            instance = super().__new__(cls, value)
+            instance.sidecar = sidecar
+            return instance
+
+    sidecar = Sidecar()
+    reference = weakref.ref(sidecar)
+    base = planning_spec(environments=1)
+    container = next(item for item in base.entities if item.path == EntityPath("/container"))
+    hostile_asset = AssetText(container.asset_uri, sidecar)
+    hostile_container = replace(container, asset_uri=hostile_asset)
+    hostile_spec = replace(
+        base,
+        world_id="planning-detached-preflight-failure",
+        entities=tuple(hostile_container if item.path == container.path else item for item in base.entities),
+    )
+
+    source_failures = [RuntimeError("credential-bearing native failure", sidecar)]
+
+    def unexpected_admission_failure(self) -> None:
+        del self
+        raise source_failures[0]
+
+    monkeypatch.setattr(
+        fake_contract.FakePlanningWorld,
+        "_initialize_planning_scene",
+        unexpected_admission_failure,
+    )
+    session = FakeProvider().open()
+    with pytest.raises(PlanningSceneIncompleteError) as caught:
+        session.build(hostile_spec)
+    monkeypatch.undo()
+    assert caught.value.message == "planning-scene native admission failed"
+    assert caught.value.operation == "planning_scene.preflight"
+    assert caught.value.__cause__ is None and caught.value.__context__ is None
+    assert session.state is SessionState.OPEN and session._active_world is None
+    session.close()
+    source_failures.clear()
+    del hostile_spec, hostile_container, hostile_asset, container, base, sidecar
+    gc.collect()
+    assert reference() is None
+
+
+def test_true_process_interrupt_is_cleaned_up_without_being_masked(monkeypatch) -> None:
+    def interrupt(self) -> None:
+        del self
+        raise KeyboardInterrupt("operator interrupt")
+
+    monkeypatch.setattr(fake_contract.FakePlanningWorld, "_initialize_planning_scene", interrupt)
+    session = FakeProvider().open()
+    with pytest.raises(KeyboardInterrupt, match="operator interrupt"):
+        session.build(planning_spec(environments=1))
+    assert session.state is SessionState.OPEN and session._active_world is None
+    session.close()
+
+
 def test_catalog_covers_rigid_generic_articulation_robot_and_unicode(planning_world) -> None:
     catalog = planning_world.planning_scene_catalog()
     assert entity_by_path(catalog, "/payload").kind is PlanningEntityKind.RIGID_OBJECT
@@ -563,6 +640,62 @@ def test_catalog_ids_are_stable_across_rebuild_and_content_digest_is_verified() 
         session.close()
 
 
+def test_asset_text_is_detached_before_hashing_and_never_dispatches_overrides() -> None:
+    class HostileAsset(str):
+        encode_calls = 0
+
+        def encode(self, *args, **kwargs):
+            del args, kwargs
+            type(self).encode_calls += 1
+            raise KeyboardInterrupt("credential TOKEN")
+
+        def __str__(self) -> str:
+            raise RuntimeError("caller string conversion must not run")
+
+    base = planning_spec(environments=1)
+    container = next(item for item in base.entities if item.path == EntityPath("/container"))
+    assert container.asset_uri is not None
+    hostile_asset = HostileAsset(container.asset_uri)
+    hostile_container = replace(container, asset_uri=hostile_asset)
+    hostile_spec = replace(
+        base,
+        world_id="planning-hostile-asset-text",
+        entities=tuple(hostile_container if item.path == container.path else item for item in base.entities),
+    )
+    session = FakeProvider().open()
+    world = session.build(hostile_spec)
+    try:
+        catalog = world.planning_scene_catalog()
+        owner = entity_by_path(catalog, "/container")
+        geometry = next(item for item in catalog.geometries if item.owner_entity_id == owner.entity_id)
+        source_only = hashlib.sha256(str.__str__(hostile_asset).encode("utf-8")).hexdigest()
+        assert HostileAsset.encode_calls == 0
+        assert geometry.provenance_sha256 != source_only
+        assert type(geometry.provenance_sha256) is str
+    finally:
+        session.close()
+
+
+def test_every_geometry_provenance_binds_provider_version_and_effective_parameters() -> None:
+    spec = planning_spec(environments=1)
+    original_digest, original = capture_planning_provenance(FAKE_DESCRIPTOR, spec)
+    changed_descriptor = replace(FAKE_DESCRIPTOR, version="99.0-remediation-probe")
+    changed_digest, changed = capture_planning_provenance(changed_descriptor, spec)
+    assert original.keys() == changed.keys()
+    assert all(original[path] != changed[path] for path in original)
+    assert original_digest != changed_digest
+
+    payload = next(item for item in spec.entities if item.path == EntityPath("/payload"))
+    changed_payload = replace(payload, box=BoxGeometrySpec(dimensions_m=(0.7, 0.6, 0.5)))
+    effective_spec = replace(
+        spec,
+        entities=tuple(changed_payload if item.path == payload.path else item for item in spec.entities),
+    )
+    effective_digest, effective = capture_planning_provenance(FAKE_DESCRIPTOR, effective_spec)
+    assert original["/payload"] != effective["/payload"]
+    assert original_digest != effective_digest
+
+
 def test_logical_path_validation_accepts_absolute_paths_and_rejects_invalid_paths(planning_world) -> None:
     descriptor = entity_by_path(planning_world.planning_scene_catalog(), "/payload")
     assert descriptor.path == "/payload"
@@ -669,22 +802,153 @@ def test_reset_loses_delta_continuity_and_revokes_existing_leases(planning_world
     lease.close()
 
 
-def test_overflow_produces_terminal_resync(planning_world) -> None:
-    current = planning_world.planning_scene_state()
-    maximum = 2**63 - 1
-    saturated = replace(
-        current,
-        sequence=maximum,
-        world_revision=maximum,
-        transform_revision=maximum,
+def test_partial_reset_isolates_generation_history_resync_and_lease_authority(planning_world) -> None:
+    catalogs_before = tuple(planning_world.planning_scene_catalog(index) for index in (0, 1))
+    states_before = tuple(planning_world.planning_scene_state(index) for index in (0, 1))
+    leases = tuple(
+        planning_world.resolve_planning_geometry(
+            resource_geometry_id(catalogs_before[index]),
+            environment_index=index,
+        )
+        for index in (0, 1)
     )
+
+    result = planning_world.reset((0,))
+    assert result.environment_indices == (0,)
+    catalogs_after = tuple(planning_world.planning_scene_catalog(index) for index in (0, 1))
+    assert tuple(item.generation for item in catalogs_after) == (
+        catalogs_before[0].generation + 1,
+        catalogs_before[1].generation,
+    )
+    assert planning_world.planning_scene_state(1) is states_before[1]
+    env0_delta = planning_world.planning_scene_delta(states_before[0].sequence, 0)
+    assert env0_delta.kind is PlanningSceneDeltaKind.RESYNC and env0_delta.resync_required
+    with pytest.raises(PlanningSceneDeltaContinuityError, match="no committed planning delta"):
+        planning_world.planning_scene_delta(states_before[1].sequence, 1)
+    with pytest.raises(PlanningGeometryResourceRevokedError):
+        leases[0].read(0, 1)
+    assert len(leases[1].read(0, 1)) == 1
+
+    planning_world.reset((1,))
+    env1_delta = planning_world.planning_scene_delta(states_before[1].sequence, 1)
+    assert env1_delta.kind is PlanningSceneDeltaKind.RESYNC and env1_delta.resync_required
+    with pytest.raises(PlanningGeometryResourceRevokedError):
+        leases[1].read(0, 1)
+    for lease in leases:
+        lease.close()
+
+
+def test_scene_command_commit_advances_only_target_environment(planning_world) -> None:
+    states_before = tuple(planning_world.planning_scene_state(index) for index in (0, 1))
+    target_pose = Pose((3.0, 2.0, 1.0))
+    result = planning_world.apply_scene_command(
+        SceneCommand(
+            "planning-env-zero-pose",
+            "contract-test",
+            "lease",
+            planning_world.generation,
+            SceneCommandKind.SET_POSE,
+            EntityPath("/container"),
+            environment_index=0,
+            target_pose=target_pose,
+        )
+    )
+
+    assert result.status is SceneCommandStatus.APPLIED
+    state_zero = planning_world.planning_scene_state(0)
+    assert state_zero.sequence == states_before[0].sequence + 1
+    assert (
+        next(
+            item.pose.position_m
+            for item in state_zero.entities
+            if item.entity_id == entity_by_path(planning_world.planning_scene_catalog(0), "/container").entity_id
+        )
+        == target_pose.position
+    )
+    assert planning_world.planning_scene_state(1) is states_before[1]
+    with pytest.raises(PlanningSceneDeltaContinuityError, match="no committed planning delta"):
+        planning_world.planning_scene_delta(states_before[1].sequence, 1)
+
+
+def test_partial_reset_resource_isolation_stress(planning_world) -> None:
     runtime = planning_world._planning_runtime
     assert runtime is not None
-    runtime.sequence = maximum
-    runtime.world_revision = maximum
-    runtime.transform_revision = maximum
-    runtime.history[0] = {maximum: saturated}
-    runtime.history[1] = {maximum: replace(saturated, environment_index=1)}
+    expected_generations = [planning_world.planning_scene_catalog(index).generation for index in (0, 1)]
+    for cycle in range(64):
+        target = cycle % 2
+        untouched = 1 - target
+        target_catalog = planning_world.planning_scene_catalog(target)
+        untouched_catalog = planning_world.planning_scene_catalog(untouched)
+        target_lease = planning_world.resolve_planning_geometry(
+            resource_geometry_id(target_catalog),
+            environment_index=target,
+        )
+        untouched_lease = planning_world.resolve_planning_geometry(
+            resource_geometry_id(untouched_catalog),
+            environment_index=untouched,
+        )
+        planning_world.reset((target,))
+        expected_generations[target] += 1
+        assert [planning_world.planning_scene_catalog(index).generation for index in (0, 1)] == expected_generations
+        with pytest.raises(PlanningGeometryResourceRevokedError):
+            target_lease.read(0, 1)
+        assert len(untouched_lease.read(0, 1)) == 1
+
+        states_before_command = tuple(planning_world.planning_scene_state(index) for index in (0, 1))
+        untouched_runtime = runtime.environments[untouched]
+        untouched_revision_snapshot = (
+            untouched_runtime.sequence,
+            untouched_runtime.world_revision,
+            untouched_runtime.transform_revision,
+            tuple(untouched_runtime.history.items()),
+            untouched_runtime.force_resync,
+        )
+        command_result = planning_world.apply_scene_command(
+            SceneCommand(
+                f"planning-stress-pose-{cycle}",
+                "contract-test",
+                "lease",
+                planning_world.generation,
+                SceneCommandKind.SET_POSE,
+                EntityPath("/container"),
+                environment_index=target,
+                target_pose=Pose((float(cycle + 1), float(target), 0.0)),
+            )
+        )
+        assert command_result.status is SceneCommandStatus.APPLIED
+        assert planning_world.planning_scene_state(target).sequence == states_before_command[target].sequence + 1
+        assert planning_world.planning_scene_state(untouched) is states_before_command[untouched]
+        assert (
+            untouched_runtime.sequence,
+            untouched_runtime.world_revision,
+            untouched_runtime.transform_revision,
+            tuple(untouched_runtime.history.items()),
+            untouched_runtime.force_resync,
+        ) == untouched_revision_snapshot
+        assert len(untouched_lease.read(0, 1)) == 1
+
+        target_lease.close()
+        untouched_lease.close()
+        assert len(runtime.storage_cache) == 1
+    assert runtime.geometry_materializations == 1
+
+
+def test_overflow_produces_terminal_resync(planning_world) -> None:
+    maximum = 2**63 - 1
+    runtime = planning_world._planning_runtime
+    assert runtime is not None
+    for environment_index, environment_runtime in runtime.environments.items():
+        current = planning_world.planning_scene_state(environment_index)
+        saturated = replace(
+            current,
+            sequence=maximum,
+            world_revision=maximum,
+            transform_revision=maximum,
+        )
+        environment_runtime.sequence = maximum
+        environment_runtime.world_revision = maximum
+        environment_runtime.transform_revision = maximum
+        environment_runtime.history = {maximum: saturated}
     planning_world._planning_commit_state()
     delta = planning_world.planning_scene_delta(maximum)
     assert delta.kind is PlanningSceneDeltaKind.RESYNC
@@ -698,7 +962,7 @@ def test_concave_triangle_mesh_resource_metadata_chunk_read_and_cache_reuse(plan
     assert geometry.representation is PlanningGeometryRepresentation.TRIANGLE_MESH
     first = planning_world.resolve_planning_geometry(geometry_id)
     descriptor = first.descriptor
-    assert geometry.resource_layout is descriptor.layout
+    assert geometry.resource_layout is descriptor.resource_layout
     assert descriptor.catalog_revision == catalog.catalog_revision
     assert descriptor.geometry_revision == catalog.geometry_revision
     descriptor.validate_against(catalog)
@@ -706,7 +970,7 @@ def test_concave_triangle_mesh_resource_metadata_chunk_read_and_cache_reuse(plan
     assert descriptor.index_shape == (10, 3)
     assert descriptor.vertex_dtype is PlanningGeometryDType.FLOAT32
     assert descriptor.index_dtype is PlanningGeometryDType.UINT32
-    assert descriptor.layout.index_byte_offset == 96
+    assert descriptor.resource_layout.index_byte_offset == 96
     assert descriptor.byte_size == 216
     content = first.read(0, 100) + first.read(100, descriptor.byte_size - 100)
     assert hashlib.sha256(content).hexdigest() == descriptor.sha256 == geometry.sha256
@@ -729,7 +993,8 @@ def test_fake_resource_metadata_is_exactly_bound_to_catalog_layout(planning_worl
     geometry_id = resource_geometry_id(catalog)
     geometry = next(item for item in catalog.geometries if item.geometry_id == geometry_id)
     runtime = planning_world._planning_runtime
-    original = runtime.raw_resources[geometry_id]
+    environment_runtime = runtime.environments[0]
+    original = environment_runtime.raw_resources[geometry_id]
     content, representation, resource_id, profile, vertex_shape, index_shape = original
     assert geometry.resource_layout is not None
     assert geometry.resource_layout.decoded_byte_size == len(content)
@@ -748,12 +1013,12 @@ def test_fake_resource_metadata_is_exactly_bound_to_catalog_layout(planning_worl
     )
     try:
         for contradiction in contradictions:
-            runtime.raw_resources[geometry_id] = contradiction
+            environment_runtime.raw_resources[geometry_id] = contradiction
             runtime.storage_cache.clear()
             with pytest.raises(PlanningSceneContractError, match="catalog layout"):
                 planning_world.resolve_planning_geometry(geometry_id)
     finally:
-        runtime.raw_resources[geometry_id] = original
+        environment_runtime.raw_resources[geometry_id] = original
         runtime.storage_cache.clear()
 
 
@@ -992,8 +1257,9 @@ def test_unknown_representation_and_hash_mismatch_fail_with_typed_errors(plannin
         planning_world.resolve_planning_geometry(geometry_id, PlanningGeometryRepresentation.CONVEX_MESH)
     runtime = planning_world._planning_runtime
     assert runtime is not None
-    original = runtime.raw_resources[geometry_id]
-    runtime.raw_resources[geometry_id] = (b"corrupt", *original[1:])
+    environment_runtime = runtime.environments[0]
+    original = environment_runtime.raw_resources[geometry_id]
+    environment_runtime.raw_resources[geometry_id] = (b"corrupt", *original[1:])
     with pytest.raises(PlanningSceneHashMismatchError):
         planning_world.resolve_planning_geometry(geometry_id)
 

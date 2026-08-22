@@ -240,9 +240,9 @@ def _reject_cycles(parent_by_child: dict[str, str], label: str) -> None:
 def _tick(value: object, label: str) -> Tick:
     if type(value) is not Tick:
         raise _invalid(f"{label} must be an exact Tick") from None
-    _integer(value.step_index, f"{label} step_index")
-    _finite(value.sim_time_seconds, f"{label} sim_time_seconds", non_negative=True)
-    return value
+    step_index = _integer(value.step_index, f"{label} step_index")
+    sim_time_seconds = _finite(value.sim_time_seconds, f"{label} sim_time_seconds", non_negative=True)
+    return Tick(step_index, sim_time_seconds)
 
 
 class PlanningEntityKind(StrEnum):
@@ -1188,11 +1188,7 @@ class PlanningSceneCatalog(_PlanningValue):
                     raise _invalid("catalog root link frame must parent to its entity root") from None
             else:
                 parent = link_by_id.get(link.parent_link_id)
-                if (
-                    parent is None
-                    or parent.entity_id != link.entity_id
-                    or primary_frame.parent_frame_id != parent.frame_id
-                ):
+                if parent is None or parent.entity_id != link.entity_id:
                     raise _invalid("catalog link parent does not close within its entity") from None
             if any(geometry_id not in link_entity.geometry_ids for geometry_id in link.geometry_ids):
                 raise _invalid("catalog link geometry ownership does not close") from None
@@ -1222,14 +1218,26 @@ class PlanningSceneCatalog(_PlanningValue):
                 axis_frame is None
                 or axis_frame.kind not in {PlanningFrameKind.LINK, PlanningFrameKind.JOINT}
                 or axis_frame.owner_entity_id != joint.entity_id
-                or axis_frame.owner_link_id not in {joint.parent_link_id, joint.child_link_id}
             ):
                 raise _invalid("catalog physical joint axis frame is invalid") from None
-            if axis_frame.kind is PlanningFrameKind.JOINT and axis_frame.parent_frame_id not in {
-                parent.frame_id,
-                child.frame_id,
-            }:
-                raise _invalid("catalog physical joint frame is not anchored to its joint topology") from None
+            child_frame = frame_by_id[child.frame_id]
+            if axis_frame.kind is PlanningFrameKind.JOINT:
+                if (
+                    axis_frame.owner_link_id != child.link_id
+                    or axis_frame.parent_frame_id != parent.frame_id
+                    or child_frame.parent_frame_id != axis_frame.frame_id
+                ):
+                    raise _invalid(
+                        "catalog dedicated joint topology must be parent-link -> joint -> child-link"
+                    ) from None
+            elif (
+                axis_frame.frame_id not in {parent.frame_id, child.frame_id}
+                or axis_frame.owner_link_id not in {parent.link_id, child.link_id}
+                or child_frame.parent_frame_id != parent.frame_id
+            ):
+                raise _invalid(
+                    "catalog endpoint joint link parent topology must connect child-link directly to parent-link"
+                ) from None
             if joint.child_link_id in child_joint_owner:
                 raise _invalid("catalog physical joints must have unique child links") from None
             child_joint_owner[joint.child_link_id] = joint.joint_id
@@ -1566,6 +1574,17 @@ def _relative_pose(parent: PlanningPose, child: PlanningPose, parent_frame_id: s
     return PlanningPose(parent_frame_id, position, orientation)
 
 
+def _compose_pose(parent: PlanningPose, local: PlanningGeometryLocalPose) -> PlanningPose:
+    offset = _rotate(local.position_m, parent.orientation_xyzw)
+    position = (
+        parent.position_m[0] + offset[0],
+        parent.position_m[1] + offset[1],
+        parent.position_m[2] + offset[2],
+    )
+    orientation = _quaternion_multiply(parent.orientation_xyzw, local.orientation_xyzw)
+    return PlanningPose(parent.frame_id, position, orientation)
+
+
 def _poses_close(left: PlanningPose, right: PlanningPose) -> bool:
     return all(
         abs(a - b) <= _TRANSFORM_TOLERANCE for a, b in zip(left.position_m, right.position_m, strict=True)
@@ -1723,10 +1742,31 @@ class PlanningSceneState(_PlanningValue):
         link_by_id = {link.link_id: link for link in catalog.links}
         frame_by_id = {frame.frame_id: frame for frame in catalog.frames}
         geometry_by_id = {geometry.geometry_id: geometry for geometry in catalog.geometries}
+        entity_state_by_id = {item.entity_id: item for item in self.entities}
+        link_state_by_id = {item.link_id: item for item in self.links}
+        frame_state_by_id = {item.frame_id: item for item in self.frames}
+        geometry_transform_by_id = {item.geometry_id: item for item in self.geometry_transforms}
+        for entity in catalog.entities:
+            if not _poses_close(
+                entity_state_by_id[entity.entity_id].pose,
+                frame_state_by_id[entity.root_frame_id].world_pose,
+            ):
+                raise _invalid("committed entity pose contradicts its catalog root frame") from None
+        for link in catalog.links:
+            if not _poses_close(
+                link_state_by_id[link.link_id].pose,
+                frame_state_by_id[link.frame_id].world_pose,
+            ):
+                raise _invalid("committed link pose contradicts its catalog physical frame") from None
+        for geometry in catalog.geometries:
+            expected = _compose_pose(
+                frame_state_by_id[geometry.parent_frame_id].world_pose,
+                geometry.parent_frame_T_geometry,
+            )
+            if not _poses_close(expected, geometry_transform_by_id[geometry.geometry_id].world_pose):
+                raise _invalid("committed geometry world pose contradicts catalog transform composition") from None
         system_entity = entity_by_id.get(PLANNING_SYSTEM_ENTITY_ID)
         if system_entity is not None:
-            entity_state_by_id = {item.entity_id: item for item in self.entities}
-            frame_state_by_id = {item.frame_id: item for item in self.frames}
             system_state = entity_state_by_id[PLANNING_SYSTEM_ENTITY_ID]
             system_frame_state = frame_state_by_id[system_entity.root_frame_id]
             if (
@@ -1760,10 +1800,10 @@ class PlanningSceneState(_PlanningValue):
                 if child_link is None or child_link.entity_id != attachment.child_entity_id:
                     raise _invalid("attachment child link ownership is invalid") from None
             for geometry_id in attachment.geometry_ids:
-                geometry = geometry_by_id.get(geometry_id)
-                if geometry is None or geometry.owner_entity_id != attachment.child_entity_id:
+                attached_geometry = geometry_by_id.get(geometry_id)
+                if attached_geometry is None or attached_geometry.owner_entity_id != attachment.child_entity_id:
                     raise _invalid("attachment geometry owner must be the child entity") from None
-                if attachment.child_link_id is not None and geometry.owner_link_id != attachment.child_link_id:
+                if attachment.child_link_id is not None and attached_geometry.owner_link_id != attachment.child_link_id:
                     raise _invalid("attachment geometry link owner must be the child link") from None
 
 
@@ -1983,7 +2023,7 @@ class PlanningSceneDelta(_PlanningValue):
 class PlanningGeometryResourceDescriptor(_PlanningValue):
     """Validated immutable resource schema.
 
-    Catalog and geometry revisions, the exact catalog digest, and ``layout``
+    Catalog and geometry revisions, the exact catalog digest, and ``resource_layout``
     bind a returned lease to the catalog that authorized it.  Consumers may
     call :meth:`validate_against` before decoding or reusing cached bytes.
 
@@ -2011,7 +2051,7 @@ class PlanningGeometryResourceDescriptor(_PlanningValue):
     format: PlanningGeometryContentProfile
     units: str
     axis_convention: PlanningGeometryAxisConvention
-    layout: PlanningGeometryResourceLayout
+    resource_layout: PlanningGeometryResourceLayout
     byte_size: int
     sha256: str
 
@@ -2068,48 +2108,48 @@ class PlanningGeometryResourceDescriptor(_PlanningValue):
             raise _invalid("planning resources must use canonical right-handed Z-up axes") from None
         object.__setattr__(self, "axis_convention", axis_convention)
         if (
-            type(self.layout) is not PlanningGeometryResourceLayout
-            or self.layout.representation is not representation
-            or self.layout.content_profile is not profile
+            type(self.resource_layout) is not PlanningGeometryResourceLayout
+            or self.resource_layout.representation is not representation
+            or self.resource_layout.content_profile is not profile
         ):
             raise _invalid("resource layout does not match its representation and format") from None
         byte_size = _integer(self.byte_size, "resource byte_size", maximum=_MAX_RESOURCE_BYTES)
-        if byte_size != self.layout.decoded_byte_size:
+        if byte_size != self.resource_layout.decoded_byte_size:
             raise _invalid("resource layout decoded bytes do not equal byte_size") from None
         object.__setattr__(self, "byte_size", byte_size)
         object.__setattr__(self, "sha256", _sha256(self.sha256, "resource sha256"))
 
     @property
     def vertex_dtype(self) -> PlanningGeometryDType | None:
-        return self.layout.vertex_dtype
+        return self.resource_layout.vertex_dtype
 
     @property
     def vertex_shape(self) -> tuple[int, int] | None:
-        return self.layout.vertex_shape
+        return self.resource_layout.vertex_shape
 
     @property
     def index_dtype(self) -> PlanningGeometryDType | None:
-        return self.layout.index_dtype
+        return self.resource_layout.index_dtype
 
     @property
     def index_shape(self) -> tuple[int, int] | None:
-        return self.layout.index_shape
+        return self.resource_layout.index_shape
 
     @property
     def grid_dtype(self) -> PlanningGeometryDType | None:
-        return self.layout.grid_dtype
+        return self.resource_layout.grid_dtype
 
     @property
     def grid_shape(self) -> tuple[int, ...] | None:
-        return self.layout.grid_shape
+        return self.resource_layout.grid_shape
 
     @property
     def grid_spacing_m(self) -> tuple[float, ...] | None:
-        return self.layout.grid_spacing_m
+        return self.resource_layout.grid_spacing_m
 
     @property
     def grid_origin_m(self) -> tuple[float, float, float] | None:
-        return self.layout.grid_origin_m
+        return self.resource_layout.grid_origin_m
 
     @_planning_method_boundary
     def validate_against(self, catalog: PlanningSceneCatalog) -> None:
@@ -2138,7 +2178,7 @@ class PlanningGeometryResourceDescriptor(_PlanningValue):
             self.resource_id != geometry.resource_id
             or self.representation is not geometry.representation
             or self.format is not geometry.content_profile
-            or self.layout != geometry.resource_layout
+            or self.resource_layout != geometry.resource_layout
             or self.sha256 != geometry.sha256
         ):
             raise _invalid("resource metadata does not match the catalog geometry") from None
