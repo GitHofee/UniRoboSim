@@ -72,6 +72,10 @@ class FrozenJsonTests(unittest.TestCase):
     def test_invalid_frozen_map_input_is_structured(self) -> None:
         with self.assertRaises(ValidationError):
             FrozenMap(1)  # type: ignore[arg-type]
+        with self.assertRaises(ValidationError):
+            FrozenMap([object()])  # type: ignore[list-item]
+        with self.assertRaises(ValidationError):
+            FrozenMap([("key", 1, 2)])  # type: ignore[list-item]
 
     def test_scalar_and_builtin_container_subclasses_are_detached_before_use(self) -> None:
         class HostileText(str):

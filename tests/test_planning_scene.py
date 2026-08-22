@@ -13,6 +13,7 @@ import pytest
 
 import unirobosim.api.planning_scene as planning_contract
 import unirobosim.testing.fake_backend as fake_contract
+from tests.test_soft_matter_specs import fluid_body, surface_body
 from unirobosim import (
     PLANNING_FRAME_DECLARATIONS_SCHEMA_VERSION,
     PLANNING_GEOMETRY_READ_LIMIT_BYTES,
@@ -25,6 +26,7 @@ from unirobosim import (
     BoxGeometrySpec,
     CapabilityId,
     CapabilityRequirement,
+    CommandMode,
     EntityKind,
     EntityPath,
     EntitySpec,
@@ -67,6 +69,7 @@ from unirobosim import (
     SceneCommandKind,
     SceneCommandStatus,
     SessionState,
+    ValidationError,
     World,
     WorldSpec,
 )
@@ -1273,6 +1276,126 @@ def test_multi_environment_commit_capture_failure_publishes_no_partial_identity(
         ) == previous[:3]
         assert environment.history is previous[3]
         assert environment.force_resync is previous[4]
+
+
+def test_failed_step_restores_articulation_deformable_and_fluid_runtime(monkeypatch) -> None:
+    spec = WorldSpec(
+        "planning-all-runtime-rollback",
+        (
+            EntitySpec(EntityPath("/arm"), EntityKind.ARTICULATION, joint_names=("joint",)),
+            EntitySpec(EntityPath("/cloth"), EntityKind.SURFACE_DEFORMABLE, deformable=surface_body()),
+            EntitySpec(EntityPath("/water"), EntityKind.PARTICLE_FLUID, particle_fluid=fluid_body()),
+            EntitySpec(EntityPath("/box"), EntityKind.RIGID_BODY, box=BoxGeometrySpec()),
+        ),
+        environments=EnvironmentSpec(1),
+        physics=PhysicsSpec(time_step_seconds=0.1, gravity_m_s2=(0.0, 0.0, -10.0)),
+        requirements=(planning_requirement(),),
+    )
+    session = FakeProvider().open()
+    world = session.build(spec)
+    try:
+        articulation = world._articulations[EntityPath("/arm")]
+        articulation.modes[0][0] = CommandMode.VELOCITY
+        articulation.targets[0][0] = 3.0
+
+        def nested(values):
+            return tuple(tuple(tuple(vector) for vector in environment) for environment in values)
+
+        before = (
+            tuple(tuple(row) for row in articulation.positions),
+            tuple(tuple(row) for row in articulation.velocities),
+            nested(world._points[EntityPath("/cloth")].positions),
+            nested(world._points[EntityPath("/cloth")].velocities),
+            nested(world._points[EntityPath("/water")].positions),
+            nested(world._points[EntityPath("/water")].velocities),
+            world._step_index,
+            world._scene_sequence,
+        )
+
+        def reject_capture(_environment_index: int):
+            raise PlanningSceneContractError("injected rollback probe", operation="planning_scene.commit")
+
+        monkeypatch.setattr(world, "_capture_planning_state", reject_capture)
+        with pytest.raises(PlanningSceneContractError, match="injected rollback probe"):
+            world.step()
+        assert (
+            tuple(tuple(row) for row in articulation.positions),
+            tuple(tuple(row) for row in articulation.velocities),
+            nested(world._points[EntityPath("/cloth")].positions),
+            nested(world._points[EntityPath("/cloth")].velocities),
+            nested(world._points[EntityPath("/water")].positions),
+            nested(world._points[EntityPath("/water")].velocities),
+            world._step_index,
+            world._scene_sequence,
+        ) == before
+    finally:
+        session.close()
+
+
+def test_planning_step_and_scene_predictor_reject_defensive_boundaries(planning_world) -> None:
+    assert planning_world._planning_scene_command_will_commit(object()) is False
+    stale = SceneCommand(
+        "stale-predictor",
+        "test",
+        "lease",
+        planning_world.generation + 1,
+        SceneCommandKind.SET_POSE,
+        EntityPath("/payload"),
+        target_pose=Pose((1.0, 2.0, 3.0)),
+    )
+    assert planning_world._planning_scene_command_will_commit(stale) is False
+    articulation_target = replace(
+        stale,
+        command_id="articulation-predictor",
+        expected_generation=planning_world.generation,
+        entity_path=EntityPath("/robot"),
+    )
+    assert planning_world._planning_scene_command_will_commit(articulation_target) is False
+    with pytest.raises(ValidationError, match="positive integer"):
+        planning_world.step(0)
+    planning_world._step_index = 2**63 - 1
+    with pytest.raises(PlanningSceneContractError, match="tick identity is exhausted"):
+        planning_world.step()
+
+
+@pytest.mark.parametrize(
+    "attachment",
+    (
+        {
+            "attachment_id": "attachment.unsupported",
+            "parent_path": "/payload",
+            "child_path": "/left",
+            "unsupported": True,
+        },
+        {
+            "attachment_id": "attachment.unknown_endpoint",
+            "parent_path": "/payload",
+            "child_path": "/left",
+            "child_link_name": "missing-link",
+        },
+        {
+            "attachment_id": "attachment.child_without_geometry",
+            "parent_path": "/payload",
+            "child_path": "/microwave",
+            "child_link_name": "门 铰链 child",
+        },
+    ),
+)
+def test_attachment_registry_rejects_unsupported_or_unresolvable_records(attachment) -> None:
+    base = planning_spec(environments=1)
+    metadata = base.metadata.to_dict()
+    metadata["planning_attachments"] = (attachment,)
+    spec = replace(
+        base,
+        world_id=f"planning-invalid-attachment-{attachment['attachment_id']}",
+        metadata=FrozenMap(metadata),
+    )
+    session = FakeProvider().open()
+    try:
+        with pytest.raises(PlanningSceneIncompleteError):
+            session.build(spec)
+    finally:
+        session.close()
 
 
 def test_generation_exhaustion_rejects_reset_before_physics_mutation(planning_world) -> None:
