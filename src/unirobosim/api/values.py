@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import re
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import FrozenInstanceError, dataclass
 from enum import StrEnum
 from functools import reduce
 from operator import mul
@@ -209,6 +209,25 @@ class ArrayValue:
         object.__setattr__(self, "shape", shape)
         object.__setattr__(self, "values", values)
 
+    @property
+    def is_packed(self) -> bool:
+        """Whether this value uses compact immutable byte storage."""
+
+        return False
+
+    def to_bytes(self) -> bytes:
+        """Return a uint8 array as bytes without copying packed storage."""
+
+        if self.dtype != "uint8":
+            raise _validation("to_bytes() requires uint8 dtype", "array.to_bytes", dtype=self.dtype)
+        return bytes(int(value) for value in self.values)
+
+    @classmethod
+    def from_uint8_bytes(cls, shape: Iterable[int], data: bytes) -> ArrayValue:
+        """Build a compact uint8 array while preserving the scalar-value API."""
+
+        return PackedUInt8ArrayValue(shape, data)
+
     @classmethod
     def from_rows(cls, rows: Iterable[Iterable[float]], *, dtype: str = "float64") -> ArrayValue:
         try:
@@ -251,6 +270,105 @@ class ArrayValue:
             return tuple(build(offset + index * stride, shape[1:]) for index in range(shape[0]))
 
         return build(0, self.shape)
+
+
+class PackedUInt8ArrayValue(ArrayValue):
+    """ArrayValue backed by compact bytes with lazy tuple compatibility.
+
+    The public ``values`` property remains a tuple for existing consumers. It
+    is materialized only when explicitly requested; camera recorders should use
+    :meth:`to_bytes` to keep the zero-expansion path.
+    """
+
+    _buffer: bytes
+    _values_cache: tuple[int, ...] | None
+
+    def __init__(self, shape: Iterable[int], data: bytes) -> None:
+        operation = "array.from_uint8_bytes"
+        try:
+            normalized_shape = tuple(shape)
+        except TypeError as exc:
+            raise _validation("array shape must be iterable", operation) from exc
+        if not normalized_shape or any(
+            not isinstance(size, int) or isinstance(size, bool) or size <= 0 for size in normalized_shape
+        ):
+            raise _validation(
+                "array shape must contain positive integer dimensions",
+                operation,
+                shape=normalized_shape,
+            )
+        if not isinstance(data, bytes):
+            raise _validation("packed uint8 data must be immutable bytes", operation)
+        expected = reduce(mul, normalized_shape, 1)
+        if len(data) != expected:
+            raise _validation(
+                "array value count does not match shape",
+                operation,
+                shape=normalized_shape,
+                expected=expected,
+                actual=len(data),
+            )
+        object.__setattr__(self, "shape", normalized_shape)
+        object.__setattr__(self, "dtype", "uint8")
+        object.__setattr__(self, "device", "cpu")
+        object.__setattr__(self, "ownership", ArrayOwnership.OWNED)
+        object.__setattr__(self, "values", ())
+        object.__setattr__(self, "_buffer", data)
+        object.__setattr__(self, "_values_cache", None)
+
+    def __getattribute__(self, name: str) -> Any:
+        if name == "values":
+            cached = object.__getattribute__(self, "_values_cache")
+            if cached is None:
+                cached = tuple(object.__getattribute__(self, "_buffer"))
+                object.__setattr__(self, "_values_cache", cached)
+            return cached
+        return super().__getattribute__(name)
+
+    def __setattr__(self, name: str, value: object) -> None:
+        raise FrozenInstanceError(f"cannot assign to field {name!r}")
+
+    def __delattr__(self, name: str) -> None:
+        raise FrozenInstanceError(f"cannot delete field {name!r}")
+
+    @property
+    def is_packed(self) -> bool:
+        return True
+
+    def to_bytes(self) -> bytes:
+        return self._buffer
+
+    def rows(self) -> tuple[tuple[int, ...], ...]:
+        if len(self.shape) != 2:
+            raise _validation("rows() requires a rank-2 array", "array.rows", shape=self.shape)
+        width = self.shape[1]
+        return tuple(tuple(self._buffer[offset : offset + width]) for offset in range(0, len(self._buffer), width))
+
+    def nested(self) -> tuple[Any, ...]:
+        def build(offset: int, shape: tuple[int, ...]) -> tuple[Any, ...]:
+            if len(shape) == 1:
+                return tuple(self._buffer[offset : offset + shape[0]])
+            stride = reduce(mul, shape[1:], 1)
+            return tuple(build(offset + index * stride, shape[1:]) for index in range(shape[0]))
+
+        return build(0, self.shape)
+
+    def __repr__(self) -> str:
+        return (
+            f"PackedUInt8ArrayValue(shape={self.shape!r}, byte_length={len(self._buffer)}, "
+            f"device={self.device!r}, ownership={self.ownership!r})"
+        )
+
+    def __eq__(self, other: object) -> bool:
+        if type(other) is not PackedUInt8ArrayValue:
+            return False
+        return self.shape == other.shape and self._buffer == other._buffer
+
+    def __hash__(self) -> int:
+        return hash((self.shape, self._buffer, self.dtype, self.device, self.ownership))
+
+    def __reduce__(self) -> tuple[object, tuple[tuple[int, ...], bytes]]:
+        return PackedUInt8ArrayValue, (self.shape, self._buffer)
 
 
 @dataclass(frozen=True)

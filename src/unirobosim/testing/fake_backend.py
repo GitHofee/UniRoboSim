@@ -274,7 +274,7 @@ FAKE_CAPABILITIES = CapabilitySet(
 FAKE_DESCRIPTOR = ProviderDescriptor(
     provider_id="reference.fake",
     display_name="UniRoboSim Fake Reference Backend",
-    version="0.9.0",
+    version="0.9.1",
     contract_version="v0alpha5",
     capabilities=FAKE_CAPABILITIES,
     supported_world_schema_versions=(WORLD_SCHEMA_VERSION, PHYSICAL_WORLD_SCHEMA_VERSION),
@@ -3305,7 +3305,7 @@ class FakeWorld:
         channels: list[SensorChannel] = []
         for modality in camera.modalities:
             if modality is CameraModality.RGB:
-                rgb: list[int] = []
+                rgb = bytearray()
                 for environment in range(environment_count):
                     for row in range(camera.height_px):
                         for column in range(camera.width_px):
@@ -3316,10 +3316,9 @@ class FakeWorld:
                                     (column * 7 + row * 11 + self._step_index * 5) % 256,
                                 )
                             )
-                data = ArrayValue(
+                data = ArrayValue.from_uint8_bytes(
                     (environment_count, camera.height_px, camera.width_px, 3),
-                    tuple(rgb),
-                    dtype="uint8",
+                    bytes(rgb),
                 )
             else:
                 depth = tuple(

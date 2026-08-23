@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import pickle
 import tempfile
 import unittest
 from pathlib import Path
@@ -71,10 +72,42 @@ class CameraContractTests(unittest.TestCase):
     def test_uint8_is_owned_and_range_checked(self) -> None:
         value = ArrayValue((1, 1, 1, 3), (0, 127, 255), dtype="uint8")
         self.assertEqual(value.values, (0, 127, 255))
+        self.assertFalse(value.is_packed)
+        self.assertEqual(value.to_bytes(), b"\x00\x7f\xff")
+
+        packed = b"\x00\x7f\xff"
+        packed_value = ArrayValue.from_uint8_bytes((1, 1, 1, 3), packed)
+        self.assertTrue(packed_value.is_packed)
+        self.assertIs(packed_value.to_bytes(), packed)
+        self.assertEqual(packed_value.values, (0, 127, 255))
+        self.assertEqual(packed_value.nested(), ((((0, 127, 255),),),))
+
         with self.assertRaises(ValidationError):
             ArrayValue((1,), (256,), dtype="uint8")
         with self.assertRaises(ValidationError):
             ArrayValue((1,), (-1,), dtype="uint8")
+        with self.assertRaises(ValidationError):
+            ArrayValue((1,), (0.0,), dtype="float32").to_bytes()
+        with self.assertRaises(ValidationError):
+            ArrayValue.from_uint8_bytes((2,), b"\x00")
+        with self.assertRaises(ValidationError):
+            ArrayValue.from_uint8_bytes((1,), bytearray(b"\x00"))  # type: ignore[arg-type]
+
+    def test_packed_uint8_pickle_stays_compact_and_lazy(self) -> None:
+        payload = bytes(range(256)) * 4096
+        value = ArrayValue.from_uint8_bytes((1, 1024, 1024, 1), payload)
+        self.assertIsNone(value._values_cache)
+        self.assertIn("byte_length=1048576", repr(value))
+        self.assertIsNone(value._values_cache)
+
+        encoded = pickle.dumps(value, protocol=5)
+        self.assertLess(len(encoded), len(payload) + 1024)
+        restored = pickle.loads(encoded)
+        self.assertTrue(restored.is_packed)
+        self.assertEqual(restored, value)
+        self.assertEqual(hash(restored), hash(value))
+        self.assertIsNone(restored._values_cache)
+        self.assertEqual(restored.to_bytes(), payload)
 
     def test_camera_spec_and_schema_requirements_are_strict(self) -> None:
         spec = camera_world()

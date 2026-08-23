@@ -6,7 +6,7 @@
 
 UniRoboSim is a backend-neutral interoperability layer for robotics simulation. It defines portable scene, lifecycle, command, state, sensor, asset, debug, and scene-control contracts while keeping native simulator SDKs in independently packaged adapters. Applications and upper-layer frameworks can select a backend without propagating simulator-specific types through their architecture.
 
-Version `0.9.0` adds the physical v0alpha5 World contract while preserving the accepted Core 0.8 planning-scene v2 API. Python packages use `0.9.x`; serialized World contracts remain independently versioned as `unirobosim.world/v0alpha4` and `unirobosim.world/v0alpha5`.
+Version `0.9.1` adds compact RGB frame storage for camera and recording pipelines while preserving the physical v0alpha5 World contract and accepted planning-scene v2 API. Python packages use `0.9.x`; serialized World contracts remain independently versioned as `unirobosim.world/v0alpha4` and `unirobosim.world/v0alpha5`.
 
 <img src="assets/readme/unirobosim-architecture.svg" alt="UniRoboSim architecture: applications, FastSim, policies and agents use EasyAPI, RuntimeAPI, MCP and Studio; portable contracts connect them to independent simulator adapters." width="100%">
 
@@ -19,12 +19,13 @@ Version `0.9.0` adds the physical v0alpha5 World contract while preserving the a
 - Native SDKs remain behind adapters. In particular, Isaac Sim runs in a worker process because its lifecycle should not own the application.
 - Backends and asset processors are ordinary Python plugins. A new adapter should not require a Core patch.
 
-### What 0.9.0 provides
+### What 0.9 provides
 
 - rigid pose/twist, persistent wrench control, contact state, and scene pose writes;
 - robot and non-robot articulation state plus position/velocity/effort commands;
 - surface/volume deformable and fixed-count particle-fluid contracts;
 - RGB/depth camera contracts;
+- compact RGB byte access through `ArrayValue.to_bytes()` without changing sensor shapes or dtypes;
 - point, line, axes, text, bounding-box, and trajectory debug primitives;
 - scene snapshots/deltas and idempotent drag transactions;
 - planning-scene catalogs, state/deltas, frame and articulation topology, attachments, and hash-pinned geometry resources through backend-neutral protocols;

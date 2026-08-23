@@ -6,7 +6,7 @@
 
 UniRoboSim 是面向机器人仿真的后端中立互操作层。它定义可移植的场景、生命周期、命令、状态、传感器、资产、调试与场景控制合同，并将原生仿真器 SDK 隔离在独立发布的 Adapter 中。应用和上层框架可以选择仿真后端，而不必让仿真器专用类型扩散到整体架构。
 
-`0.9.0` 在保留已验收 Core 0.8 planning-scene v2 API 的同时新增物理 v0alpha5 World 合同。Python 包使用 `0.9.x`，序列化 World 合同仍独立版本化为 `unirobosim.world/v0alpha4` 与 `unirobosim.world/v0alpha5`。
+`0.9.1` 在保留物理 v0alpha5 World 合同与已验收 planning-scene v2 API 的同时，为相机和录制流水线新增紧凑 RGB 帧存储。Python 包使用 `0.9.x`，序列化 World 合同仍独立版本化为 `unirobosim.world/v0alpha4` 与 `unirobosim.world/v0alpha5`。
 
 <img src="assets/readme/unirobosim-architecture.zh-CN.svg" alt="UniRoboSim 架构：应用、FastSim、策略和智能体通过 EasyAPI、MCP、RuntimeAPI 与 Studio 使用可移植合同，并连接到独立仿真器适配器。" width="100%">
 
@@ -19,12 +19,13 @@ UniRoboSim 是面向机器人仿真的后端中立互操作层。它定义可移
 - 原生 SDK 留在 Adapter 后面。尤其是 Isaac Sim，它运行在 worker 进程中，不应该接管应用生命周期。
 - Backend 和资产处理器就是普通 Python 插件。新增 Adapter 不应要求修改 Core。
 
-### 0.9.0 提供的能力
+### 0.9 提供的能力
 
 - 刚体位姿/速度、持续 wrench、接触状态和场景位姿写入；
 - 机器人及非机器人铰接体状态与位置/速度/力矩控制；
 - 表面/体积柔性体与固定粒子数流体合同；
 - RGB/深度相机合同；
+- 通过 `ArrayValue.to_bytes()` 读取紧凑 RGB 字节，且不改变传感器 shape 与 dtype；
 - 点、线、坐标轴、文本、包围盒和轨迹调试图元；
 - 场景快照/增量与幂等拖拽事务；
 - 通过后端中立 Protocol 提供 planning-scene 目录、状态/增量、Frame 与关节拓扑、附着关系和哈希固定的几何资源；

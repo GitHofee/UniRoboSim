@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.9.1 - 2026-08-23
+
+- Add compact immutable uint8 array storage for high-resolution RGB frames while
+  preserving the existing `ArrayValue`, `SensorChannel`, and EasyAPI signatures.
+- Keep legacy `ArrayValue.values` tuple access available as an explicit lazy
+  compatibility path and add `to_bytes()` for allocation-free recording and IPC.
+- Exercise the packed RGB contract in the Fake Reference Backend without changing
+  the serialized World schema or the `sensor.camera.rgb@1` capability semantics.
+
 ## 0.9.0 - 2026-08-23
 
 - Add the explicit `unirobosim.world/v0alpha5` physical schema while preserving
