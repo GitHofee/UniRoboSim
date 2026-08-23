@@ -6,7 +6,7 @@
 
 UniRoboSim is a backend-neutral interoperability layer for robotics simulation. It defines portable scene, lifecycle, command, state, sensor, asset, debug, and scene-control contracts while keeping native simulator SDKs in independently packaged adapters. Applications and upper-layer frameworks can select a backend without propagating simulator-specific types through their architecture.
 
-Version `0.8.0` is the Core planning-scene v2 release candidate. Python packages use `0.8.x`; the serialized runtime/world contract is independently and explicitly versioned as `v0alpha4` / `unirobosim.world/v0alpha4`.
+Version `0.9.0` adds the physical v0alpha5 World contract while preserving the accepted Core 0.8 planning-scene v2 API. Python packages use `0.9.x`; serialized World contracts remain independently versioned as `unirobosim.world/v0alpha4` and `unirobosim.world/v0alpha5`.
 
 <img src="assets/readme/unirobosim-architecture.svg" alt="UniRoboSim architecture: applications, FastSim, policies and agents use EasyAPI, RuntimeAPI, MCP and Studio; portable contracts connect them to independent simulator adapters." width="100%">
 
@@ -19,7 +19,7 @@ Version `0.8.0` is the Core planning-scene v2 release candidate. Python packages
 - Native SDKs remain behind adapters. In particular, Isaac Sim runs in a worker process because its lifecycle should not own the application.
 - Backends and asset processors are ordinary Python plugins. A new adapter should not require a Core patch.
 
-### What 0.8.0 provides
+### What 0.9.0 provides
 
 - rigid pose/twist, persistent wrench control, contact state, and scene pose writes;
 - robot and non-robot articulation state plus position/velocity/effort commands;
@@ -88,7 +88,7 @@ git clone https://github.com/GitHofee/UniRoboSim-mcp.git
 python -m pip install ./UniRoboSim-usd-converter ./UniRoboSim-studio ./UniRoboSim-mcp
 ```
 
-For reproducible deployments, pin the exact Core and adapter pair that was tested. The previously accepted PyBullet diagnostics pair remains Core `0.7.1` with PyBullet adapter `0.7.1`; no native adapter compatibility with the Core `0.8.0` candidate is claimed until each adapter passes its independent gate.
+For reproducible deployments, pin the exact Core and adapter pair that was tested. Core 0.9 adapters must declare `unirobosim>=0.9,<0.10` and their exact supported World schemas. No native adapter compatibility with Core `0.9.0` is claimed until each adapter passes its independent gate.
 
 ## 3. EasyAPI: quick start
 
@@ -314,6 +314,7 @@ DESCRIPTOR = ProviderDescriptor(
             CapabilityDeclaration(CapabilityId("control.rigid_body.wrench@1")),
         )
     ),
+    supported_world_schema_versions=("unirobosim.world/v0alpha4",),
     metadata=FrozenMap({"native_sdk": "1.2.3"}),
 )
 
@@ -339,13 +340,13 @@ The distribution registers the factory in `pyproject.toml`:
 
 ```toml
 [project]
-dependencies = ["unirobosim>=0.7.1,<0.8"]
+dependencies = ["unirobosim>=0.9,<0.10"]
 
 [project.entry-points."unirobosim.backends"]
 vendor = "unirobosim_vendor:create_provider"
 ```
 
-The example dependency bound intentionally describes an adapter that has only accepted the Core 0.7 series. Adapter owners must run their native gate before widening it for Core 0.8.
+The dependency bound describes the Core 0.9 adapter line. Adapter owners must declare the exact World schemas they implement and pass their independent native gate before publishing compatibility.
 
 `VendorSession` must implement `descriptor`, `negotiate()`, `build()`, and `close()`. Its built `VendorWorld` must implement the complete base `World` protocol. Methods for capabilities the adapter does not advertise must still fail with a structured `UnsupportedCapabilityError`; they must not return fabricated values.
 
@@ -372,4 +373,4 @@ coverage run -m pytest
 coverage report
 ```
 
-The 0.8.0 Core release gate covers the complete Core suite and clean source, wheel, and sdist installs on Python 3.11 and 3.12. Native GPU, GUI, and backend-adapter acceptance is unverified for this Core-only candidate and remains an independent adapter gate.
+The 0.9.0 Core release gate covers the complete Core suite and clean source, wheel, and sdist installs on Python 3.11 and 3.12. Native GPU, GUI, and backend-adapter acceptance is unverified for this Core-only candidate and remains an independent adapter gate.

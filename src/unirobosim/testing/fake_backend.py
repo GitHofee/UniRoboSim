@@ -10,7 +10,9 @@ import hashlib
 import itertools
 import json
 import math
+import os
 import re
+import stat
 import struct
 import threading
 from collections.abc import Callable, Iterable
@@ -20,6 +22,7 @@ from functools import wraps
 from types import TracebackType
 from typing import TypeVar, cast
 
+from unirobosim.api.build import BuildInput
 from unirobosim.api.capabilities import (
     CapabilityDeclaration,
     CapabilityId,
@@ -29,6 +32,11 @@ from unirobosim.api.capabilities import (
 )
 from unirobosim.api.debug import DebugBatch, DebugLifetimeMode, DebugPrimitive, DebugPublishReport
 from unirobosim.api.errors import (
+    ARTICULATION_AXIS_UNITS_MISMATCH,
+    ARTICULATION_POSITION_AXIS_UNITS_UNSUPPORTED,
+    ASSET_DEPENDENCY_INCOMPLETE,
+    ASSET_IDENTITY_CHANGED,
+    WORLD_SCHEMA_UNSUPPORTED,
     CapabilityNegotiationError,
     CommandError,
     EntityNotFoundError,
@@ -43,6 +51,7 @@ from unirobosim.api.errors import (
     PlanningSceneRepresentationError,
     ProviderSelectionError,
     StaleHandleError,
+    UnsupportedCapabilityError,
     ValidationError,
     WorldBuildError,
     _snapshot_and_scrub_planning_error,
@@ -119,6 +128,8 @@ from unirobosim.api.scene import (
     SceneVisualKind,
 )
 from unirobosim.api.specs import (
+    PHYSICAL_WORLD_SCHEMA_VERSION,
+    WORLD_SCHEMA_VERSION,
     ArticulationCommand,
     DeformableCommand,
     EntitySpec,
@@ -169,7 +180,9 @@ FAKE_CAPABILITIES = CapabilitySet(
             limitations=("fake reference backend has no collision model and therefore reports zero",),
         ),
         CapabilityDeclaration(CapabilityId("state.articulation@1")),
+        CapabilityDeclaration(CapabilityId("state.articulation.axis-units@1")),
         CapabilityDeclaration(CapabilityId("control.articulation.position@1")),
+        CapabilityDeclaration(CapabilityId("control.articulation.position.axis-units@1")),
         CapabilityDeclaration(CapabilityId("control.articulation.velocity@1")),
         CapabilityDeclaration(
             CapabilityId("control.articulation.effort@1"),
@@ -239,6 +252,8 @@ FAKE_CAPABILITIES = CapabilitySet(
             FrozenMap({"entity_kinds": ["rigid_body"], "modes": ["kinematic"]}),
         ),
         CapabilityDeclaration(CapabilityId("render.browser-scene@1")),
+        CapabilityDeclaration(CapabilityId("entity.scale.rigid@1")),
+        CapabilityDeclaration(CapabilityId("entity.scale.articulation.uniform@1")),
         CapabilityDeclaration(
             CapabilityId("planning.scene@2"),
             FrozenMap(
@@ -259,9 +274,10 @@ FAKE_CAPABILITIES = CapabilitySet(
 FAKE_DESCRIPTOR = ProviderDescriptor(
     provider_id="reference.fake",
     display_name="UniRoboSim Fake Reference Backend",
-    version="0.8.0",
-    contract_version="v0alpha4",
+    version="0.9.0",
+    contract_version="v0alpha5",
     capabilities=FAKE_CAPABILITIES,
+    supported_world_schema_versions=(WORLD_SCHEMA_VERSION, PHYSICAL_WORLD_SCHEMA_VERSION),
     metadata=FrozenMap({"purpose": "contract-testing-only"}),
 )
 
@@ -275,6 +291,42 @@ _FAKE_PLANNING_COMPILER_PROFILE = "python-struct-little-endian/v1"
 _FAKE_PLANNING_CANONICALIZATION_ALGORITHM = "json-utf8-sort-keys-compact-sha256/v1"
 _FAKE_PLANNING_MAX_COUNTER = 2**63 - 1
 _FAKE_PLANNING_MAX_METADATA_ITEMS = 100_000
+
+
+@dataclass(frozen=True, slots=True)
+class FakeSideEffectSnapshot:
+    """Monotonic Fake test hooks for command and build side-effect gates."""
+
+    generation: int
+    allocations: int
+    worlds: int
+    queues: int
+    controller_lookups: int
+    motor_enables: int
+    native_calls: int
+    commands: int
+    state_mutations: int
+
+
+def _scrub_private_failure(error: BaseException) -> None:
+    """Drop private path-bearing exception graphs before replacing a failure."""
+
+    try:
+        state = BaseException.__getattribute__(error, "__dict__")
+        if type(state) is dict:
+            dict.clear(state)
+    except BaseException:
+        pass
+    for name, value in (
+        ("args", ()),
+        ("__traceback__", None),
+        ("__cause__", None),
+        ("__context__", None),
+    ):
+        try:
+            BaseException.__setattr__(error, name, value)
+        except BaseException:
+            pass
 
 
 @dataclass
@@ -630,7 +682,9 @@ def _planning_relative(parent: PlanningPose, child: PlanningPose, parent_frame_i
     )
 
 
-def _concave_container_mesh_bytes() -> tuple[bytes, tuple[int, int], tuple[int, int]]:
+def _concave_container_mesh_bytes(
+    scale_xyz: tuple[float, float, float] = (1.0, 1.0, 1.0),
+) -> tuple[bytes, tuple[int, int], tuple[int, int]]:
     """Open box surface: a triangle mesh that preserves a concave container interior."""
 
     vertices = (
@@ -655,7 +709,8 @@ def _concave_container_mesh_bytes() -> tuple[bytes, tuple[int, int], tuple[int, 
         (3, 0, 4),
         (3, 4, 7),
     )
-    content = b"".join(struct.pack("<fff", *vertex) for vertex in vertices) + b"".join(
+    scaled_vertices = tuple(tuple(vertex[axis] * scale_xyz[axis] for axis in range(3)) for vertex in vertices)
+    content = b"".join(struct.pack("<fff", *vertex) for vertex in scaled_vertices) + b"".join(
         struct.pack("<III", *triangle) for triangle in triangles
     )
     return content, (len(vertices), 3), (len(triangles), 3)
@@ -750,6 +805,14 @@ class FakeSession:
         self._generation = 0
         self._active_world: FakeWorld | None = None
         self._build_failures = build_failures
+        self._allocation_count = 0
+        self._world_count = 0
+        self._queue_count = 0
+        self._controller_count = 0
+        self._motor_count = 0
+        self._native_count = 0
+        self._command_count = 0
+        self._state_mutation_count = 0
 
     @property
     def descriptor(self) -> ProviderDescriptor:
@@ -762,6 +825,19 @@ class FakeSession:
     @property
     def state(self) -> SessionState:
         return self._state
+
+    def side_effect_snapshot(self) -> FakeSideEffectSnapshot:
+        return FakeSideEffectSnapshot(
+            generation=self._generation,
+            allocations=self._allocation_count,
+            worlds=self._world_count,
+            queues=self._queue_count,
+            controller_lookups=self._controller_count,
+            motor_enables=self._motor_count,
+            native_calls=self._native_count,
+            commands=self._command_count,
+            state_mutations=self._state_mutation_count,
+        )
 
     def _ensure_open(self, operation: str, *, allow_ready: bool = False) -> None:
         accepted = {SessionState.OPEN, SessionState.READY} if allow_ready else {SessionState.OPEN}
@@ -777,10 +853,142 @@ class FakeSession:
         self._ensure_open("session.negotiate", allow_ready=True)
         return self.descriptor.capabilities.negotiate(tuple(requirements))
 
-    def build(self, spec: WorldSpec) -> FakeWorld:
+    @staticmethod
+    def _validate_build_sources(build_input: BuildInput) -> tuple[str, str | None, str | None] | None:
+        for source in build_input.sources:
+            descriptors: list[int] = []
+            failure: tuple[str, str | None, str | None] | None = None
+            try:
+                directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+                current = os.open(os.path.sep, directory_flags)
+                descriptors.append(current)
+                for part in source.source_root.split(os.path.sep):
+                    if not part:
+                        continue
+                    current = os.open(part, directory_flags, dir_fd=current)
+                    descriptors.append(current)
+                parts = source.relative_source_path.split("/")
+                for part in parts[:-1]:
+                    current = os.open(part, directory_flags, dir_fd=current)
+                    descriptors.append(current)
+                file_descriptor = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW, dir_fd=current)
+                descriptors.append(file_descriptor)
+                before = os.fstat(file_descriptor)
+                identity = source.expected_identity
+                actual_identity = (
+                    before.st_dev,
+                    before.st_ino,
+                    before.st_mode,
+                    before.st_size,
+                    before.st_mtime_ns,
+                    before.st_ctime_ns,
+                )
+                expected_identity = (
+                    identity.device,
+                    identity.inode,
+                    identity.mode,
+                    identity.byte_size,
+                    identity.mtime_ns,
+                    identity.ctime_ns,
+                )
+                digest = hashlib.sha256()
+                byte_size = 0
+                while True:
+                    chunk = os.read(file_descriptor, 1024 * 1024)
+                    if not chunk:
+                        break
+                    byte_size += len(chunk)
+                    digest.update(chunk)
+                after = os.fstat(file_descriptor)
+                final_identity = (
+                    after.st_dev,
+                    after.st_ino,
+                    after.st_mode,
+                    after.st_size,
+                    after.st_mtime_ns,
+                )
+                stable_identity = actual_identity[:-1]
+                ctime_is_stable = after.st_ctime_ns == before.st_ctime_ns
+                retained_inode_was_unlinked = after.st_nlink + 1 == before.st_nlink
+                if (
+                    not stat.S_ISREG(before.st_mode)
+                    or actual_identity != expected_identity
+                    or final_identity != stable_identity
+                    or not (ctime_is_stable or retained_inode_was_unlinked)
+                    or byte_size != identity.byte_size
+                    or digest.hexdigest() != source.expected_sha256
+                ):
+                    failure = (
+                        source.resource_id,
+                        source.expected_sha256[:12],
+                        digest.hexdigest()[:12],
+                    )
+            except OSError as caught:
+                _scrub_private_failure(caught)
+                failure = (source.resource_id, None, None)
+            finally:
+                for descriptor in reversed(descriptors):
+                    try:
+                        os.close(descriptor)
+                    except OSError as caught:
+                        _scrub_private_failure(caught)
+                        failure = (source.resource_id, None, None)
+            if failure is not None:
+                return failure
+        return None
+
+    def build(self, spec: WorldSpec, *, build_input: BuildInput | None = None) -> FakeWorld:
         self._ensure_open("session.build")
         if not isinstance(spec, WorldSpec):
             raise ValidationError("build requires a WorldSpec", operation="session.build")
+        if spec.schema_version not in self.descriptor.supported_world_schema_versions:
+            build_input = None
+            raise UnsupportedCapabilityError(
+                "provider does not support the requested World schema",
+                operation="session.build",
+                backend_id=self.descriptor.provider_id,
+                world_id=spec.world_id,
+                details={
+                    "detail_code": WORLD_SCHEMA_UNSUPPORTED,
+                    "requested_schema": spec.schema_version,
+                    "provider_id": self.descriptor.provider_id,
+                    "supported_world_schema_versions": self.descriptor.supported_world_schema_versions,
+                },
+            ) from None
+        if spec.build_resource_manifest_sha256 is None:
+            if build_input is not None:
+                build_input = None
+                raise ValidationError(
+                    "asset-free World cannot receive BuildInput",
+                    operation="session.build",
+                    details={"detail_code": ASSET_DEPENDENCY_INCOMPLETE},
+                ) from None
+        elif type(build_input) is not BuildInput or build_input.manifest.sha256 != spec.build_resource_manifest_sha256:
+            build_input = None
+            raise ValidationError(
+                "World and BuildInput manifest identities do not match",
+                operation="session.build",
+                details={"detail_code": ASSET_DEPENDENCY_INCOMPLETE},
+            ) from None
+        else:
+            source_failure = self._validate_build_sources(build_input)
+            build_input = None
+            if source_failure is not None:
+                resource_id, expected_prefix, actual_prefix = source_failure
+                details: dict[str, object] = {
+                    "detail_code": ASSET_IDENTITY_CHANGED,
+                    "resource_id": resource_id,
+                }
+                if expected_prefix is not None and actual_prefix is not None:
+                    details["expected_sha256_prefix"] = expected_prefix
+                    details["actual_sha256_prefix"] = actual_prefix
+                failure = ValidationError(
+                    "build source identity changed",
+                    operation="session.build",
+                    details=details,
+                )
+                failure._redact_retained_traceback()
+                raise failure from None
         negotiation = self.negotiate(spec.requirements)
         if not negotiation.accepted:
             raise CapabilityNegotiationError(
@@ -828,6 +1036,9 @@ class FakeSession:
                 entity_path=entity_path,
             ) from None
         self._active_world = world
+        self._allocation_count += 1
+        self._world_count += 1
+        self._native_count += 1
         self._state = SessionState.READY
         return world
 
@@ -867,6 +1078,7 @@ class FakeWorld:
 
     def __init__(self, session: FakeSession, spec: WorldSpec, generation: int) -> None:
         self._session = session
+        self._descriptor = session.descriptor
         self._spec = spec
         self._generation = generation
         self._state = WorldState.READY
@@ -936,11 +1148,11 @@ class FakeWorld:
                     kinematic_indices=frozenset(),
                 )
         fingerprint = BuildFingerprint(
-            provider_id=session.descriptor.provider_id,
-            provider_version=session.descriptor.version,
-            contract_version=session.descriptor.contract_version,
+            provider_id=self._descriptor.provider_id,
+            provider_version=self._descriptor.version,
+            contract_version=self._descriptor.contract_version,
             world_digest=spec.digest,
-            capability_digest=session.descriptor.capabilities.digest,
+            capability_digest=self._descriptor.capabilities.digest,
         )
         self._build_report = BuildReport(
             fingerprint=fingerprint,
@@ -1040,7 +1252,7 @@ class FakeWorld:
         effective_parameters: dict[str, object],
         canonical_content_profile: str,
     ) -> str:
-        provider = self._session.descriptor
+        provider = self._descriptor
         record: dict[str, object] = {
             "schema": _FAKE_PLANNING_PROVENANCE_SCHEMA,
             "source": {
@@ -1148,19 +1360,29 @@ class FakeWorld:
             )
 
         if entity.kind is EntityKind.ARTICULATION:
+            scale = entity.scale_xyz[0]
             part_a = PlanningCompoundPart(
                 _planning_id("part", entity.path.value, "body"),
-                PlanningGeometryLocalPose((0.04, -0.03, 0.08), (0.0, 0.0, 0.0, 1.0)),
-                PlanningPrimitiveGeometry(PlanningGeometryRepresentation.BOX, (0.3, 0.2, 0.16)),
+                PlanningGeometryLocalPose(
+                    (0.04 * scale, -0.03 * scale, 0.08 * scale),
+                    (0.0, 0.0, 0.0, 1.0),
+                ),
+                PlanningPrimitiveGeometry(
+                    PlanningGeometryRepresentation.BOX,
+                    tuple(value * scale for value in (0.3, 0.2, 0.16)),
+                ),
             )
             half_angle = math.pi / 8.0
             part_b = PlanningCompoundPart(
                 _planning_id("part", entity.path.value, "column"),
                 PlanningGeometryLocalPose(
-                    (-0.02, 0.05, 0.27),
+                    (-0.02 * scale, 0.05 * scale, 0.27 * scale),
                     (0.0, math.sin(half_angle), 0.0, math.cos(half_angle)),
                 ),
-                PlanningPrimitiveGeometry(PlanningGeometryRepresentation.CYLINDER, (0.05, 0.35)),
+                PlanningPrimitiveGeometry(
+                    PlanningGeometryRepresentation.CYLINDER,
+                    tuple(value * scale for value in (0.05, 0.35)),
+                ),
             )
             articulation_source: dict[str, object] = {
                 "entity_path": path,
@@ -1170,6 +1392,8 @@ class FakeWorld:
             if entity.asset_uri is not None:
                 articulation_source["asset_uri"] = _planning_exact_text(entity.asset_uri, "asset URI")
                 source_kind = "locked-asset-procedural-articulation"
+            if scale != 1.0:
+                articulation_source["scale_xyz"] = entity.scale_xyz
             return descriptor(
                 PlanningGeometryRepresentation.COMPOUND,
                 source_kind=source_kind,
@@ -1196,7 +1420,7 @@ class FakeWorld:
                     operation="planning_scene.preflight",
                     entity_path=entity.path.value,
                 ) from None
-            content, vertex_shape, index_shape = _concave_container_mesh_bytes()
+            content, vertex_shape, index_shape = _concave_container_mesh_bytes(entity.scale_xyz)
             digest = hashlib.sha256(content).hexdigest()
             resource_id = _planning_id("resource", entity.path.value, digest)
             layout = PlanningGeometryResourceLayout(
@@ -1220,6 +1444,7 @@ class FakeWorld:
                 source_kind="locked-asset-uri",
                 source_parameters={
                     "asset_uri": _planning_exact_text(entity.asset_uri, "asset URI"),
+                    **({"scale_xyz": entity.scale_xyz} if entity.scale_xyz != (1.0, 1.0, 1.0) else {}),
                 },
                 cooking_profile="fake-concave-container-triangle-mesh-cooking/v1",
                 effective_shape={
@@ -1234,7 +1459,8 @@ class FakeWorld:
                 content_profile=PlanningGeometryContentProfile.MESH_TRIANGLES_RAW_LE_V1,
                 resource_layout=layout,
             )
-        dimensions = (0.5, 0.5, 0.5) if entity.box is None else entity.box.dimensions_m
+        authored_dimensions = (0.5, 0.5, 0.5) if entity.box is None else entity.box.dimensions_m
+        dimensions = tuple(authored_dimensions[index] * entity.scale_xyz[index] for index in range(3))
         return descriptor(
             PlanningGeometryRepresentation.BOX,
             source_kind="authored-procedural-box",
@@ -1473,6 +1699,7 @@ class FakeWorld:
             entity_joints: list[PlanningJointDescriptor] = []
             for index, (joint_name, joint_id) in enumerate(zip(entity.joint_names, joint_ids, strict=True)):
                 max_effort = entity.joint_effort_limits[index] if entity.joint_effort_limits else None
+                position_unit = entity.joint_position_units[index]
                 entity_joints.append(
                     PlanningJointDescriptor(
                         joint_id,
@@ -1480,10 +1707,10 @@ class FakeWorld:
                         joint_name,
                         link_ids[index],
                         link_ids[index + 1],
-                        PlanningJointType.REVOLUTE,
+                        PlanningJointType.REVOLUTE if position_unit == "rad" else PlanningJointType.PRISMATIC,
                         frame_ids[index],
                         (0.0, 0.0, 1.0),
-                        "rad",
+                        position_unit,
                         None,
                         None,
                         None,
@@ -1523,7 +1750,7 @@ class FakeWorld:
             if geometry is not None:
                 geometries.append(geometry)
         return PlanningSceneCatalog.build(
-            self._session.descriptor.provider_id,
+            self._descriptor.provider_id,
             self.world_id,
             environment_runtime.generation,
             environment_index,
@@ -1750,7 +1977,7 @@ class FakeWorld:
         )
         attachments = self._planning_attachment_values(catalog, sorted_frames)
         state = PlanningSceneState(
-            self._session.descriptor.provider_id,
+            self._descriptor.provider_id,
             self.world_id,
             environment_runtime.generation,
             environment_index,
@@ -1802,7 +2029,7 @@ class FakeWorld:
             ) from None
         state.validate_against(catalog)
         if (
-            state.provider_id != self._session.descriptor.provider_id
+            state.provider_id != self._descriptor.provider_id
             or state.world_id != self.world_id
             or state.environment_index != environment_index
             or state.generation != environment_runtime.generation
@@ -1954,6 +2181,9 @@ class FakeWorld:
     @property
     def build_report(self) -> BuildReport:
         return self._build_report
+
+    def side_effect_snapshot(self) -> FakeSideEffectSnapshot:
+        return self._session.side_effect_snapshot()
 
     def _planning_require_authority(self, operation: str) -> _FakePlanningRuntime:
         runtime = self._planning_runtime
@@ -2291,7 +2521,7 @@ class FakeWorld:
             str(environment_runtime.lease_serial),
         )
         descriptor = PlanningGeometryResourceDescriptor(
-            self._session.descriptor.provider_id,
+            self._descriptor.provider_id,
             self.world_id,
             environment_runtime.generation,
             environment,
@@ -2628,7 +2858,7 @@ class FakeWorld:
             raise LifecycleError(
                 "world is closed",
                 operation=operation,
-                backend_id=self._session.descriptor.provider_id,
+                backend_id=self._descriptor.provider_id,
                 world_id=self.world_id,
                 details={"state": self._state.value},
             )
@@ -2646,12 +2876,12 @@ class FakeWorld:
             raise EntityNotFoundError(
                 "logical entity path does not exist",
                 operation="world.resolve",
-                backend_id=self._session.descriptor.provider_id,
+                backend_id=self._descriptor.provider_id,
                 world_id=self.world_id,
                 entity_path=path.value,
             )
         return EntityHandle(
-            provider_id=self._session.descriptor.provider_id,
+            provider_id=self._descriptor.provider_id,
             session_id=self._session.session_id,
             world_id=self.world_id,
             generation=self.generation,
@@ -2664,7 +2894,7 @@ class FakeWorld:
         if not isinstance(handle, EntityHandle):
             raise StaleHandleError("operation requires an EntityHandle", operation=operation, world_id=self.world_id)
         expected = (
-            self._session.descriptor.provider_id,
+            self._descriptor.provider_id,
             self._session.session_id,
             self.world_id,
             self.generation,
@@ -2676,7 +2906,7 @@ class FakeWorld:
             raise StaleHandleError(
                 "entity handle does not belong to this live world generation",
                 operation=operation,
-                backend_id=self._session.descriptor.provider_id,
+                backend_id=self._descriptor.provider_id,
                 world_id=self.world_id,
                 entity_path=handle.path.value,
                 details={"expected_generation": self.generation, "actual_generation": handle.generation},
@@ -2786,16 +3016,74 @@ class FakeWorld:
             raise CommandError(
                 "command target shape must exactly match selected environments and degrees of freedom",
                 operation="world.apply_articulation_command",
-                backend_id=self._session.descriptor.provider_id,
+                backend_id=self._descriptor.provider_id,
                 world_id=self.world_id,
                 entity_path=entity.path.value,
                 details={"expected_shape": list(expected_shape), "actual_shape": list(command.targets.shape)},
             )
+        base_capability = CapabilityId(f"control.articulation.{command.mode.value}@1")
+        if self._descriptor.capabilities.get(base_capability) is None:
+            raise UnsupportedCapabilityError(
+                "provider does not support the requested articulation command mode",
+                operation="world.apply_articulation_command",
+                backend_id=self._descriptor.provider_id,
+                world_id=self.world_id,
+                entity_path=entity.path.value,
+                details={"capability_id": base_capability.value, "mode": command.mode.value},
+            ) from None
+        position_units = tuple(entity.joint_position_units[index] for index in degrees)
+        unit_by_mode = {
+            CommandMode.POSITION: tuple(position_units),
+            CommandMode.VELOCITY: tuple("rad/s" if unit == "rad" else "m/s" for unit in position_units),
+            CommandMode.EFFORT: tuple("N*m" if unit == "rad" else "N" for unit in position_units),
+        }
+        expected_units = unit_by_mode[command.mode]
+        actual_units = command.target_units
+        if not actual_units and self._spec.schema_version != PHYSICAL_WORLD_SCHEMA_VERSION:
+            actual_units = expected_units
+        if actual_units != expected_units:
+            raise CommandError(
+                "command target units do not match selected articulation axes",
+                operation="world.apply_articulation_command",
+                backend_id=self._descriptor.provider_id,
+                world_id=self.world_id,
+                entity_path=entity.path.value,
+                details={
+                    "detail_code": ARTICULATION_AXIS_UNITS_MISMATCH,
+                    "expected_units": expected_units,
+                    "actual_units": actual_units,
+                },
+            ) from None
+        axis_units_capability = CapabilityId("control.articulation.position.axis-units@1")
+        if (
+            command.mode is CommandMode.POSITION
+            and "m" in expected_units
+            and self._descriptor.capabilities.get(axis_units_capability) is None
+        ):
+            raise UnsupportedCapabilityError(
+                "provider cannot apply metre articulation position targets",
+                operation="world.apply_articulation_command",
+                backend_id=self._descriptor.provider_id,
+                world_id=self.world_id,
+                entity_path=entity.path.value,
+                details={
+                    "detail_code": ARTICULATION_POSITION_AXIS_UNITS_UNSUPPORTED,
+                    "entity_id": entity.path.value,
+                    "mode": command.mode.value,
+                    "capability_id": axis_units_capability.value,
+                },
+            ) from None
         rows = command.targets.rows()
         for row_index, environment in enumerate(environments):
             for column_index, degree in enumerate(degrees):
                 runtime.modes[environment][degree] = command.mode
                 runtime.targets[environment][degree] = float(rows[row_index][column_index])
+        self._session._queue_count += 1
+        self._session._controller_count += 1
+        self._session._motor_count += 1
+        self._session._native_count += 1
+        self._session._command_count += 1
+        self._session._state_mutation_count += 1
 
     def read_articulation(self, handle: EntityHandle) -> ArticulationState:
         self._ensure_ready("world.read_articulation")
@@ -2808,9 +3096,14 @@ class FakeWorld:
             )
         runtime = self._articulations[entity.path]
         return ArticulationState(
+            entity_id=entity.path.value,
+            generation=self.generation,
+            tick=self.tick,
+            joint_names=entity.joint_names,
             joint_positions=ArrayValue.from_rows(runtime.positions),
             joint_velocities=ArrayValue.from_rows(runtime.velocities),
-            tick=self.tick,
+            joint_position_units=entity.joint_position_units,
+            joint_velocity_units=tuple("rad/s" if unit == "rad" else "m/s" for unit in entity.joint_position_units),
         )
 
     def apply_rigid_body_command(self, command: RigidBodyCommand) -> None:
@@ -2832,7 +3125,7 @@ class FakeWorld:
             raise CommandError(
                 "rigid-body command shapes must exactly match selected environments and xyz",
                 operation=operation,
-                backend_id=self._session.descriptor.provider_id,
+                backend_id=self._descriptor.provider_id,
                 world_id=self.world_id,
                 entity_path=entity.path.value,
                 details={
@@ -2919,7 +3212,7 @@ class FakeWorld:
             raise CommandError(
                 "point target shape must exactly match selected environments and points",
                 operation=operation,
-                backend_id=self._session.descriptor.provider_id,
+                backend_id=self._descriptor.provider_id,
                 world_id=self.world_id,
                 entity_path=entity.path.value,
                 details={"expected_shape": list(expected_shape), "actual_shape": list(targets.shape)},
@@ -2929,7 +3222,7 @@ class FakeWorld:
             raise CommandError(
                 "kinematic deformable points only accept position commands",
                 operation=operation,
-                backend_id=self._session.descriptor.provider_id,
+                backend_id=self._descriptor.provider_id,
                 world_id=self.world_id,
                 entity_path=entity.path.value,
                 details={"kinematic_indices": sorted(selected_kinematic), "mode": mode.value},
@@ -3282,7 +3575,7 @@ class FakeWorld:
     def scene_snapshot(self) -> SceneSnapshot:
         self._ensure_ready("world.scene_snapshot")
         return SceneSnapshot(
-            self._session.descriptor.provider_id,
+            self._descriptor.provider_id,
             self.world_id,
             self.generation,
             self._scene_sequence,
@@ -3498,7 +3791,7 @@ class FakePlanningWorld(FakeWorld):
             raise PlanningSceneIncompleteError(
                 "planning-scene native admission failed",
                 operation="planning_scene.preflight",
-                backend_id=session.descriptor.provider_id,
+                backend_id=self._descriptor.provider_id,
                 world_id=spec.world_id,
             ) from None
 

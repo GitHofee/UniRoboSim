@@ -48,6 +48,7 @@ class FormatAwareFakeProvider(FakeProvider):
             FAKE_DESCRIPTOR.version,
             FAKE_DESCRIPTOR.contract_version,
             CapabilitySet((*FAKE_DESCRIPTOR.capabilities, formats)),
+            FAKE_DESCRIPTOR.supported_world_schema_versions,
             FAKE_DESCRIPTOR.metadata,
         )
 

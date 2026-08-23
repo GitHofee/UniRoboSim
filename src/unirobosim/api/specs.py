@@ -9,6 +9,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from ._codec import canonical_json
 from .capabilities import CapabilityId, CapabilityRequirement
 from .errors import ValidationError
 from .frozen import FrozenMap
@@ -28,11 +29,13 @@ LEGACY_WORLD_SCHEMA_VERSION = "unirobosim.world/v0alpha1"
 SOFT_MATTER_WORLD_SCHEMA_VERSION = "unirobosim.world/v0alpha2"
 RIGID_CONTACT_WORLD_SCHEMA_VERSION = "unirobosim.world/v0alpha3"
 WORLD_SCHEMA_VERSION = "unirobosim.world/v0alpha4"
+PHYSICAL_WORLD_SCHEMA_VERSION = "unirobosim.world/v0alpha5"
 SUPPORTED_WORLD_SCHEMA_VERSIONS = (
     LEGACY_WORLD_SCHEMA_VERSION,
     SOFT_MATTER_WORLD_SCHEMA_VERSION,
     RIGID_CONTACT_WORLD_SCHEMA_VERSION,
     WORLD_SCHEMA_VERSION,
+    PHYSICAL_WORLD_SCHEMA_VERSION,
 )
 _WORLD_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 
@@ -445,6 +448,8 @@ class EntitySpec:
     camera: CameraSpec | None = None
     box: BoxGeometrySpec | None = None
     joint_effort_limits: tuple[float, ...] = ()
+    joint_position_units: tuple[str, ...] = ()
+    scale_xyz: tuple[float, float, float] = (1.0, 1.0, 1.0)
 
     def __post_init__(self) -> None:
         if not isinstance(self.path, EntityPath) or not isinstance(self.kind, EntityKind):
@@ -490,6 +495,34 @@ class EntitySpec:
                     "entity_spec.validate",
                     path=str(self.path),
                 )
+            if type(self.joint_position_units) is not tuple:
+                raise _invalid("joint position units must be an immutable tuple", "entity_spec.validate")
+            units = self.joint_position_units or ("rad",) * len(names)
+            if len(units) != len(names) or any(type(unit) is not str or unit not in {"rad", "m"} for unit in units):
+                raise _invalid(
+                    "joint position units must match joint names and use rad or m",
+                    "entity_spec.validate",
+                    path=str(self.path),
+                )
+        else:
+            if self.joint_position_units:
+                raise _invalid("only articulations can declare joint units", "entity_spec.validate")
+            units = ()
+        if (
+            type(self.scale_xyz) is not tuple
+            or len(self.scale_xyz) != 3
+            or any(type(value) is not float or not math.isfinite(value) or value <= 0.0 for value in self.scale_xyz)
+        ):
+            raise _invalid("scale_xyz must be an exact positive finite float 3-tuple", "entity_spec.validate")
+        scale = self.scale_xyz
+        if self.kind not in {EntityKind.RIGID_BODY, EntityKind.ARTICULATION} and scale != (1.0, 1.0, 1.0):
+            raise _invalid("only rigid bodies and articulations can use non-unit scale", "entity_spec.validate")
+        if self.kind is EntityKind.ARTICULATION and not (scale[0] == scale[1] == scale[2]):
+            raise _invalid(
+                "articulation scale must be uniform",
+                "entity_spec.validate",
+                detail_code="ENTITY_SCALE_UNSUPPORTED",
+            )
         if self.box is not None and (
             not isinstance(self.box, BoxGeometrySpec)
             or self.kind is not EntityKind.RIGID_BODY
@@ -556,8 +589,10 @@ class EntitySpec:
         object.__setattr__(self, "joint_names", names)
         object.__setattr__(self, "initial_joint_positions", positions)
         object.__setattr__(self, "joint_effort_limits", effort_limits)
+        object.__setattr__(self, "joint_position_units", units)
+        object.__setattr__(self, "scale_xyz", scale)
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self, schema_version: str = WORLD_SCHEMA_VERSION) -> dict[str, Any]:
         result: dict[str, Any] = {
             "path": self.path.value,
             "kind": self.kind.value,
@@ -566,10 +601,15 @@ class EntitySpec:
                 "orientation_xyzw": list(self.pose.orientation_xyzw),
             },
             "joint_names": list(self.joint_names),
-            "initial_joint_positions_rad": list(self.initial_joint_positions),
             "asset_uri": self.asset_uri,
             "metadata": self.metadata.to_dict(),
         }
+        if schema_version == PHYSICAL_WORLD_SCHEMA_VERSION:
+            result["initial_joint_positions"] = list(self.initial_joint_positions)
+            result["joint_position_units"] = list(self.joint_position_units)
+            result["scale_xyz"] = list(self.scale_xyz)
+        else:
+            result["initial_joint_positions_rad"] = list(self.initial_joint_positions)
         if self.joint_effort_limits:
             result["joint_effort_limits"] = list(self.joint_effort_limits)
         if self.deformable is not None:
@@ -596,6 +636,7 @@ class WorldSpec:
     requirements: tuple[CapabilityRequirement, ...] = field(default_factory=_default_requirements)
     metadata: FrozenMap = field(default_factory=FrozenMap)
     schema_version: str = WORLD_SCHEMA_VERSION
+    build_resource_manifest_sha256: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.world_id, str) or not _WORLD_ID.fullmatch(self.world_id):
@@ -624,10 +665,15 @@ class WorldSpec:
         }
         if self.schema_version == LEGACY_WORLD_SCHEMA_VERSION and any(entity.kind in soft_kinds for entity in entities):
             raise _invalid("v0alpha1 worlds cannot contain soft-matter entities", "world_spec.validate")
-        if self.schema_version != WORLD_SCHEMA_VERSION and any(
+        if self.schema_version not in {WORLD_SCHEMA_VERSION, PHYSICAL_WORLD_SCHEMA_VERSION} and any(
             entity.kind is EntityKind.CAMERA_SENSOR for entity in entities
         ):
-            raise _invalid("only v0alpha4 worlds can contain camera entities", "world_spec.validate")
+            raise _invalid("only v0alpha4/v0alpha5 worlds can contain camera entities", "world_spec.validate")
+        if self.schema_version == WORLD_SCHEMA_VERSION:
+            if any(entity.scale_xyz != (1.0, 1.0, 1.0) for entity in entities):
+                raise _invalid("v0alpha4 worlds require identity scale", "world_spec.validate")
+            if any(unit != "rad" for entity in entities for unit in entity.joint_position_units):
+                raise _invalid("v0alpha4 worlds require radian articulation axes", "world_spec.validate")
         paths = tuple(item.path for item in entities)
         if len(paths) != len(set(paths)):
             raise _invalid("world entity paths must be unique", "world_spec.validate")
@@ -646,14 +692,36 @@ class WorldSpec:
             EntityKind.PARTICLE_FLUID: CapabilityId("state.fluid.particles@1"),
             EntityKind.CAMERA_SENSOR: CapabilityId("sensor.camera@1"),
         }
-        if self.schema_version in {RIGID_CONTACT_WORLD_SCHEMA_VERSION, WORLD_SCHEMA_VERSION}:
+        if self.schema_version in {
+            RIGID_CONTACT_WORLD_SCHEMA_VERSION,
+            WORLD_SCHEMA_VERSION,
+            PHYSICAL_WORLD_SCHEMA_VERSION,
+        }:
             kind_requirements[EntityKind.RIGID_BODY] = CapabilityId("state.rigid_body@1")
-        existing_ids = {item.capability for item in requirements}
+
+        def require(capability: CapabilityId) -> None:
+            nonlocal requirements
+            for index, requirement in enumerate(requirements):
+                if requirement.capability != capability:
+                    continue
+                if not requirement.required:
+                    requirements = (
+                        *requirements[:index],
+                        CapabilityRequirement(
+                            capability,
+                            required=True,
+                            constraints=requirement.constraints,
+                            reason=requirement.reason,
+                        ),
+                        *requirements[index + 1 :],
+                    )
+                return
+            requirements += (CapabilityRequirement(capability),)
+
         for entity in entities:
             capability = kind_requirements.get(entity.kind)
-            if capability is not None and capability not in existing_ids:
-                requirements += (CapabilityRequirement(capability),)
-                existing_ids.add(capability)
+            if capability is not None:
+                require(capability)
             if entity.camera is not None:
                 modality_capabilities = {
                     CameraModality.RGB: CapabilityId("sensor.camera.rgb@1"),
@@ -661,28 +729,47 @@ class WorldSpec:
                 }
                 for modality in entity.camera.modalities:
                     modality_capability = modality_capabilities[modality]
-                    if modality_capability not in existing_ids:
-                        requirements += (CapabilityRequirement(modality_capability),)
-                        existing_ids.add(modality_capability)
-            if (
-                entity.deformable is not None
-                and entity.deformable.self_collision
-                and CapabilityId("physics.deformable.self-collision@1") not in existing_ids
-            ):
+                    require(modality_capability)
+            if entity.deformable is not None and entity.deformable.self_collision:
                 self_collision_capability = CapabilityId("physics.deformable.self-collision@1")
-                requirements += (CapabilityRequirement(self_collision_capability),)
-                existing_ids.add(self_collision_capability)
+                require(self_collision_capability)
+            if self.schema_version == PHYSICAL_WORLD_SCHEMA_VERSION:
+                automatic: tuple[CapabilityId, ...] = ()
+                if entity.kind is EntityKind.RIGID_BODY and entity.scale_xyz != (1.0, 1.0, 1.0):
+                    automatic += (CapabilityId("entity.scale.rigid@1"),)
+                if entity.kind is EntityKind.ARTICULATION:
+                    if entity.scale_xyz != (1.0, 1.0, 1.0):
+                        automatic += (CapabilityId("entity.scale.articulation.uniform@1"),)
+                    if entity.joint_names:
+                        automatic += (CapabilityId("state.articulation.axis-units@1"),)
+                for capability in automatic:
+                    require(capability)
         requirements = tuple(sorted(requirements, key=lambda item: item.capability.value))
         ids = tuple(item.capability for item in requirements)
         if len(ids) != len(set(ids)):
             raise _invalid("world capability requirements must be unique", "world_spec.validate")
         if not isinstance(self.metadata, FrozenMap):
             raise _invalid("world metadata must be a FrozenMap", "world_spec.validate")
+        asset_backed = any(entity.asset_uri is not None for entity in entities)
+        manifest_digest = self.build_resource_manifest_sha256
+        if self.schema_version == PHYSICAL_WORLD_SCHEMA_VERSION:
+            if asset_backed and (
+                type(manifest_digest) is not str or re.fullmatch(r"[0-9a-f]{64}", manifest_digest) is None
+            ):
+                raise _invalid(
+                    "asset-backed v0alpha5 worlds require a build resource manifest digest", "world_spec.validate"
+                )
+            if not asset_backed and manifest_digest is not None:
+                raise _invalid(
+                    "asset-free v0alpha5 worlds cannot name a build resource manifest", "world_spec.validate"
+                )
+        elif manifest_digest is not None:
+            raise _invalid("v0alpha4 worlds cannot name a v0alpha5 build resource manifest", "world_spec.validate")
         object.__setattr__(self, "entities", entities)
         object.__setattr__(self, "requirements", requirements)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        result: dict[str, Any] = {
             "schema_version": self.schema_version,
             "world_id": self.world_id,
             "physics": {
@@ -691,13 +778,18 @@ class WorldSpec:
                 "gravity_m_s2": list(self.physics.gravity_m_s2),
             },
             "environments": {"count": self.environments.count},
-            "entities": [entity.to_dict() for entity in self.entities],
+            "entities": [entity.to_dict(self.schema_version) for entity in self.entities],
             "requirements": [requirement.to_dict() for requirement in self.requirements],
             "metadata": self.metadata.to_dict(),
         }
+        if self.build_resource_manifest_sha256 is not None:
+            result["build_resource_manifest_sha256"] = self.build_resource_manifest_sha256
+        return result
 
     @property
     def canonical_json(self) -> str:
+        if self.schema_version == PHYSICAL_WORLD_SCHEMA_VERSION:
+            return canonical_json(self.to_dict())
         return json.dumps(self.to_dict(), sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
     @property
@@ -712,6 +804,7 @@ class ArticulationCommand:
     targets: ArrayValue
     environment_indices: tuple[int, ...] | None = None
     degree_of_freedom_indices: tuple[int, ...] | None = None
+    target_units: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.handle, EntityHandle) or self.handle.entity_kind is not EntityKind.ARTICULATION:
@@ -734,6 +827,12 @@ class ArticulationCommand:
                 if len(indices) != len(set(indices)):
                     raise _invalid(f"{field_name} must be unique", "command.validate")
                 object.__setattr__(self, field_name, indices)
+        if type(self.target_units) is not tuple or any(
+            type(unit) is not str or unit not in {"rad", "m", "rad/s", "m/s", "N*m", "N"} for unit in self.target_units
+        ):
+            raise _invalid("target_units must be an immutable tuple of physical units", "command.validate")
+        if self.target_units and len(self.target_units) != self.targets.shape[1]:
+            raise _invalid("target_units must match command target columns", "command.validate")
 
 
 @dataclass(frozen=True)

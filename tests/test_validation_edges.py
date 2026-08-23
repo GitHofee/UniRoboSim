@@ -170,6 +170,7 @@ class RegistryValidationEdgeTests(unittest.TestCase):
                     FAKE_DESCRIPTOR.version,
                     FAKE_DESCRIPTOR.contract_version,
                     FAKE_DESCRIPTOR.capabilities,
+                    FAKE_DESCRIPTOR.supported_world_schema_versions,
                 )
 
         mismatch = ProviderRegistry()

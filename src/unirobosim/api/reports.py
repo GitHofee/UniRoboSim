@@ -14,6 +14,7 @@ from .values import ArrayValue, CameraModality, EntityHandle, Tick
 _PROVIDER_ID = re.compile(r"^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$")
 _CONNECTION_MODE = re.compile(r"^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_KNOWN_WORLD_SCHEMAS = frozenset(f"unirobosim.world/v0alpha{version}" for version in range(1, 6))
 
 
 @dataclass(frozen=True)
@@ -23,6 +24,7 @@ class ProviderDescriptor:
     version: str
     contract_version: str
     capabilities: CapabilitySet
+    supported_world_schema_versions: tuple[str, ...]
     metadata: FrozenMap = field(default_factory=FrozenMap)
 
     def __post_init__(self) -> None:
@@ -38,6 +40,21 @@ class ProviderDescriptor:
         if not isinstance(self.capabilities, CapabilitySet):
             raise ValidationError(
                 "provider capabilities must be a CapabilitySet", operation="provider_descriptor.validate"
+            )
+        if type(self.supported_world_schema_versions) is not tuple or not self.supported_world_schema_versions:
+            raise ValidationError(
+                "provider supported World schemas must be a non-empty immutable tuple",
+                operation="provider_descriptor.validate",
+            )
+        schemas = self.supported_world_schema_versions
+        if (
+            any(type(value) is not str or value not in _KNOWN_WORLD_SCHEMAS for value in schemas)
+            or len(schemas) != len(set(schemas))
+            or schemas != tuple(sorted(schemas))
+        ):
+            raise ValidationError(
+                "provider supported World schemas must be unique canonical schema IDs",
+                operation="provider_descriptor.validate",
             )
         if not isinstance(self.metadata, FrozenMap):
             raise ValidationError("provider metadata must be a FrozenMap", operation="provider_descriptor.validate")
@@ -167,19 +184,57 @@ class ResetResult:
 
 @dataclass(frozen=True)
 class ArticulationState:
+    entity_id: str
+    generation: int
+    tick: Tick
+    joint_names: tuple[str, ...]
     joint_positions: ArrayValue
     joint_velocities: ArrayValue
-    tick: Tick
+    joint_position_units: tuple[str, ...]
+    joint_velocity_units: tuple[str, ...]
 
     def __post_init__(self) -> None:
         if (
-            not isinstance(self.joint_positions, ArrayValue)
-            or not isinstance(self.joint_velocities, ArrayValue)
+            type(self.entity_id) is not str
+            or not self.entity_id
+            or type(self.generation) is not int
+            or self.generation <= 0
             or not isinstance(self.tick, Tick)
+            or not isinstance(self.joint_positions, ArrayValue)
+            or not isinstance(self.joint_velocities, ArrayValue)
         ):
             raise ValidationError("articulation state values are invalid", operation="articulation_state.validate")
-        if self.joint_positions.shape != self.joint_velocities.shape:
-            raise ValidationError("articulation state shapes must match", operation="articulation_state.validate")
+        if (
+            type(self.joint_names) is not tuple
+            or not self.joint_names
+            or any(type(name) is not str or not name for name in self.joint_names)
+            or len(self.joint_names) != len(set(self.joint_names))
+        ):
+            raise ValidationError("articulation state joint names are invalid", operation="articulation_state.validate")
+        width = len(self.joint_names)
+        if (
+            self.joint_positions.shape != self.joint_velocities.shape
+            or not self.joint_positions.dtype.startswith("float")
+            or not self.joint_velocities.dtype.startswith("float")
+            or len(self.joint_positions.shape) != 2
+            or self.joint_positions.shape[1] != width
+        ):
+            raise ValidationError(
+                "articulation state shapes must match joint names", operation="articulation_state.validate"
+            )
+        if type(self.joint_position_units) is not tuple or type(self.joint_velocity_units) is not tuple:
+            raise ValidationError(
+                "articulation state units must be immutable tuples", operation="articulation_state.validate"
+            )
+        expected_velocity = tuple("rad/s" if unit == "rad" else "m/s" for unit in self.joint_position_units)
+        if (
+            len(self.joint_position_units) != width
+            or any(type(unit) is not str or unit not in {"rad", "m"} for unit in self.joint_position_units)
+            or self.joint_velocity_units != expected_velocity
+        ):
+            raise ValidationError(
+                "articulation state units do not close its axes", operation="articulation_state.validate"
+            )
 
 
 def _validate_environment_vectors(value: ArrayValue, width: int, name: str, operation: str) -> None:

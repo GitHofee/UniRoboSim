@@ -9,6 +9,15 @@ if TYPE_CHECKING:
     from .frozen import FrozenMap
 
 
+WORLD_SCHEMA_UNSUPPORTED = "WORLD_SCHEMA_UNSUPPORTED"
+ENTITY_SCALE_UNSUPPORTED = "ENTITY_SCALE_UNSUPPORTED"
+ARTICULATION_AXIS_UNITS_MISMATCH = "ARTICULATION_AXIS_UNITS_MISMATCH"
+ARTICULATION_POSITION_AXIS_UNITS_UNSUPPORTED = "ARTICULATION_POSITION_AXIS_UNITS_UNSUPPORTED"
+ASSET_IDENTITY_CHANGED = "ASSET_IDENTITY_CHANGED"
+ASSET_DEPENDENCY_INCOMPLETE = "ASSET_DEPENDENCY_INCOMPLETE"
+NATIVE_PROVENANCE_MISMATCH = "NATIVE_PROVENANCE_MISMATCH"
+
+
 def _detached_planning_text(
     value: object,
     fallback: str,
@@ -61,6 +70,23 @@ class UniRoboSimError(Exception):
     """Base class for every expected public failure."""
 
     code = "unirobosim.error"
+
+    def __getattribute__(self, name: str) -> Any:
+        if name == "__traceback__":
+            try:
+                state = BaseException.__getattribute__(self, "__dict__")
+                redact = type(state) is dict and dict.get(state, "_redact_traceback_on_read") is True
+            except BaseException:
+                redact = False
+            if redact:
+                BaseException.__setattr__(self, "__traceback__", None)
+                return None
+        return BaseException.__getattribute__(self, name)
+
+    def _redact_retained_traceback(self) -> None:
+        """Hide and release a path-bearing boundary traceback on first inspection."""
+
+        self._redact_traceback_on_read = True
 
     def __init__(
         self,

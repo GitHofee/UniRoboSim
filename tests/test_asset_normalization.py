@@ -58,6 +58,7 @@ class NormalizationAwareFakeProvider(FakeProvider):
             FAKE_DESCRIPTOR.version,
             FAKE_DESCRIPTOR.contract_version,
             CapabilitySet((*FAKE_DESCRIPTOR.capabilities, *declarations)),
+            FAKE_DESCRIPTOR.supported_world_schema_versions,
             FAKE_DESCRIPTOR.metadata,
         )
 
@@ -409,6 +410,7 @@ def test_provider_normalization_declaration_is_strict(tmp_path: Path) -> None:
                 FAKE_DESCRIPTOR.version,
                 FAKE_DESCRIPTOR.contract_version,
                 CapabilitySet((*FAKE_DESCRIPTOR.capabilities, formats, declaration)),
+                FAKE_DESCRIPTOR.supported_world_schema_versions,
                 FAKE_DESCRIPTOR.metadata,
             )
 

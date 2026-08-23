@@ -6,6 +6,7 @@ import gzip
 import os
 import tarfile
 import tempfile
+import zipfile
 from pathlib import Path
 from typing import Any, cast
 
@@ -47,7 +48,9 @@ def build_wheel(
     config_settings: dict[str, Any] | None = None,
     metadata_directory: str | None = None,
 ) -> str:
-    return cast(str, _backend().build_wheel(wheel_directory, config_settings, metadata_directory))
+    filename = cast(str, _backend().build_wheel(wheel_directory, config_settings, metadata_directory))
+    _rewrite_wheel(Path(wheel_directory, filename))
+    return filename
 
 
 def build_editable(
@@ -91,8 +94,13 @@ def _rewrite_sdist(path: Path, epoch: int) -> None:
                         member.gname = ""
                         member.mtime = epoch
                         member.pax_headers = {}
+                        if member.isdir():
+                            member.mode = 0o755
+                        elif member.isfile():
+                            member.mode = 0o644
                         archive.addfile(member, None if payload is None else _BytesReader(payload))
         os.replace(temporary, path)
+        path.chmod(0o644)
     finally:
         temporary.unlink(missing_ok=True)
 
@@ -112,6 +120,36 @@ class _BytesReader:
         start = self._offset
         self._offset = min(len(self._payload), start + size)
         return self._payload[start : self._offset]
+
+
+def _rewrite_wheel(path: Path) -> None:
+    members: list[tuple[zipfile.ZipInfo, bytes]] = []
+    with zipfile.ZipFile(path, "r") as source:
+        for member in source.infolist():
+            members.append((member, source.read(member.filename)))
+
+    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    os.close(descriptor)
+    temporary = Path(temporary_name)
+    try:
+        with zipfile.ZipFile(temporary, "w") as archive:
+            for member, payload in members:
+                normalized = zipfile.ZipInfo(member.filename, member.date_time)
+                normalized.compress_type = member.compress_type
+                normalized.comment = member.comment
+                normalized.extra = member.extra
+                normalized.create_system = 3
+                normalized.create_version = member.create_version
+                normalized.extract_version = member.extract_version
+                normalized.flag_bits = member.flag_bits
+                normalized.internal_attr = member.internal_attr
+                mode = 0o40755 if member.is_dir() else 0o100644
+                normalized.external_attr = mode << 16
+                archive.writestr(normalized, payload, compress_type=member.compress_type, compresslevel=6)
+        os.replace(temporary, path)
+        path.chmod(0o644)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def build_sdist(sdist_directory: str, config_settings: dict[str, Any] | None = None) -> str:

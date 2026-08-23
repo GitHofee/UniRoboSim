@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.9.0 - 2026-08-23
+
+- Add the explicit `unirobosim.world/v0alpha5` physical schema while preserving
+  v0alpha4 construction and the complete Core 0.8 Planning API.
+- Add ordered articulation axis units, rigid/articulation scale capability demand,
+  self-closing articulation state, selected-command units and command-time metre
+  capability rejection before side effects.
+- Add canonical `BuildResourceManifest` values and the keyword-only private
+  `BuildInput` source carrier.
+- Add typed Provider World-schema declarations and deterministic wheel/sdist mode
+  normalization across build umasks.
+- Native Isaac Lab, MuJoCo and PyBullet 0.9 adapter acceptance remains unverified in
+  this Core-only release.
+
 ## 0.8.0 - 2026-08-23
 
 - Publish the accepted backend-neutral `planning.scene@2` catalog, state, delta,

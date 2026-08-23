@@ -6,7 +6,7 @@
 
 UniRoboSim 是面向机器人仿真的后端中立互操作层。它定义可移植的场景、生命周期、命令、状态、传感器、资产、调试与场景控制合同，并将原生仿真器 SDK 隔离在独立发布的 Adapter 中。应用和上层框架可以选择仿真后端，而不必让仿真器专用类型扩散到整体架构。
 
-`0.8.0` 是 Core planning-scene v2 发布候选版本。Python 包使用 `0.8.x`，序列化 Runtime/World 合同独立且明确版本化为 `v0alpha4` / `unirobosim.world/v0alpha4`。
+`0.9.0` 在保留已验收 Core 0.8 planning-scene v2 API 的同时新增物理 v0alpha5 World 合同。Python 包使用 `0.9.x`，序列化 World 合同仍独立版本化为 `unirobosim.world/v0alpha4` 与 `unirobosim.world/v0alpha5`。
 
 <img src="assets/readme/unirobosim-architecture.zh-CN.svg" alt="UniRoboSim 架构：应用、FastSim、策略和智能体通过 EasyAPI、MCP、RuntimeAPI 与 Studio 使用可移植合同，并连接到独立仿真器适配器。" width="100%">
 
@@ -19,7 +19,7 @@ UniRoboSim 是面向机器人仿真的后端中立互操作层。它定义可移
 - 原生 SDK 留在 Adapter 后面。尤其是 Isaac Sim，它运行在 worker 进程中，不应该接管应用生命周期。
 - Backend 和资产处理器就是普通 Python 插件。新增 Adapter 不应要求修改 Core。
 
-### 0.8.0 提供的能力
+### 0.9.0 提供的能力
 
 - 刚体位姿/速度、持续 wrench、接触状态和场景位姿写入；
 - 机器人及非机器人铰接体状态与位置/速度/力矩控制；
@@ -88,7 +88,7 @@ git clone https://github.com/GitHofee/UniRoboSim-mcp.git
 python -m pip install ./UniRoboSim-usd-converter ./UniRoboSim-studio ./UniRoboSim-mcp
 ```
 
-可复现部署应固定实际验收过的 Core 与 Adapter 版本组合。此前已验收的 PyBullet 诊断组合仍是 Core `0.7.1` 与 PyBullet Adapter `0.7.1`；在各 Adapter 独立通过闸门前，不声明其与 Core `0.8.0` 候选版本兼容。
+可复现部署应固定实际验收过的 Core 与 Adapter 版本组合。Core 0.9 Adapter 必须声明 `unirobosim>=0.9,<0.10` 及精确支持的 World schema；在各 Adapter 独立通过闸门前，不声明其与 Core `0.9.0` 兼容。
 
 ## 3. EasyAPI：快速使用
 
@@ -314,6 +314,7 @@ DESCRIPTOR = ProviderDescriptor(
             CapabilityDeclaration(CapabilityId("control.rigid_body.wrench@1")),
         )
     ),
+    supported_world_schema_versions=("unirobosim.world/v0alpha4",),
     metadata=FrozenMap({"native_sdk": "1.2.3"}),
 )
 
@@ -339,13 +340,13 @@ def create_provider():
 
 ```toml
 [project]
-dependencies = ["unirobosim>=0.7.1,<0.8"]
+dependencies = ["unirobosim>=0.9,<0.10"]
 
 [project.entry-points."unirobosim.backends"]
 vendor = "unirobosim_vendor:create_provider"
 ```
 
-示例依赖边界有意描述仅验收过 Core 0.7 系列的 Adapter。Adapter 负责人必须先运行原生闸门，才能将其放宽到 Core 0.8。
+该依赖边界描述 Core 0.9 Adapter 版本线。Adapter 必须明确声明实际实现的 World schema，并在发布兼容性声明前通过独立原生闸门。
 
 `VendorSession` 必须实现 `descriptor`、`negotiate()`、`build()`、`close()`；构建出的 `VendorWorld` 必须实现完整基础 `World` Protocol。未声明能力的方法仍须以结构化 `UnsupportedCapabilityError` 失败，不能返回伪造值。
 
@@ -372,4 +373,4 @@ coverage run -m pytest
 coverage report
 ```
 
-0.8.0 Core 发布闸门覆盖完整 Core 测试，以及 Python 3.11 与 3.12 上全新的 source、wheel、sdist 安装。该 Core-only 候选版本的原生 GPU、GUI 与后端 Adapter 验收均为未验证，仍须通过独立 Adapter 闸门。
+0.9.0 Core 发布闸门覆盖完整 Core 测试，以及 Python 3.11 与 3.12 上全新的 source、wheel、sdist 安装。该 Core-only 候选版本的原生 GPU、GUI 与后端 Adapter 验收均为未验证，仍须通过独立 Adapter 闸门。

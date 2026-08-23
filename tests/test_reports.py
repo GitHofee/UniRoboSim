@@ -19,12 +19,13 @@ from unirobosim.testing import FAKE_DESCRIPTOR
 
 class ReportValidationTests(unittest.TestCase):
     def test_provider_and_probe_validation(self) -> None:
-        descriptor = ProviderDescriptor("valid.provider", "Valid", "1", "v1", CapabilitySet())
+        schemas = ("unirobosim.world/v0alpha4",)
+        descriptor = ProviderDescriptor("valid.provider", "Valid", "1", "v1", CapabilitySet(), schemas)
         self.assertEqual(descriptor.provider_id, "valid.provider")
         for args in (
-            ("Invalid Provider", "Valid", "1", "v1", CapabilitySet()),
-            ("valid", "", "1", "v1", CapabilitySet()),
-            ("valid", "Valid", "1", "v1", object()),
+            ("Invalid Provider", "Valid", "1", "v1", CapabilitySet(), schemas),
+            ("valid", "", "1", "v1", CapabilitySet(), schemas),
+            ("valid", "Valid", "1", "v1", object(), schemas),
         ):
             with self.subTest(args=args), self.assertRaises(ValidationError):
                 ProviderDescriptor(*args)  # type: ignore[arg-type]
@@ -32,6 +33,8 @@ class ReportValidationTests(unittest.TestCase):
             ProbeReport(FAKE_DESCRIPTOR, True, details={})  # type: ignore[arg-type]
         with self.assertRaises(ValidationError):
             ProbeReport(FAKE_DESCRIPTOR, "yes")  # type: ignore[arg-type]
+        with self.assertRaises(ValidationError):
+            ProviderDescriptor("valid.provider", "Valid", "1", "v1", CapabilitySet(), ("unirobosim.world/v0alpha99",))
 
     def test_build_fingerprint_and_report_validation(self) -> None:
         digest = "a" * 64
@@ -54,9 +57,30 @@ class ReportValidationTests(unittest.TestCase):
         positions = ArrayValue.from_rows(((0.0, 1.0),))
         velocities = ArrayValue.from_rows(((0.0,),))
         with self.assertRaises(ValidationError):
-            ArticulationState(positions, velocities, tick)
+            ArticulationState("/robot", 1, tick, ("a", "b"), positions, velocities, ("rad", "m"), ("rad/s", "m/s"))
         with self.assertRaises(ValidationError):
-            ArticulationState(positions, positions, object())  # type: ignore[arg-type]
+            ArticulationState(
+                "/robot",
+                1,
+                object(),  # type: ignore[arg-type]
+                ("a", "b"),
+                positions,
+                positions,
+                ("rad", "m"),
+                ("rad/s", "m/s"),
+            )
+        integer_values = ArrayValue((1, 2), (0, 1), dtype="int64")
+        with self.assertRaises(ValidationError):
+            ArticulationState(
+                "/robot",
+                1,
+                tick,
+                ("a", "b"),
+                integer_values,
+                integer_values,
+                ("rad", "m"),
+                ("rad/s", "m/s"),
+            )
 
 
 if __name__ == "__main__":

@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import Protocol, runtime_checkable
 
+from .build import BuildInput
 from .capabilities import CapabilityRequirement, NegotiationReport
 from .debug import DebugBatch, DebugPublishReport
 from .reports import (
@@ -105,7 +106,7 @@ class Session(Protocol):
 
     def negotiate(self, requirements: Iterable[CapabilityRequirement]) -> NegotiationReport: ...
 
-    def build(self, spec: WorldSpec) -> World: ...
+    def build(self, spec: WorldSpec, *, build_input: BuildInput | None = None) -> World: ...
 
     def close(self) -> None: ...
 

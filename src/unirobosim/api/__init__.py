@@ -1,5 +1,14 @@
-"""Stable UniRoboSim 0.8 public API."""
+"""Stable UniRoboSim 0.9 public API."""
 
+from .build import (
+    BUILD_RESOURCE_MANIFEST_SCHEMA_VERSION,
+    BuildInput,
+    BuildLinkDynamics,
+    BuildResourceEntry,
+    BuildResourceManifest,
+    BuildSourceEntry,
+    LocalSourceIdentity,
+)
 from .capabilities import (
     CapabilityDeclaration,
     CapabilityId,
@@ -38,6 +47,13 @@ from .debug import (
 )
 from .diagnostics import RUNTIME_DIAGNOSTICS_CAPABILITY, read_runtime_diagnostics
 from .errors import (
+    ARTICULATION_AXIS_UNITS_MISMATCH,
+    ARTICULATION_POSITION_AXIS_UNITS_UNSUPPORTED,
+    ASSET_DEPENDENCY_INCOMPLETE,
+    ASSET_IDENTITY_CHANGED,
+    ENTITY_SCALE_UNSUPPORTED,
+    NATIVE_PROVENANCE_MISMATCH,
+    WORLD_SCHEMA_UNSUPPORTED,
     AssetConversionError,
     AssetNormalizationError,
     CapabilityNegotiationError,
@@ -146,6 +162,7 @@ from .scene import (
 )
 from .specs import (
     LEGACY_WORLD_SCHEMA_VERSION,
+    PHYSICAL_WORLD_SCHEMA_VERSION,
     RIGID_CONTACT_WORLD_SCHEMA_VERSION,
     SOFT_MATTER_WORLD_SCHEMA_VERSION,
     SUPPORTED_WORLD_SCHEMA_VERSIONS,
@@ -180,14 +197,24 @@ from .values import (
 )
 
 __all__ = [
+    "ARTICULATION_AXIS_UNITS_MISMATCH",
+    "ARTICULATION_POSITION_AXIS_UNITS_UNSUPPORTED",
+    "ASSET_DEPENDENCY_INCOMPLETE",
+    "ASSET_IDENTITY_CHANGED",
     "ArrayOwnership",
     "ArrayValue",
     "ArticulationCommand",
     "ArticulationState",
     "AssetConversionError",
     "AssetNormalizationError",
+    "BUILD_RESOURCE_MANIFEST_SCHEMA_VERSION",
     "BuildFingerprint",
+    "BuildInput",
+    "BuildLinkDynamics",
     "BuildReport",
+    "BuildResourceEntry",
+    "BuildResourceManifest",
+    "BuildSourceEntry",
     "BoxGeometrySpec",
     "CameraModality",
     "CameraSpec",
@@ -228,11 +255,15 @@ __all__ = [
     "EntityPath",
     "EntitySpec",
     "EnvironmentSpec",
+    "ENTITY_SCALE_UNSUPPORTED",
     "FrozenMap",
     "LifecycleError",
+    "LocalSourceIdentity",
     "LEGACY_WORLD_SCHEMA_VERSION",
     "NegotiationReport",
     "NativeWorldDebugSink",
+    "NATIVE_PROVENANCE_MISMATCH",
+    "PHYSICAL_WORLD_SCHEMA_VERSION",
     "PhysicsSpec",
     "ParticleFluidCommand",
     "ParticleFluidSpec",
@@ -338,6 +369,7 @@ __all__ = [
     "UnsupportedCapabilityError",
     "ValidationError",
     "WORLD_SCHEMA_VERSION",
+    "WORLD_SCHEMA_UNSUPPORTED",
     "World",
     "WorldBuildError",
     "WorldSpec",
