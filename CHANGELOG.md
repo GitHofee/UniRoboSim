@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.10.0 - 2026-08-24
+
+- Add `unirobosim.world/v0alpha6`, the unit-scale `composite_scene` container, and
+  capability-gated build-time embedded rigid-body/articulation bindings without
+  changing v0alpha4 or v0alpha5 payloads.
+- Keep composite resource closure digest-pinned through the existing
+  `BuildResourceManifest`/`BuildInput` contract and require both
+  `scene.composite@1` and `entity.embedded-binding@1` before native authoring.
+- Extend EasyAPI and the Fake Reference Backend with compose-once, embedded
+  resolve/state/control/reset/close conformance. Native adapter acceptance remains a
+  separate release gate.
+
 ## 0.9.2 - 2026-08-24
 
 - Add the physical-v0alpha5 `static_scene` entity with one required asset, positive

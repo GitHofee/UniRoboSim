@@ -24,6 +24,7 @@ class EntityKind(StrEnum):
     PARTICLE_FLUID = "particle_fluid"
     CAMERA_SENSOR = "camera_sensor"
     STATIC_SCENE = "static_scene"
+    COMPOSITE_SCENE = "composite_scene"
 
 
 class CameraModality(StrEnum):

@@ -14,7 +14,7 @@ from .values import ArrayValue, CameraModality, EntityHandle, Tick
 _PROVIDER_ID = re.compile(r"^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$")
 _CONNECTION_MODE = re.compile(r"^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
-_KNOWN_WORLD_SCHEMAS = frozenset(f"unirobosim.world/v0alpha{version}" for version in range(1, 6))
+_KNOWN_WORLD_SCHEMAS = frozenset(f"unirobosim.world/v0alpha{version}" for version in range(1, 7))
 
 
 @dataclass(frozen=True)

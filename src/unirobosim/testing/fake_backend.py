@@ -128,6 +128,7 @@ from unirobosim.api.scene import (
     SceneVisualKind,
 )
 from unirobosim.api.specs import (
+    COMPOSITE_WORLD_SCHEMA_VERSION,
     PHYSICAL_WORLD_SCHEMA_VERSION,
     WORLD_SCHEMA_VERSION,
     ArticulationCommand,
@@ -268,6 +269,12 @@ FAKE_CAPABILITIES = CapabilitySet(
         ),
         CapabilityDeclaration(CapabilityId("render.browser-scene@1")),
         CapabilityDeclaration(CapabilityId("scene.static@1")),
+        CapabilityDeclaration(
+            CapabilityId("scene.composite@1"),
+            FrozenMap({"composition": "once-per-environment", "embedded_state": "declared-only"}),
+            limitations=("logical contract oracle; does not parse or simulate USD payloads",),
+        ),
+        CapabilityDeclaration(CapabilityId("entity.embedded-binding@1")),
         CapabilityDeclaration(CapabilityId("entity.scale.rigid@1")),
         CapabilityDeclaration(CapabilityId("entity.scale.articulation.uniform@1")),
         CapabilityDeclaration(CapabilityId("entity.scale.static_scene@1")),
@@ -291,10 +298,14 @@ FAKE_CAPABILITIES = CapabilitySet(
 FAKE_DESCRIPTOR = ProviderDescriptor(
     provider_id="reference.fake",
     display_name="UniRoboSim Fake Reference Backend",
-    version="0.9.2",
-    contract_version="v0alpha5",
+    version="0.10.0",
+    contract_version="v0alpha6",
     capabilities=FAKE_CAPABILITIES,
-    supported_world_schema_versions=(WORLD_SCHEMA_VERSION, PHYSICAL_WORLD_SCHEMA_VERSION),
+    supported_world_schema_versions=(
+        WORLD_SCHEMA_VERSION,
+        PHYSICAL_WORLD_SCHEMA_VERSION,
+        COMPOSITE_WORLD_SCHEMA_VERSION,
+    ),
     metadata=FrozenMap({"purpose": "contract-testing-only"}),
 )
 
@@ -323,6 +334,7 @@ class FakeSideEffectSnapshot:
     native_calls: int
     commands: int
     state_mutations: int
+    composite_compositions: int
 
 
 def _scrub_private_failure(error: BaseException) -> None:
@@ -830,6 +842,7 @@ class FakeSession:
         self._native_count = 0
         self._command_count = 0
         self._state_mutation_count = 0
+        self._composite_composition_count = 0
 
     @property
     def descriptor(self) -> ProviderDescriptor:
@@ -854,6 +867,7 @@ class FakeSession:
             native_calls=self._native_count,
             commands=self._command_count,
             state_mutations=self._state_mutation_count,
+            composite_compositions=self._composite_composition_count,
         )
 
     def _ensure_open(self, operation: str, *, allow_ready: bool = False) -> None:
@@ -1056,6 +1070,9 @@ class FakeSession:
         self._allocation_count += 1
         self._world_count += 1
         self._native_count += 1
+        self._composite_composition_count += sum(
+            spec.environments.count for entity in spec.entities if entity.kind is EntityKind.COMPOSITE_SCENE
+        )
         self._state = SessionState.READY
         return world
 
@@ -1242,7 +1259,7 @@ class FakeWorld:
         return _planning_id("geometry", path, "root")
 
     def _planning_kind(self, entity: EntitySpec) -> PlanningEntityKind:
-        if entity.kind is EntityKind.STATIC_SCENE:
+        if entity.kind in {EntityKind.STATIC_SCENE, EntityKind.COMPOSITE_SCENE}:
             return PlanningEntityKind.OTHER
         explicit = entity.metadata.get("planning_entity_kind")
         if explicit == "robot":
@@ -1254,7 +1271,7 @@ class FakeWorld:
         return PlanningEntityKind.OTHER
 
     def _planning_motion_class(self, entity: EntitySpec) -> PlanningGeometryMotionClass:
-        if entity.kind is EntityKind.STATIC_SCENE:
+        if entity.kind in {EntityKind.STATIC_SCENE, EntityKind.COMPOSITE_SCENE}:
             return PlanningGeometryMotionClass.STATIC
         explicit = entity.metadata.get("planning_motion_class")
         if explicit == "static":
@@ -3095,7 +3112,10 @@ class FakeWorld:
         }
         expected_units = unit_by_mode[command.mode]
         actual_units = command.target_units
-        if not actual_units and self._spec.schema_version != PHYSICAL_WORLD_SCHEMA_VERSION:
+        if not actual_units and self._spec.schema_version not in {
+            PHYSICAL_WORLD_SCHEMA_VERSION,
+            COMPOSITE_WORLD_SCHEMA_VERSION,
+        }:
             actual_units = expected_units
         if actual_units != expected_units:
             raise CommandError(
@@ -3549,11 +3569,11 @@ class FakeWorld:
         return self.tick
 
     def _scene_visual(self, entity: EntitySpec) -> tuple[SceneVisual, ...]:
-        if entity.kind is EntityKind.STATIC_SCENE:
+        if entity.kind in {EntityKind.STATIC_SCENE, EntityKind.COMPOSITE_SCENE}:
             assert entity.asset_uri is not None
             return (
                 SceneVisual(
-                    "static-scene",
+                    entity.kind.value.replace("_", "-"),
                     SceneVisualKind.MESH,
                     asset_uri=entity.asset_uri,
                     metadata=FrozenMap({"scale_xyz": entity.scale_xyz}),

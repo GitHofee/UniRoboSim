@@ -30,18 +30,42 @@ SOFT_MATTER_WORLD_SCHEMA_VERSION = "unirobosim.world/v0alpha2"
 RIGID_CONTACT_WORLD_SCHEMA_VERSION = "unirobosim.world/v0alpha3"
 WORLD_SCHEMA_VERSION = "unirobosim.world/v0alpha4"
 PHYSICAL_WORLD_SCHEMA_VERSION = "unirobosim.world/v0alpha5"
+COMPOSITE_WORLD_SCHEMA_VERSION = "unirobosim.world/v0alpha6"
 SUPPORTED_WORLD_SCHEMA_VERSIONS = (
     LEGACY_WORLD_SCHEMA_VERSION,
     SOFT_MATTER_WORLD_SCHEMA_VERSION,
     RIGID_CONTACT_WORLD_SCHEMA_VERSION,
     WORLD_SCHEMA_VERSION,
     PHYSICAL_WORLD_SCHEMA_VERSION,
+    COMPOSITE_WORLD_SCHEMA_VERSION,
 )
 _WORLD_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+_EMBEDDED_LOGICAL_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]*$")
+_EMBEDDED_PRIM_SEGMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_PHYSICAL_WORLD_SCHEMA_VERSIONS = frozenset((PHYSICAL_WORLD_SCHEMA_VERSION, COMPOSITE_WORLD_SCHEMA_VERSION))
 
 
 def _invalid(message: str, operation: str, **details: object) -> ValidationError:
     return ValidationError(message, operation=operation, details=details)
+
+
+def _embedded_prim_path(value: object, field_name: str) -> str:
+    operation = "embedded_prim_binding.validate"
+    if type(value) is not str or not value or value.startswith("/") or value.endswith("/") or "\\" in value:
+        raise _invalid(
+            f"{field_name} must be a non-empty container-relative Prim path",
+            operation,
+            field=field_name,
+        )
+    segments = value.split("/")
+    if any(segment in {"", ".", ".."} or _EMBEDDED_PRIM_SEGMENT.fullmatch(segment) is None for segment in segments):
+        raise _invalid(
+            f"{field_name} must be canonical and traversal-free",
+            operation,
+            field=field_name,
+            value=value,
+        )
+    return value
 
 
 @dataclass(frozen=True)
@@ -469,6 +493,79 @@ class ParticleFluidSpec:
 
 
 @dataclass(frozen=True)
+class EmbeddedPrimBinding:
+    """One logical link or joint bound to a composed, container-relative USD Prim."""
+
+    logical_name: str
+    relative_prim_path: str
+
+    def __post_init__(self) -> None:
+        if type(self.logical_name) is not str or _EMBEDDED_LOGICAL_NAME.fullmatch(self.logical_name) is None:
+            raise _invalid(
+                "embedded Prim logical_name is invalid",
+                "embedded_prim_binding.validate",
+                logical_name=self.logical_name,
+            )
+        object.__setattr__(
+            self,
+            "relative_prim_path",
+            _embedded_prim_path(self.relative_prim_path, "relative_prim_path"),
+        )
+
+    def to_dict(self) -> dict[str, str]:
+        return {
+            "logical_name": self.logical_name,
+            "relative_prim_path": self.relative_prim_path,
+        }
+
+
+@dataclass(frozen=True)
+class EmbeddedEntityBinding:
+    """Build-time logical view into physics Prims composed by one scene container."""
+
+    container_path: EntityPath
+    root_body_prim_path: str
+    link_prims: tuple[EmbeddedPrimBinding, ...]
+    joint_prims: tuple[EmbeddedPrimBinding, ...] = ()
+
+    def __post_init__(self) -> None:
+        operation = "embedded_entity_binding.validate"
+        if not isinstance(self.container_path, EntityPath):
+            raise _invalid("embedded binding container_path must be an EntityPath", operation)
+        object.__setattr__(
+            self,
+            "root_body_prim_path",
+            _embedded_prim_path(self.root_body_prim_path, "root_body_prim_path"),
+        )
+        if type(self.link_prims) is not tuple or not self.link_prims:
+            raise _invalid("embedded binding requires a non-empty immutable link_prims tuple", operation)
+        if type(self.joint_prims) is not tuple:
+            raise _invalid("embedded binding joint_prims must be an immutable tuple", operation)
+        if any(type(item) is not EmbeddedPrimBinding for item in (*self.link_prims, *self.joint_prims)):
+            raise _invalid("embedded binding contains an invalid Prim binding", operation)
+        for field_name, bindings in (("link_prims", self.link_prims), ("joint_prims", self.joint_prims)):
+            logical_names = tuple(item.logical_name for item in bindings)
+            prim_paths = tuple(item.relative_prim_path for item in bindings)
+            if len(logical_names) != len(set(logical_names)):
+                raise _invalid(f"{field_name} logical names must be unique", operation)
+            if len(prim_paths) != len(set(prim_paths)):
+                raise _invalid(f"{field_name} Prim paths must be unique", operation)
+        all_prim_paths = tuple(item.relative_prim_path for item in (*self.link_prims, *self.joint_prims))
+        if len(all_prim_paths) != len(set(all_prim_paths)):
+            raise _invalid("link and joint Prim paths must not overlap", operation)
+        if self.root_body_prim_path not in {item.relative_prim_path for item in self.link_prims}:
+            raise _invalid("root_body_prim_path must name one declared link Prim", operation)
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "container_path": self.container_path.value,
+            "root_body_prim_path": self.root_body_prim_path,
+            "link_prims": [item.to_dict() for item in self.link_prims],
+            "joint_prims": [item.to_dict() for item in self.joint_prims],
+        }
+
+
+@dataclass(frozen=True)
 class EntitySpec:
     path: EntityPath
     kind: EntityKind
@@ -485,6 +582,7 @@ class EntitySpec:
     joint_position_units: tuple[str, ...] = ()
     scale_xyz: tuple[float, float, float] = (1.0, 1.0, 1.0)
     mount: CameraMountSpec | None = None
+    embedded_binding: EmbeddedEntityBinding | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.path, EntityPath) or not isinstance(self.kind, EntityKind):
@@ -550,11 +648,22 @@ class EntitySpec:
         ):
             raise _invalid("scale_xyz must be an exact positive finite float 3-tuple", "entity_spec.validate")
         scale = self.scale_xyz
-        scalable_kinds = {EntityKind.RIGID_BODY, EntityKind.ARTICULATION, EntityKind.STATIC_SCENE}
+        scalable_kinds = {
+            EntityKind.RIGID_BODY,
+            EntityKind.ARTICULATION,
+            EntityKind.STATIC_SCENE,
+            EntityKind.COMPOSITE_SCENE,
+        }
         if self.kind not in scalable_kinds and scale != (1.0, 1.0, 1.0):
             raise _invalid(
-                "only rigid bodies, articulations, and static scenes can use non-unit scale",
+                "only rigid bodies, articulations, static scenes, and composite scenes can use non-unit scale",
                 "entity_spec.validate",
+            )
+        if self.kind is EntityKind.COMPOSITE_SCENE and scale != (1.0, 1.0, 1.0):
+            raise _invalid(
+                "the composite-scene v1 profile requires unit scale",
+                "entity_spec.validate",
+                detail_code="ENTITY_SCALE_UNSUPPORTED",
             )
         if self.kind is EntityKind.ARTICULATION and not (scale[0] == scale[1] == scale[2]):
             raise _invalid(
@@ -617,14 +726,35 @@ class EntitySpec:
                 )
         elif self.deformable is not None or self.particle_fluid is not None or self.camera is not None:
             raise _invalid(
-                "rigid/articulation/static-scene entities cannot contain soft-matter or camera specs",
+                "rigid/articulation/scene entities cannot contain soft-matter or camera specs",
                 "entity_spec.validate",
                 path=str(self.path),
             )
         if self.asset_uri is not None and (not isinstance(self.asset_uri, str) or not self.asset_uri.strip()):
             raise _invalid("asset URI must be a non-empty string", "entity_spec.validate", path=str(self.path))
-        if self.kind is EntityKind.STATIC_SCENE and self.asset_uri is None:
-            raise _invalid("static-scene entities require an asset URI", "entity_spec.validate", path=str(self.path))
+        if self.kind in {EntityKind.STATIC_SCENE, EntityKind.COMPOSITE_SCENE} and self.asset_uri is None:
+            raise _invalid("scene-container entities require an asset URI", "entity_spec.validate", path=str(self.path))
+        binding = self.embedded_binding
+        if binding is not None:
+            if not isinstance(binding, EmbeddedEntityBinding):
+                raise _invalid("entity embedded_binding must be an EmbeddedEntityBinding", "entity_spec.validate")
+            if self.kind not in {EntityKind.RIGID_BODY, EntityKind.ARTICULATION}:
+                raise _invalid("only rigid bodies and articulations can be embedded", "entity_spec.validate")
+            if self.asset_uri is not None:
+                raise _invalid("embedded entities cannot declare an asset URI", "entity_spec.validate")
+            if self.box is not None:
+                raise _invalid("embedded entities cannot declare procedural geometry", "entity_spec.validate")
+            bound_joint_names = tuple(item.logical_name for item in binding.joint_prims)
+            if self.kind is EntityKind.ARTICULATION and bound_joint_names != names:
+                raise _invalid(
+                    "embedded articulation joint bindings must exactly match joint_names order",
+                    "entity_spec.validate",
+                    path=str(self.path),
+                )
+            if self.kind is EntityKind.RIGID_BODY and binding.joint_prims:
+                raise _invalid("embedded rigid bodies cannot declare joint Prim bindings", "entity_spec.validate")
+            if self.kind is EntityKind.RIGID_BODY and len(binding.link_prims) != 1:
+                raise _invalid("embedded rigid bodies require exactly one link Prim binding", "entity_spec.validate")
         if self.mount is not None and not isinstance(self.mount, CameraMountSpec):
             raise _invalid("entity mount must be a CameraMountSpec", "entity_spec.validate", path=str(self.path))
         if self.kind is not EntityKind.CAMERA_SENSOR and self.mount is not None:
@@ -649,7 +779,7 @@ class EntitySpec:
             "asset_uri": self.asset_uri,
             "metadata": self.metadata.to_dict(),
         }
-        if schema_version == PHYSICAL_WORLD_SCHEMA_VERSION:
+        if schema_version in _PHYSICAL_WORLD_SCHEMA_VERSIONS:
             result["initial_joint_positions"] = list(self.initial_joint_positions)
             result["joint_position_units"] = list(self.joint_position_units)
             result["scale_xyz"] = list(self.scale_xyz)
@@ -667,6 +797,8 @@ class EntitySpec:
             result["camera"] = self.camera.to_dict()
         if self.box is not None:
             result["box"] = self.box.to_dict()
+        if self.embedded_binding is not None:
+            result["embedded_binding"] = self.embedded_binding.to_dict()
         return result
 
 
@@ -706,10 +838,13 @@ class WorldSpec:
             raise _invalid("world must contain EntitySpec values", "world_spec.validate")
         entities = tuple(sorted(raw_entities, key=lambda item: item.path.value))
         static_scenes = tuple(entity for entity in entities if entity.kind is EntityKind.STATIC_SCENE)
-        if static_scenes and self.schema_version != PHYSICAL_WORLD_SCHEMA_VERSION:
-            raise _invalid("only v0alpha5 worlds can contain static-scene entities", "world_spec.validate")
-        if len(static_scenes) > 1:
-            raise _invalid("world can contain at most one static-scene entity", "world_spec.validate")
+        composite_scenes = tuple(entity for entity in entities if entity.kind is EntityKind.COMPOSITE_SCENE)
+        if static_scenes and self.schema_version not in _PHYSICAL_WORLD_SCHEMA_VERSIONS:
+            raise _invalid("only v0alpha5/v0alpha6 worlds can contain static-scene entities", "world_spec.validate")
+        if composite_scenes and self.schema_version != COMPOSITE_WORLD_SCHEMA_VERSION:
+            raise _invalid("only v0alpha6 worlds can contain composite-scene entities", "world_spec.validate")
+        if len(static_scenes) + len(composite_scenes) > 1:
+            raise _invalid("world can contain at most one scene-container entity", "world_spec.validate")
         soft_kinds = {
             EntityKind.SURFACE_DEFORMABLE,
             EntityKind.VOLUME_DEFORMABLE,
@@ -717,10 +852,14 @@ class WorldSpec:
         }
         if self.schema_version == LEGACY_WORLD_SCHEMA_VERSION and any(entity.kind in soft_kinds for entity in entities):
             raise _invalid("v0alpha1 worlds cannot contain soft-matter entities", "world_spec.validate")
-        if self.schema_version not in {WORLD_SCHEMA_VERSION, PHYSICAL_WORLD_SCHEMA_VERSION} and any(
+        if self.schema_version not in {
+            WORLD_SCHEMA_VERSION,
+            PHYSICAL_WORLD_SCHEMA_VERSION,
+            COMPOSITE_WORLD_SCHEMA_VERSION,
+        } and any(
             entity.kind is EntityKind.CAMERA_SENSOR for entity in entities
         ):
-            raise _invalid("only v0alpha4/v0alpha5 worlds can contain camera entities", "world_spec.validate")
+            raise _invalid("only v0alpha4/v0alpha5/v0alpha6 worlds can contain camera entities", "world_spec.validate")
         if self.schema_version == WORLD_SCHEMA_VERSION:
             if any(entity.scale_xyz != (1.0, 1.0, 1.0) for entity in entities):
                 raise _invalid("v0alpha4 worlds require identity scale", "world_spec.validate")
@@ -730,8 +869,8 @@ class WorldSpec:
         if len(paths) != len(set(paths)):
             raise _invalid("world entity paths must be unique", "world_spec.validate")
         mounted_cameras = tuple(entity for entity in entities if entity.mount is not None)
-        if mounted_cameras and self.schema_version != PHYSICAL_WORLD_SCHEMA_VERSION:
-            raise _invalid("only v0alpha5 worlds can contain mounted cameras", "world_spec.validate")
+        if mounted_cameras and self.schema_version not in _PHYSICAL_WORLD_SCHEMA_VERSIONS:
+            raise _invalid("only v0alpha5/v0alpha6 worlds can contain mounted cameras", "world_spec.validate")
         entity_by_path = {entity.path: entity for entity in entities}
         for camera_entity in mounted_cameras:
             mount = camera_entity.mount
@@ -766,6 +905,42 @@ class WorldSpec:
                     parent_path=mount.parent_path.value,
                     parent_link_name=mount.parent_link_name,
                 )
+        embedded_entities = tuple(entity for entity in entities if entity.embedded_binding is not None)
+        if embedded_entities and self.schema_version != COMPOSITE_WORLD_SCHEMA_VERSION:
+            raise _invalid("only v0alpha6 worlds can contain embedded entities", "world_spec.validate")
+        claimed_prim_paths: dict[tuple[EntityPath, str], EntityPath] = {}
+        for embedded_entity in embedded_entities:
+            binding = embedded_entity.embedded_binding
+            assert binding is not None
+            container = entity_by_path.get(binding.container_path)
+            if container is None or container.kind is not EntityKind.COMPOSITE_SCENE:
+                raise _invalid(
+                    "embedded entity container must name the World composite scene",
+                    "world_spec.validate",
+                    path=embedded_entity.path.value,
+                    container_path=binding.container_path.value,
+                )
+            prefix = f"{container.path.value}/"
+            if not embedded_entity.path.value.startswith(prefix):
+                raise _invalid(
+                    "embedded entity logical path must be strictly below its container path",
+                    "world_spec.validate",
+                    path=embedded_entity.path.value,
+                    container_path=container.path.value,
+                )
+            prim_paths = tuple(item.relative_prim_path for item in (*binding.link_prims, *binding.joint_prims))
+            for prim_path in prim_paths:
+                key = (container.path, prim_path)
+                previous_owner = claimed_prim_paths.get(key)
+                if previous_owner is not None:
+                    raise _invalid(
+                        "embedded Prim path is claimed by more than one logical entity",
+                        "world_spec.validate",
+                        prim_path=prim_path,
+                        first_path=previous_owner.value,
+                        second_path=embedded_entity.path.value,
+                    )
+                claimed_prim_paths[key] = embedded_entity.path
         if any(not isinstance(item, CapabilityRequirement) for item in raw_requirements):
             raise _invalid("world requirements contain an invalid value", "world_spec.validate")
         requirements = tuple(raw_requirements)
@@ -781,11 +956,13 @@ class WorldSpec:
             EntityKind.PARTICLE_FLUID: CapabilityId("state.fluid.particles@1"),
             EntityKind.CAMERA_SENSOR: CapabilityId("sensor.camera@1"),
             EntityKind.STATIC_SCENE: CapabilityId("scene.static@1"),
+            EntityKind.COMPOSITE_SCENE: CapabilityId("scene.composite@1"),
         }
         if self.schema_version in {
             RIGID_CONTACT_WORLD_SCHEMA_VERSION,
             WORLD_SCHEMA_VERSION,
             PHYSICAL_WORLD_SCHEMA_VERSION,
+            COMPOSITE_WORLD_SCHEMA_VERSION,
         }:
             kind_requirements[EntityKind.RIGID_BODY] = CapabilityId("state.rigid_body@1")
 
@@ -812,6 +989,8 @@ class WorldSpec:
             capability = kind_requirements.get(entity.kind)
             if capability is not None:
                 require(capability)
+            if entity.embedded_binding is not None:
+                require(CapabilityId("entity.embedded-binding@1"))
             if entity.camera is not None:
                 modality_capabilities = {
                     CameraModality.RGB: CapabilityId("sensor.camera.rgb@1"),
@@ -824,7 +1003,7 @@ class WorldSpec:
             if entity.deformable is not None and entity.deformable.self_collision:
                 self_collision_capability = CapabilityId("physics.deformable.self-collision@1")
                 require(self_collision_capability)
-            if self.schema_version == PHYSICAL_WORLD_SCHEMA_VERSION:
+            if self.schema_version in _PHYSICAL_WORLD_SCHEMA_VERSIONS:
                 automatic: tuple[CapabilityId, ...] = ()
                 if entity.kind is EntityKind.RIGID_BODY and entity.scale_xyz != (1.0, 1.0, 1.0):
                     automatic += (CapabilityId("entity.scale.rigid@1"),)
@@ -845,16 +1024,16 @@ class WorldSpec:
             raise _invalid("world metadata must be a FrozenMap", "world_spec.validate")
         asset_backed = any(entity.asset_uri is not None for entity in entities)
         manifest_digest = self.build_resource_manifest_sha256
-        if self.schema_version == PHYSICAL_WORLD_SCHEMA_VERSION:
+        if self.schema_version in _PHYSICAL_WORLD_SCHEMA_VERSIONS:
             if asset_backed and (
                 type(manifest_digest) is not str or re.fullmatch(r"[0-9a-f]{64}", manifest_digest) is None
             ):
                 raise _invalid(
-                    "asset-backed v0alpha5 worlds require a build resource manifest digest", "world_spec.validate"
+                    "asset-backed physical worlds require a build resource manifest digest", "world_spec.validate"
                 )
             if not asset_backed and manifest_digest is not None:
                 raise _invalid(
-                    "asset-free v0alpha5 worlds cannot name a build resource manifest", "world_spec.validate"
+                    "asset-free physical worlds cannot name a build resource manifest", "world_spec.validate"
                 )
         elif manifest_digest is not None:
             raise _invalid("v0alpha4 worlds cannot name a v0alpha5 build resource manifest", "world_spec.validate")
@@ -881,7 +1060,7 @@ class WorldSpec:
 
     @property
     def canonical_json(self) -> str:
-        if self.schema_version == PHYSICAL_WORLD_SCHEMA_VERSION:
+        if self.schema_version in _PHYSICAL_WORLD_SCHEMA_VERSIONS:
             return canonical_json(self.to_dict())
         return json.dumps(self.to_dict(), sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 

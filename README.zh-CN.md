@@ -6,7 +6,7 @@
 
 UniRoboSim 是面向机器人仿真的后端中立互操作层。它定义可移植的场景、生命周期、命令、状态、传感器、资产、调试与场景控制合同，并将原生仿真器 SDK 隔离在独立发布的 Adapter 中。应用和上层框架可以选择仿真后端，而不必让仿真器专用类型扩散到整体架构。
 
-`0.9.2` 在保留既有未挂载 World payload 与已验收 planning-scene v2 API 的同时，为物理 v0alpha5 新增静态场景、类型化相机挂载与法线通道。Python 包使用 `0.9.x`，序列化 World 合同仍独立版本化为 `unirobosim.world/v0alpha4` 与 `unirobosim.world/v0alpha5`。
+`0.10.0` 新增 v0alpha6 复合场景合同，用于一个 USD 资产同时包含静态建筑、刚体和铰接机构的情况。显式声明的嵌入实体继续使用普通状态与控制 API，且不会再次组合源资产。既有 v0alpha4 与 v0alpha5 payload 的字节级含义保持不变。
 
 <img src="assets/readme/unirobosim-architecture.zh-CN.svg" alt="UniRoboSim 架构：应用、FastSim、策略和智能体通过 EasyAPI、MCP、RuntimeAPI 与 Studio 使用可移植合同，并连接到独立仿真器适配器。" width="100%">
 
@@ -19,12 +19,13 @@ UniRoboSim 是面向机器人仿真的后端中立互操作层。它定义可移
 - 原生 SDK 留在 Adapter 后面。尤其是 Isaac Sim，它运行在 worker 进程中，不应该接管应用生命周期。
 - Backend 和资产处理器就是普通 Python 插件。新增 Adapter 不应要求修改 Core。
 
-### 0.9 提供的能力
+### 0.10 提供的能力
 
 - 刚体位姿/速度、持续 wrench、接触状态和场景位姿写入；
 - 机器人及非机器人铰接体状态与位置/速度/力矩控制；
 - 表面/体积柔性体与固定粒子数流体合同；
 - physical-v0alpha5 静态场景资产与类型化 parent-local 相机挂载；
+- v0alpha6 混合物理复合场景与构建期嵌入刚体/铰接体绑定；
 - RGB/深度/法线相机合同；
 - 通过 `ArrayValue.to_bytes()` 读取紧凑 RGB 字节，且不改变传感器 shape 与 dtype；
 - 点、线、坐标轴、文本、包围盒和轨迹调试图元；
@@ -90,7 +91,7 @@ git clone https://github.com/GitHofee/UniRoboSim-mcp.git
 python -m pip install ./UniRoboSim-usd-converter ./UniRoboSim-studio ./UniRoboSim-mcp
 ```
 
-可复现部署应固定实际验收过的 Core 与 Adapter 版本组合。Core 0.9 Adapter 必须声明 `unirobosim>=0.9,<0.10` 及精确支持的 World schema；在各 Adapter 独立通过闸门前，不声明其与 Core `0.9.0` 兼容。
+可复现部署应固定实际验收过的 Core 与 Adapter 版本组合。Core 0.10 Adapter 必须声明 `unirobosim>=0.10,<0.11` 及精确支持的 World schema。Provider 在通过复合场景原生闸门前不得声明支持 v0alpha6。
 
 ## 3. EasyAPI：快速使用
 
@@ -154,6 +155,34 @@ with Sim(provider=FakeProvider()) as sim:
 ```
 
 Fake Backend 用于验证合同和生命周期，其确定性单位质量点规则不代表真实物理精度。
+
+### 复合 USD 场景
+
+`COMPOSITE_SCENE` 与不可变的 `STATIC_SCENE` 是两种不同合同。v0alpha6 World
+只组合一次混合物理 USD，然后把声明过的逻辑实体绑定到既有的容器相对
+Prim。`Sim.start(build_input=...)` 必须接收完整且摘要固定的 `BuildInput`；
+每一个会被读取的本地 layer、mesh 和 texture 都应进入既有
+`BuildResourceManifest` 依赖图。
+
+```python
+scene = sim.add_composite_scene("room", asset_uri="assets/room.usd")
+door = sim.add_embedded_articulation(
+    "cabinet_door",                       # 逻辑路径为 /room/cabinet_door
+    container=scene,
+    root_body_prim_path="root/cabinet/base",
+    link_prims={
+        "base": "root/cabinet/base",
+        "door": "root/cabinet/door",
+    },
+    joint_prims={"hinge": "root/cabinet/hinge"},
+)
+sim.start(build_input=locked_build_input)  # 由资产/编译层提供
+door.command((0.7,))
+```
+
+绑定中的 Prim path 均相对于组合容器，不能使用绝对路径或路径穿越片段。
+MuJoCo 与 PyBullet 在各自 Provider 明确实现 `scene.composite@1` 和
+`entity.embedded-binding@1` 前会拒绝该 profile。
 
 ### 资产
 
@@ -342,13 +371,13 @@ def create_provider():
 
 ```toml
 [project]
-dependencies = ["unirobosim>=0.9,<0.10"]
+dependencies = ["unirobosim>=0.10,<0.11"]
 
 [project.entry-points."unirobosim.backends"]
 vendor = "unirobosim_vendor:create_provider"
 ```
 
-该依赖边界描述 Core 0.9 Adapter 版本线。Adapter 必须明确声明实际实现的 World schema，并在发布兼容性声明前通过独立原生闸门。
+该依赖边界描述 Core 0.10 Adapter 版本线。Adapter 必须明确声明实际实现的 World schema，并在发布兼容性声明前通过独立原生闸门。
 
 `VendorSession` 必须实现 `descriptor`、`negotiate()`、`build()`、`close()`；构建出的 `VendorWorld` 必须实现完整基础 `World` Protocol。未声明能力的方法仍须以结构化 `UnsupportedCapabilityError` 失败，不能返回伪造值。
 
@@ -375,4 +404,4 @@ coverage run -m pytest
 coverage report
 ```
 
-0.9.0 Core 发布闸门覆盖完整 Core 测试，以及 Python 3.11 与 3.12 上全新的 source、wheel、sdist 安装。该 Core-only 候选版本的原生 GPU、GUI 与后端 Adapter 验收均为未验证，仍须通过独立 Adapter 闸门。
+0.10.0 Core 发布闸门覆盖完整 Core 测试，以及 Python 3.11 与 3.12 上全新的 source、wheel、sdist 安装。原生 GPU、GUI 与后端 Adapter 验收仍须通过独立 Adapter 闸门。

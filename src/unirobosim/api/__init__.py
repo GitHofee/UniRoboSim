@@ -1,4 +1,4 @@
-"""Stable UniRoboSim 0.9 public API."""
+"""Stable UniRoboSim 0.10 public API."""
 
 from .build import (
     BUILD_RESOURCE_MANIFEST_SCHEMA_VERSION,
@@ -161,6 +161,7 @@ from .scene import (
     SceneVisualKind,
 )
 from .specs import (
+    COMPOSITE_WORLD_SCHEMA_VERSION,
     LEGACY_WORLD_SCHEMA_VERSION,
     PHYSICAL_WORLD_SCHEMA_VERSION,
     RIGID_CONTACT_WORLD_SCHEMA_VERSION,
@@ -173,6 +174,8 @@ from .specs import (
     CameraSpec,
     DeformableBodySpec,
     DeformableCommand,
+    EmbeddedEntityBinding,
+    EmbeddedPrimBinding,
     EntitySpec,
     EnvironmentSpec,
     ParticleFluidCommand,
@@ -229,6 +232,7 @@ __all__ = [
     "CapabilitySet",
     "CommandError",
     "CommandMode",
+    "COMPOSITE_WORLD_SCHEMA_VERSION",
     "ContactState",
     "DeformableBodySpec",
     "DeformableCommand",
@@ -257,6 +261,8 @@ __all__ = [
     "EntityNotFoundError",
     "EntityPath",
     "EntitySpec",
+    "EmbeddedEntityBinding",
+    "EmbeddedPrimBinding",
     "EnvironmentSpec",
     "ENTITY_SCALE_UNSUPPORTED",
     "FrozenMap",

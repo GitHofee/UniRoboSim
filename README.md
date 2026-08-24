@@ -6,7 +6,7 @@
 
 UniRoboSim is a backend-neutral interoperability layer for robotics simulation. It defines portable scene, lifecycle, command, state, sensor, asset, debug, and scene-control contracts while keeping native simulator SDKs in independently packaged adapters. Applications and upper-layer frameworks can select a backend without propagating simulator-specific types through their architecture.
 
-Version `0.9.2` adds physical-v0alpha5 static scenes, typed camera mounts, and camera normals while preserving existing unmounted World payloads and the accepted planning-scene v2 API. Python packages use `0.9.x`; serialized World contracts remain independently versioned as `unirobosim.world/v0alpha4` and `unirobosim.world/v0alpha5`.
+Version `0.10.0` adds the v0alpha6 composite-scene contract for one USD asset that contains static architecture, rigid bodies, and jointed mechanisms. Declared embedded entities use the ordinary state and command APIs without composing the source asset again. Existing v0alpha4 and v0alpha5 payloads retain their byte-level meaning.
 
 <img src="assets/readme/unirobosim-architecture.svg" alt="UniRoboSim architecture: applications, FastSim, policies and agents use EasyAPI, RuntimeAPI, MCP and Studio; portable contracts connect them to independent simulator adapters." width="100%">
 
@@ -19,12 +19,13 @@ Version `0.9.2` adds physical-v0alpha5 static scenes, typed camera mounts, and c
 - Native SDKs remain behind adapters. In particular, Isaac Sim runs in a worker process because its lifecycle should not own the application.
 - Backends and asset processors are ordinary Python plugins. A new adapter should not require a Core patch.
 
-### What 0.9 provides
+### What 0.10 provides
 
 - rigid pose/twist, persistent wrench control, contact state, and scene pose writes;
 - robot and non-robot articulation state plus position/velocity/effort commands;
 - surface/volume deformable and fixed-count particle-fluid contracts;
 - physical-v0alpha5 static-scene assets and typed parent-local camera mounts;
+- v0alpha6 mixed-physics composite scenes and build-time embedded rigid/articulation bindings;
 - RGB/depth/normals camera contracts;
 - compact RGB byte access through `ArrayValue.to_bytes()` without changing sensor shapes or dtypes;
 - point, line, axes, text, bounding-box, and trajectory debug primitives;
@@ -90,7 +91,7 @@ git clone https://github.com/GitHofee/UniRoboSim-mcp.git
 python -m pip install ./UniRoboSim-usd-converter ./UniRoboSim-studio ./UniRoboSim-mcp
 ```
 
-For reproducible deployments, pin the exact Core and adapter pair that was tested. Core 0.9 adapters must declare `unirobosim>=0.9,<0.10` and their exact supported World schemas. No native adapter compatibility with Core `0.9.0` is claimed until each adapter passes its independent gate.
+For reproducible deployments, pin the exact Core and adapter pair that was tested. Core 0.10 adapters must declare `unirobosim>=0.10,<0.11` and their exact supported World schemas. A provider must not list v0alpha6 until it passes the composite-scene native gate.
 
 ## 3. EasyAPI: quick start
 
@@ -154,6 +155,35 @@ with Sim(provider=FakeProvider()) as sim:
 ```
 
 The Fake backend validates contracts and lifecycle. Its deterministic unit-mass point rules are not a physics-fidelity claim.
+
+### Composite USD scenes
+
+`COMPOSITE_SCENE` is distinct from an immutable `STATIC_SCENE`. A v0alpha6 World
+composes the mixed-physics USD once, then binds declared logical entities to existing
+container-relative Prims. `Sim.start(build_input=...)` requires a complete,
+digest-pinned `BuildInput`; every consumed local layer, mesh, and texture belongs in
+its existing `BuildResourceManifest` dependency graph.
+
+```python
+scene = sim.add_composite_scene("room", asset_uri="assets/room.usd")
+door = sim.add_embedded_articulation(
+    "cabinet_door",                       # becomes /room/cabinet_door
+    container=scene,
+    root_body_prim_path="root/cabinet/base",
+    link_prims={
+        "base": "root/cabinet/base",
+        "door": "root/cabinet/door",
+    },
+    joint_prims={"hinge": "root/cabinet/hinge"},
+)
+sim.start(build_input=locked_build_input)  # supplied by the asset/compiler layer
+door.command((0.7,))
+```
+
+Prim paths in bindings are relative to the composed container and cannot contain
+absolute or traversal segments. MuJoCo and PyBullet reject this profile until their
+providers explicitly implement both `scene.composite@1` and
+`entity.embedded-binding@1`.
 
 ### Assets
 
@@ -342,13 +372,13 @@ The distribution registers the factory in `pyproject.toml`:
 
 ```toml
 [project]
-dependencies = ["unirobosim>=0.9,<0.10"]
+dependencies = ["unirobosim>=0.10,<0.11"]
 
 [project.entry-points."unirobosim.backends"]
 vendor = "unirobosim_vendor:create_provider"
 ```
 
-The dependency bound describes the Core 0.9 adapter line. Adapter owners must declare the exact World schemas they implement and pass their independent native gate before publishing compatibility.
+The dependency bound describes the Core 0.10 adapter line. Adapter owners must declare the exact World schemas they implement and pass their independent native gate before publishing compatibility.
 
 `VendorSession` must implement `descriptor`, `negotiate()`, `build()`, and `close()`. Its built `VendorWorld` must implement the complete base `World` protocol. Methods for capabilities the adapter does not advertise must still fail with a structured `UnsupportedCapabilityError`; they must not return fabricated values.
 
@@ -375,4 +405,4 @@ coverage run -m pytest
 coverage report
 ```
 
-The 0.9.0 Core release gate covers the complete Core suite and clean source, wheel, and sdist installs on Python 3.11 and 3.12. Native GPU, GUI, and backend-adapter acceptance is unverified for this Core-only candidate and remains an independent adapter gate.
+The 0.10.0 Core release gate covers the complete Core suite and clean source, wheel, and sdist installs on Python 3.11 and 3.12. Native GPU, GUI, and backend-adapter acceptance remains an independent adapter gate.

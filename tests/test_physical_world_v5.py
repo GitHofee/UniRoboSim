@@ -8,6 +8,7 @@ import pytest
 from unirobosim import (
     ARTICULATION_AXIS_UNITS_MISMATCH,
     ARTICULATION_POSITION_AXIS_UNITS_UNSUPPORTED,
+    COMPOSITE_WORLD_SCHEMA_VERSION,
     PHYSICAL_WORLD_SCHEMA_VERSION,
     WORLD_SCHEMA_UNSUPPORTED,
     WORLD_SCHEMA_VERSION,
@@ -478,10 +479,11 @@ def test_provider_descriptor_rejects_hostile_schema_declarations(schemas: object
         )
 
 
-def test_fake_descriptor_declares_only_current_v4_v5_world_schemas() -> None:
+def test_fake_descriptor_declares_current_v4_v5_v6_world_schemas() -> None:
     assert FAKE_DESCRIPTOR.supported_world_schema_versions == (
         WORLD_SCHEMA_VERSION,
         PHYSICAL_WORLD_SCHEMA_VERSION,
+        COMPOSITE_WORLD_SCHEMA_VERSION,
     )
 
 

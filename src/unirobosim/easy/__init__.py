@@ -13,7 +13,7 @@ from .normalization import (
     AssetNormalizationResult,
     AssetNormalizer,
 )
-from .sim import Articulation, Camera, Deformable, Entity, ParticleFluid, RigidBody, Sim, SimState
+from .sim import Articulation, Camera, CompositeScene, Deformable, Entity, ParticleFluid, RigidBody, Sim, SimState
 
 __all__ = [
     "ASSET_BUNDLE_SCHEMA",
@@ -28,6 +28,7 @@ __all__ = [
     "AssetNormalizationResult",
     "AssetNormalizer",
     "Camera",
+    "CompositeScene",
     "Deformable",
     "Entity",
     "ParticleFluid",

@@ -9,6 +9,7 @@ from importlib import metadata
 from os import PathLike
 from typing import Any, cast
 
+from unirobosim.api.build import BuildInput
 from unirobosim.api.capabilities import CapabilityId, CapabilityRequirement
 from unirobosim.api.debug import DebugBatch, DebugPrimitive, DebugPublishReport
 from unirobosim.api.errors import (
@@ -34,11 +35,16 @@ from unirobosim.api.reports import (
 )
 from unirobosim.api.scene import SceneSnapshot
 from unirobosim.api.specs import (
+    COMPOSITE_WORLD_SCHEMA_VERSION,
+    PHYSICAL_WORLD_SCHEMA_VERSION,
+    WORLD_SCHEMA_VERSION,
     ArticulationCommand,
     BoxGeometrySpec,
     CameraSpec,
     DeformableBodySpec,
     DeformableCommand,
+    EmbeddedEntityBinding,
+    EmbeddedPrimBinding,
     EntitySpec,
     EnvironmentSpec,
     ParticleFluidCommand,
@@ -95,6 +101,21 @@ def _path(name: str) -> EntityPath:
 
 def _pose(position: Sequence[float], orientation_xyzw: Sequence[float]) -> Pose:
     return Pose(tuple(position), tuple(orientation_xyzw))  # type: ignore[arg-type]
+
+
+def _prim_bindings(
+    values: Mapping[str, str] | Iterable[EmbeddedPrimBinding],
+    operation: str,
+) -> tuple[EmbeddedPrimBinding, ...]:
+    if isinstance(values, Mapping):
+        return tuple(EmbeddedPrimBinding(name, path) for name, path in values.items())
+    try:
+        result = tuple(values)
+    except TypeError as exc:
+        raise _invalid("Prim bindings must be iterable", operation) from exc
+    if any(type(item) is not EmbeddedPrimBinding for item in result):
+        raise _invalid("Prim bindings must contain EmbeddedPrimBinding values", operation)
+    return result
 
 
 def _rows(values: object, width: int, rows: int, operation: str) -> ArrayValue:
@@ -255,6 +276,17 @@ class Articulation(Entity):
         )
         selected = None if environments is None else tuple(environments)
         row_count = self._sim.num_envs if selected is None else len(selected)
+        target_units: tuple[str, ...] = ()
+        if self._sim.world_spec.schema_version in {
+            PHYSICAL_WORLD_SCHEMA_VERSION,
+            COMPOSITE_WORLD_SCHEMA_VERSION,
+        }:
+            position_units = tuple(self._spec.joint_position_units[index] for index in degrees)
+            target_units = {
+                CommandMode.POSITION: position_units,
+                CommandMode.VELOCITY: tuple("rad/s" if unit == "rad" else "m/s" for unit in position_units),
+                CommandMode.EFFORT: tuple("N*m" if unit == "rad" else "N" for unit in position_units),
+            }[resolved_mode]
         self._sim.world.apply_articulation_command(
             ArticulationCommand(
                 self.handle,
@@ -262,6 +294,7 @@ class Articulation(Entity):
                 _rows(targets, len(degrees), row_count, "easy.articulation.command"),
                 selected,
                 degrees,
+                target_units,
             )
         )
 
@@ -286,6 +319,14 @@ class Camera(Entity):
         except ValueError as exc:
             raise _invalid("camera modality must be rgb, depth, or normals", "easy.camera.read") from exc
         return self.sample().channel(resolved)
+
+
+class CompositeScene(Entity):
+    """EasyAPI handle for one mixed-physics scene container.
+
+    The container itself has no command API. Declared embedded entities provide
+    state and control without composing the source asset again.
+    """
 
 
 class Deformable(Entity):
@@ -589,6 +630,101 @@ class Sim:
             self._asset_preparation_options[path] = FrozenMap(asset_options)
         return articulation
 
+    def add_composite_scene(
+        self,
+        name: str,
+        *,
+        asset_uri: str,
+        position_m: Sequence[float] = (0.0, 0.0, 0.0),
+        orientation_xyzw: Sequence[float] = (0.0, 0.0, 0.0, 1.0),
+    ) -> CompositeScene:
+        path = _path(name)
+        spec = EntitySpec(
+            path,
+            EntityKind.COMPOSITE_SCENE,
+            pose=_pose(position_m, orientation_xyzw),
+            asset_uri=asset_uri,
+        )
+        scene = cast(CompositeScene, self._add(CompositeScene(self, spec)))
+        self._ensure_required("scene.composite@1", "EasyAPI composite scene")
+        return scene
+
+    def _composite_path(self, container: CompositeScene | EntityPath | str, operation: str) -> EntityPath:
+        if isinstance(container, CompositeScene):
+            if container._sim is not self:
+                raise _invalid("composite scene belongs to another Sim", operation)
+            path = container.path
+        elif isinstance(container, EntityPath):
+            path = container
+        else:
+            path = _path(container)
+        entity = self._entities.get(path)
+        if entity is None or entity.kind is not EntityKind.COMPOSITE_SCENE:
+            raise _invalid("container must name a composite scene in this Sim", operation)
+        return path
+
+    @staticmethod
+    def _embedded_logical_path(name: str, container_path: EntityPath) -> EntityPath:
+        path = _path(name)
+        if "/" not in name.strip("/"):
+            path = container_path.child(path.name)
+        return path
+
+    def add_embedded_articulation(
+        self,
+        name: str,
+        *,
+        container: CompositeScene | EntityPath | str,
+        root_body_prim_path: str,
+        link_prims: Mapping[str, str] | Iterable[EmbeddedPrimBinding],
+        joint_prims: Mapping[str, str] | Iterable[EmbeddedPrimBinding],
+        initial_positions: Iterable[float] = (),
+        joint_effort_limits: Iterable[float] = (),
+        joint_position_units: Iterable[str] = (),
+    ) -> Articulation:
+        operation = "easy.sim.add_embedded_articulation"
+        container_path = self._composite_path(container, operation)
+        link_bindings = _prim_bindings(link_prims, operation)
+        joint_bindings = _prim_bindings(joint_prims, operation)
+        spec = EntitySpec(
+            self._embedded_logical_path(name, container_path),
+            EntityKind.ARTICULATION,
+            joint_names=tuple(item.logical_name for item in joint_bindings),
+            initial_joint_positions=tuple(initial_positions),
+            joint_effort_limits=tuple(joint_effort_limits),
+            joint_position_units=tuple(joint_position_units),
+            embedded_binding=EmbeddedEntityBinding(
+                container_path,
+                root_body_prim_path,
+                link_bindings,
+                joint_bindings,
+            ),
+        )
+        self._ensure_required("entity.embedded-binding@1", "EasyAPI embedded articulation")
+        return cast(Articulation, self._add(Articulation(self, spec)))
+
+    def add_embedded_rigid_body(
+        self,
+        name: str,
+        *,
+        container: CompositeScene | EntityPath | str,
+        root_body_prim_path: str,
+        link_name: str,
+    ) -> RigidBody:
+        operation = "easy.sim.add_embedded_rigid_body"
+        container_path = self._composite_path(container, operation)
+        spec = EntitySpec(
+            self._embedded_logical_path(name, container_path),
+            EntityKind.RIGID_BODY,
+            embedded_binding=EmbeddedEntityBinding(
+                container_path,
+                root_body_prim_path,
+                (EmbeddedPrimBinding(link_name, root_body_prim_path),),
+            ),
+        )
+        self._ensure_required("entity.embedded-binding@1", "EasyAPI embedded rigid body")
+        return cast(RigidBody, self._add(RigidBody(self, spec)))
+
     def add_camera(
         self,
         name: str,
@@ -726,10 +862,15 @@ class Sim:
                 details={"requested_mode": mode, "supported_modes": supported},
             )
 
-    def start(self) -> BuildReport:
+    def start(self, *, build_input: BuildInput | None = None) -> BuildReport:
         self._configuring("easy.sim.start")
         if not self._entities:
             raise _invalid("add at least one entity before start", "easy.sim.start")
+        composite = any(entity.kind is EntityKind.COMPOSITE_SCENE for entity in self._entities.values())
+        if composite and type(build_input) is not BuildInput:
+            raise _invalid("composite scenes require a complete BuildInput", "easy.sim.start")
+        if not composite and build_input is not None:
+            raise _invalid("BuildInput is only accepted for a composite EasyAPI scene", "easy.sim.start")
         requirements = tuple(self._requirements.values())
         provider = self._provider or _load_provider(self._backend, requirements)
         resolved_entities: list[EntitySpec] = []
@@ -748,16 +889,19 @@ class Sim:
                     metadata=FrozenMap(metadata_values),
                 )
             )
+        schema_version = COMPOSITE_WORLD_SCHEMA_VERSION if composite else WORLD_SCHEMA_VERSION
         spec = WorldSpec(
             self._world_id,
             tuple(resolved_entities),
             physics=self._physics,
             environments=self._environments,
             requirements=requirements,
+            schema_version=schema_version,
+            build_resource_manifest_sha256=None if build_input is None else build_input.manifest.sha256,
         )
         session = provider.open()
         try:
-            world = session.build(spec)
+            world = session.build(spec, build_input=build_input)
         except Exception:
             session.close()
             raise
