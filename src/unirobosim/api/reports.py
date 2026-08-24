@@ -363,8 +363,10 @@ class SensorChannel:
             raise ValidationError("sensor channel values are invalid", operation=operation)
         if self.modality is CameraModality.RGB:
             valid = self.data.dtype == "uint8" and len(self.data.shape) == 4 and self.data.shape[-1] == 3
-        else:
+        elif self.modality is CameraModality.DEPTH:
             valid = self.data.dtype == "float32" and len(self.data.shape) == 3
+        else:
+            valid = self.data.dtype == "float32" and len(self.data.shape) == 4 and self.data.shape[-1] == 3
         if not valid:
             raise ValidationError("sensor channel shape or dtype is invalid", operation=operation)
 

@@ -226,8 +226,18 @@ FAKE_CAPABILITIES = CapabilitySet(
         ),
         CapabilityDeclaration(
             CapabilityId("sensor.camera@1"),
-            FrozenMap({"schedule": "synchronous", "pose_frame": "environment-local-world"}),
-            limitations=("deterministic test pattern; not a rendered image",),
+            FrozenMap(
+                {
+                    "schedule": "synchronous",
+                    "pose_frame": "environment-local-world",
+                    "mounted_pose_frame": "parent-local",
+                    "mount_parent_kinds": ["rigid_body", "articulation"],
+                }
+            ),
+            limitations=(
+                "deterministic test pattern; not a rendered image",
+                "articulation link mounts use the fake articulation root transform",
+            ),
         ),
         CapabilityDeclaration(
             CapabilityId("sensor.camera.rgb@1"),
@@ -238,6 +248,11 @@ FAKE_CAPABILITIES = CapabilitySet(
             CapabilityId("sensor.camera.depth@1"),
             FrozenMap({"dtype": "float32", "unit": "metre", "no_hit": 0.0}),
             limitations=("deterministic test pattern; not ray-cast depth",),
+        ),
+        CapabilityDeclaration(
+            CapabilityId("sensor.camera.normals@1"),
+            FrozenMap({"dtype": "float32", "layout": "environment-height-width-xyz", "frame": "camera"}),
+            limitations=("constant camera-frame normals; not rendered geometry normals",),
         ),
         CapabilityDeclaration(
             CapabilityId("debug.sink.native_overlay@1"),
@@ -252,8 +267,10 @@ FAKE_CAPABILITIES = CapabilitySet(
             FrozenMap({"entity_kinds": ["rigid_body"], "modes": ["kinematic"]}),
         ),
         CapabilityDeclaration(CapabilityId("render.browser-scene@1")),
+        CapabilityDeclaration(CapabilityId("scene.static@1")),
         CapabilityDeclaration(CapabilityId("entity.scale.rigid@1")),
         CapabilityDeclaration(CapabilityId("entity.scale.articulation.uniform@1")),
+        CapabilityDeclaration(CapabilityId("entity.scale.static_scene@1")),
         CapabilityDeclaration(
             CapabilityId("planning.scene@2"),
             FrozenMap(
@@ -274,7 +291,7 @@ FAKE_CAPABILITIES = CapabilitySet(
 FAKE_DESCRIPTOR = ProviderDescriptor(
     provider_id="reference.fake",
     display_name="UniRoboSim Fake Reference Backend",
-    version="0.9.1",
+    version="0.9.2",
     contract_version="v0alpha5",
     capabilities=FAKE_CAPABILITIES,
     supported_world_schema_versions=(WORLD_SCHEMA_VERSION, PHYSICAL_WORLD_SCHEMA_VERSION),
@@ -1225,6 +1242,8 @@ class FakeWorld:
         return _planning_id("geometry", path, "root")
 
     def _planning_kind(self, entity: EntitySpec) -> PlanningEntityKind:
+        if entity.kind is EntityKind.STATIC_SCENE:
+            return PlanningEntityKind.OTHER
         explicit = entity.metadata.get("planning_entity_kind")
         if explicit == "robot":
             return PlanningEntityKind.ROBOT
@@ -1235,6 +1254,8 @@ class FakeWorld:
         return PlanningEntityKind.OTHER
 
     def _planning_motion_class(self, entity: EntitySpec) -> PlanningGeometryMotionClass:
+        if entity.kind is EntityKind.STATIC_SCENE:
+            return PlanningGeometryMotionClass.STATIC
         explicit = entity.metadata.get("planning_motion_class")
         if explicit == "static":
             return PlanningGeometryMotionClass.STATIC
@@ -1763,32 +1784,67 @@ class FakeWorld:
             tuple(sorted(geometries, key=lambda item: item.geometry_id)),
         )
 
-    def _planning_entity_pose_and_twist(
+    def _entity_transform_and_twist(
         self,
         entity: EntitySpec,
         environment_index: int,
-        world_frame_id: str,
-    ) -> tuple[PlanningPose, PlanningTwist]:
+    ) -> tuple[
+        tuple[float, float, float],
+        tuple[float, float, float, float],
+        tuple[float, float, float],
+        tuple[float, float, float],
+    ]:
         if entity.kind is EntityKind.RIGID_BODY:
             runtime = self._rigids[entity.path]
             position = runtime.positions[environment_index]
             orientation = runtime.orientations[environment_index]
             linear = runtime.linear_velocities[environment_index]
             angular = runtime.angular_velocities[environment_index]
-            pose = PlanningPose(
-                world_frame_id,
+            return (
                 (position[0], position[1], position[2]),
                 (orientation[0], orientation[1], orientation[2], orientation[3]),
-            )
-            twist = PlanningTwist(
-                world_frame_id,
                 (linear[0], linear[1], linear[2]),
                 (angular[0], angular[1], angular[2]),
             )
-            return pose, twist
+        if entity.mount is None:
+            return entity.pose.position, entity.pose.orientation_xyzw, (0.0, 0.0, 0.0), (0.0, 0.0, 0.0)
+
+        parent = self._entities[entity.mount.parent_path]
+        parent_position, parent_orientation, parent_linear, parent_angular = self._entity_transform_and_twist(
+            parent,
+            environment_index,
+        )
+        offset = _planning_rotate(entity.pose.position, parent_orientation)
+        tangential = (
+            parent_angular[1] * offset[2] - parent_angular[2] * offset[1],
+            parent_angular[2] * offset[0] - parent_angular[0] * offset[2],
+            parent_angular[0] * offset[1] - parent_angular[1] * offset[0],
+        )
         return (
-            PlanningPose(world_frame_id, entity.pose.position, entity.pose.orientation_xyzw),
-            PlanningTwist(world_frame_id),
+            (
+                parent_position[0] + offset[0],
+                parent_position[1] + offset[1],
+                parent_position[2] + offset[2],
+            ),
+            _planning_quaternion_multiply(parent_orientation, entity.pose.orientation_xyzw),
+            (
+                parent_linear[0] + tangential[0],
+                parent_linear[1] + tangential[1],
+                parent_linear[2] + tangential[2],
+            ),
+            parent_angular,
+        )
+
+    def _planning_entity_pose_and_twist(
+        self,
+        entity: EntitySpec,
+        environment_index: int,
+        world_frame_id: str,
+    ) -> tuple[PlanningPose, PlanningTwist]:
+        position, orientation, linear, angular = self._entity_transform_and_twist(entity, environment_index)
+        return (
+            PlanningPose(world_frame_id, position, orientation),
+            PlanningTwist(world_frame_id, linear, angular),
         )
 
     def _planning_attachment_values(
@@ -3320,7 +3376,7 @@ class FakeWorld:
                     (environment_count, camera.height_px, camera.width_px, 3),
                     bytes(rgb),
                 )
-            else:
+            elif modality is CameraModality.DEPTH:
                 depth = tuple(
                     min(
                         camera.far_plane_m,
@@ -3336,6 +3392,14 @@ class FakeWorld:
                 data = ArrayValue(
                     (environment_count, camera.height_px, camera.width_px),
                     depth,
+                    dtype="float32",
+                )
+            else:
+                assert modality is CameraModality.NORMALS
+                normal_count = environment_count * camera.height_px * camera.width_px
+                data = ArrayValue(
+                    (environment_count, camera.height_px, camera.width_px, 3),
+                    (0.0, 0.0, 1.0) * normal_count,
                     dtype="float32",
                 )
             channels.append(SensorChannel(modality, data))
@@ -3485,6 +3549,16 @@ class FakeWorld:
         return self.tick
 
     def _scene_visual(self, entity: EntitySpec) -> tuple[SceneVisual, ...]:
+        if entity.kind is EntityKind.STATIC_SCENE:
+            assert entity.asset_uri is not None
+            return (
+                SceneVisual(
+                    "static-scene",
+                    SceneVisualKind.MESH,
+                    asset_uri=entity.asset_uri,
+                    metadata=FrozenMap({"scale_xyz": entity.scale_xyz}),
+                ),
+            )
         if entity.kind is EntityKind.CAMERA_SENSOR:
             return (
                 SceneVisual(
@@ -3531,29 +3605,12 @@ class FakeWorld:
         entities: list[SceneEntityState] = []
         for entity in self._spec.entities:
             for environment in range(self._spec.environments.count):
-                if entity.kind is EntityKind.RIGID_BODY:
-                    runtime = self._rigids[entity.path]
-                    position = runtime.positions[environment]
-                    orientation = runtime.orientations[environment]
-                    pose = Pose(
-                        (position[0], position[1], position[2]),
-                        (orientation[0], orientation[1], orientation[2], orientation[3]),
-                    )
-                    linear_values = runtime.linear_velocities[environment]
-                    angular_values = runtime.angular_velocities[environment]
-                    linear = (linear_values[0], linear_values[1], linear_values[2])
-                    angular = (angular_values[0], angular_values[1], angular_values[2])
-                    joints: tuple[float, ...] = ()
-                elif entity.kind is EntityKind.ARTICULATION:
+                position, orientation, linear, angular = self._entity_transform_and_twist(entity, environment)
+                pose = Pose(position, orientation)
+                if entity.kind is EntityKind.ARTICULATION:
                     runtime_articulation = self._articulations[entity.path]
-                    pose = entity.pose
-                    linear = (0.0, 0.0, 0.0)
-                    angular = (0.0, 0.0, 0.0)
                     joints = tuple(runtime_articulation.positions[environment])
                 else:
-                    pose = entity.pose
-                    linear = (0.0, 0.0, 0.0)
-                    angular = (0.0, 0.0, 0.0)
                     joints = ()
                 entities.append(
                     SceneEntityState(

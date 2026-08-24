@@ -284,7 +284,7 @@ class Camera(Entity):
         try:
             resolved = modality if isinstance(modality, CameraModality) else CameraModality(modality)
         except ValueError as exc:
-            raise _invalid("camera modality must be rgb or depth", "easy.camera.read") from exc
+            raise _invalid("camera modality must be rgb, depth, or normals", "easy.camera.read") from exc
         return self.sample().channel(resolved)
 
 
@@ -603,7 +603,7 @@ class Sim:
                 value if isinstance(value, CameraModality) else CameraModality(value) for value in outputs
             )
         except ValueError as exc:
-            raise _invalid("camera outputs must contain rgb or depth", "easy.sim.add_camera") from exc
+            raise _invalid("camera outputs must contain rgb, depth, or normals", "easy.sim.add_camera") from exc
         spec = EntitySpec(
             _path(name),
             EntityKind.CAMERA_SENSOR,

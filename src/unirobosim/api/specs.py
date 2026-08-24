@@ -77,7 +77,11 @@ class EnvironmentSpec:
 
 @dataclass(frozen=True)
 class CameraSpec:
-    """Synchronous pinhole camera intent using an environment-local world pose."""
+    """Synchronous pinhole camera intent.
+
+    An unmounted camera uses an environment-local world pose.  When its
+    :class:`EntitySpec` has a mount, the entity pose is parent-local instead.
+    """
 
     width_px: int = 640
     height_px: int = 480
@@ -133,6 +137,36 @@ class CameraSpec:
             "horizontal_fov_degrees": self.horizontal_fov_degrees,
             "near_plane_m": self.near_plane_m,
             "far_plane_m": self.far_plane_m,
+        }
+
+
+@dataclass(frozen=True)
+class CameraMountSpec:
+    """Typed camera parent attachment; the camera entity pose is parent-local.
+
+    ``parent_link_name=None`` mounts at the parent entity root.  A named link is
+    valid only for an articulation parent and remains an authored portable name
+    for the selected adapter to resolve.
+    """
+
+    parent_path: EntityPath
+    parent_link_name: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.parent_path, EntityPath):
+            raise _invalid("camera mount parent_path must be an EntityPath", "camera_mount_spec.validate")
+        if self.parent_link_name is not None and (
+            type(self.parent_link_name) is not str or not self.parent_link_name.strip()
+        ):
+            raise _invalid(
+                "camera mount parent_link_name must be a non-empty string or None",
+                "camera_mount_spec.validate",
+            )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "parent_path": self.parent_path.value,
+            "parent_link_name": self.parent_link_name,
         }
 
 
@@ -450,6 +484,7 @@ class EntitySpec:
     joint_effort_limits: tuple[float, ...] = ()
     joint_position_units: tuple[str, ...] = ()
     scale_xyz: tuple[float, float, float] = (1.0, 1.0, 1.0)
+    mount: CameraMountSpec | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.path, EntityPath) or not isinstance(self.kind, EntityKind):
@@ -515,8 +550,12 @@ class EntitySpec:
         ):
             raise _invalid("scale_xyz must be an exact positive finite float 3-tuple", "entity_spec.validate")
         scale = self.scale_xyz
-        if self.kind not in {EntityKind.RIGID_BODY, EntityKind.ARTICULATION} and scale != (1.0, 1.0, 1.0):
-            raise _invalid("only rigid bodies and articulations can use non-unit scale", "entity_spec.validate")
+        scalable_kinds = {EntityKind.RIGID_BODY, EntityKind.ARTICULATION, EntityKind.STATIC_SCENE}
+        if self.kind not in scalable_kinds and scale != (1.0, 1.0, 1.0):
+            raise _invalid(
+                "only rigid bodies, articulations, and static scenes can use non-unit scale",
+                "entity_spec.validate",
+            )
         if self.kind is EntityKind.ARTICULATION and not (scale[0] == scale[1] == scale[2]):
             raise _invalid(
                 "articulation scale must be uniform",
@@ -578,12 +617,18 @@ class EntitySpec:
                 )
         elif self.deformable is not None or self.particle_fluid is not None or self.camera is not None:
             raise _invalid(
-                "rigid/articulation entities cannot contain soft-matter or camera specs",
+                "rigid/articulation/static-scene entities cannot contain soft-matter or camera specs",
                 "entity_spec.validate",
                 path=str(self.path),
             )
         if self.asset_uri is not None and (not isinstance(self.asset_uri, str) or not self.asset_uri.strip()):
             raise _invalid("asset URI must be a non-empty string", "entity_spec.validate", path=str(self.path))
+        if self.kind is EntityKind.STATIC_SCENE and self.asset_uri is None:
+            raise _invalid("static-scene entities require an asset URI", "entity_spec.validate", path=str(self.path))
+        if self.mount is not None and not isinstance(self.mount, CameraMountSpec):
+            raise _invalid("entity mount must be a CameraMountSpec", "entity_spec.validate", path=str(self.path))
+        if self.kind is not EntityKind.CAMERA_SENSOR and self.mount is not None:
+            raise _invalid("only camera entities can declare a mount", "entity_spec.validate", path=str(self.path))
         if not isinstance(self.metadata, FrozenMap):
             raise _invalid("entity metadata must be a FrozenMap", "entity_spec.validate", path=str(self.path))
         object.__setattr__(self, "joint_names", names)
@@ -608,6 +653,8 @@ class EntitySpec:
             result["initial_joint_positions"] = list(self.initial_joint_positions)
             result["joint_position_units"] = list(self.joint_position_units)
             result["scale_xyz"] = list(self.scale_xyz)
+            if self.mount is not None:
+                result["mount"] = self.mount.to_dict()
         else:
             result["initial_joint_positions_rad"] = list(self.initial_joint_positions)
         if self.joint_effort_limits:
@@ -658,6 +705,11 @@ class WorldSpec:
         if not raw_entities or any(not isinstance(item, EntitySpec) for item in raw_entities):
             raise _invalid("world must contain EntitySpec values", "world_spec.validate")
         entities = tuple(sorted(raw_entities, key=lambda item: item.path.value))
+        static_scenes = tuple(entity for entity in entities if entity.kind is EntityKind.STATIC_SCENE)
+        if static_scenes and self.schema_version != PHYSICAL_WORLD_SCHEMA_VERSION:
+            raise _invalid("only v0alpha5 worlds can contain static-scene entities", "world_spec.validate")
+        if len(static_scenes) > 1:
+            raise _invalid("world can contain at most one static-scene entity", "world_spec.validate")
         soft_kinds = {
             EntityKind.SURFACE_DEFORMABLE,
             EntityKind.VOLUME_DEFORMABLE,
@@ -677,6 +729,43 @@ class WorldSpec:
         paths = tuple(item.path for item in entities)
         if len(paths) != len(set(paths)):
             raise _invalid("world entity paths must be unique", "world_spec.validate")
+        mounted_cameras = tuple(entity for entity in entities if entity.mount is not None)
+        if mounted_cameras and self.schema_version != PHYSICAL_WORLD_SCHEMA_VERSION:
+            raise _invalid("only v0alpha5 worlds can contain mounted cameras", "world_spec.validate")
+        entity_by_path = {entity.path: entity for entity in entities}
+        for camera_entity in mounted_cameras:
+            mount = camera_entity.mount
+            assert mount is not None
+            if mount.parent_path == camera_entity.path:
+                raise _invalid(
+                    "camera cannot mount to itself",
+                    "world_spec.validate",
+                    path=camera_entity.path.value,
+                )
+            parent = entity_by_path.get(mount.parent_path)
+            if parent is None:
+                raise _invalid(
+                    "camera mount parent does not exist",
+                    "world_spec.validate",
+                    path=camera_entity.path.value,
+                    parent_path=mount.parent_path.value,
+                )
+            if parent.kind not in {EntityKind.RIGID_BODY, EntityKind.ARTICULATION}:
+                raise _invalid(
+                    "camera mount parent must be a rigid body or articulation",
+                    "world_spec.validate",
+                    path=camera_entity.path.value,
+                    parent_path=mount.parent_path.value,
+                    parent_kind=parent.kind.value,
+                )
+            if mount.parent_link_name is not None and parent.kind is not EntityKind.ARTICULATION:
+                raise _invalid(
+                    "camera mount parent_link_name requires an articulation parent",
+                    "world_spec.validate",
+                    path=camera_entity.path.value,
+                    parent_path=mount.parent_path.value,
+                    parent_link_name=mount.parent_link_name,
+                )
         if any(not isinstance(item, CapabilityRequirement) for item in raw_requirements):
             raise _invalid("world requirements contain an invalid value", "world_spec.validate")
         requirements = tuple(raw_requirements)
@@ -691,6 +780,7 @@ class WorldSpec:
             EntityKind.VOLUME_DEFORMABLE: CapabilityId("state.deformable.volume@1"),
             EntityKind.PARTICLE_FLUID: CapabilityId("state.fluid.particles@1"),
             EntityKind.CAMERA_SENSOR: CapabilityId("sensor.camera@1"),
+            EntityKind.STATIC_SCENE: CapabilityId("scene.static@1"),
         }
         if self.schema_version in {
             RIGID_CONTACT_WORLD_SCHEMA_VERSION,
@@ -726,6 +816,7 @@ class WorldSpec:
                 modality_capabilities = {
                     CameraModality.RGB: CapabilityId("sensor.camera.rgb@1"),
                     CameraModality.DEPTH: CapabilityId("sensor.camera.depth@1"),
+                    CameraModality.NORMALS: CapabilityId("sensor.camera.normals@1"),
                 }
                 for modality in entity.camera.modalities:
                     modality_capability = modality_capabilities[modality]
@@ -737,6 +828,8 @@ class WorldSpec:
                 automatic: tuple[CapabilityId, ...] = ()
                 if entity.kind is EntityKind.RIGID_BODY and entity.scale_xyz != (1.0, 1.0, 1.0):
                     automatic += (CapabilityId("entity.scale.rigid@1"),)
+                if entity.kind is EntityKind.STATIC_SCENE and entity.scale_xyz != (1.0, 1.0, 1.0):
+                    automatic += (CapabilityId("entity.scale.static_scene@1"),)
                 if entity.kind is EntityKind.ARTICULATION:
                     if entity.scale_xyz != (1.0, 1.0, 1.0):
                         automatic += (CapabilityId("entity.scale.articulation.uniform@1"),)

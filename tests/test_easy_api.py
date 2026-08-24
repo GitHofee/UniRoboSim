@@ -50,7 +50,7 @@ def test_easy_api_common_rigid_articulation_camera_debug_and_scene_flow() -> Non
             joint_names=("door_hinge", "drawer_slide"),
             initial_positions=(0.1, -0.2),
         )
-        camera = sim.add_camera("camera", resolution=(16, 12), outputs=("rgb", "depth"))
+        camera = sim.add_camera("camera", resolution=(16, 12), outputs=("rgb", "depth", "normals"))
         sim.optional("state.fluid.particles@1", reason="use fluid only when native")
         report = sim.start()
         assert report.entity_count == 3 and sim.state is SimState.RUNNING
@@ -67,6 +67,8 @@ def test_easy_api_common_rigid_articulation_camera_debug_and_scene_flow() -> Non
         assert cabinet.state.joint_positions.rows() == ((0.5, -0.2), (0.5, -0.2))
         assert camera.read(CameraModality.RGB).shape == (2, 12, 16, 3)
         assert camera.sample().channel(CameraModality.DEPTH).shape == (2, 12, 16)
+        normals = camera.read("normals")
+        assert normals.shape == (2, 12, 16, 3) and normals.dtype == "float32"
         assert box.contact().in_contact.shape == (2,)
 
         primitive = DebugPrimitive(

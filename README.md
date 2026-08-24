@@ -6,7 +6,7 @@
 
 UniRoboSim is a backend-neutral interoperability layer for robotics simulation. It defines portable scene, lifecycle, command, state, sensor, asset, debug, and scene-control contracts while keeping native simulator SDKs in independently packaged adapters. Applications and upper-layer frameworks can select a backend without propagating simulator-specific types through their architecture.
 
-Version `0.9.1` adds compact RGB frame storage for camera and recording pipelines while preserving the physical v0alpha5 World contract and accepted planning-scene v2 API. Python packages use `0.9.x`; serialized World contracts remain independently versioned as `unirobosim.world/v0alpha4` and `unirobosim.world/v0alpha5`.
+Version `0.9.2` adds physical-v0alpha5 static scenes, typed camera mounts, and camera normals while preserving existing unmounted World payloads and the accepted planning-scene v2 API. Python packages use `0.9.x`; serialized World contracts remain independently versioned as `unirobosim.world/v0alpha4` and `unirobosim.world/v0alpha5`.
 
 <img src="assets/readme/unirobosim-architecture.svg" alt="UniRoboSim architecture: applications, FastSim, policies and agents use EasyAPI, RuntimeAPI, MCP and Studio; portable contracts connect them to independent simulator adapters." width="100%">
 
@@ -24,7 +24,8 @@ Version `0.9.1` adds compact RGB frame storage for camera and recording pipeline
 - rigid pose/twist, persistent wrench control, contact state, and scene pose writes;
 - robot and non-robot articulation state plus position/velocity/effort commands;
 - surface/volume deformable and fixed-count particle-fluid contracts;
-- RGB/depth camera contracts;
+- physical-v0alpha5 static-scene assets and typed parent-local camera mounts;
+- RGB/depth/normals camera contracts;
 - compact RGB byte access through `ArrayValue.to_bytes()` without changing sensor shapes or dtypes;
 - point, line, axes, text, bounding-box, and trajectory debug primitives;
 - scene snapshots/deltas and idempotent drag transactions;

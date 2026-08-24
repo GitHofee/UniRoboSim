@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.9.2 - 2026-08-24
+
+- Add the physical-v0alpha5 `static_scene` entity with one required asset, positive
+  scale, at-most-one-per-World validation, and automatic `scene.static@1` plus
+  non-unit `entity.scale.static_scene@1` capability demand.
+- Add typed camera mounts whose authored pose is parent-local, with closed World
+  validation for parent identity and kind, and expose RGB, depth, and float32 XYZ
+  normals consistently through Core, EasyAPI, and the Fake Reference Backend.
+- Preserve every existing unmounted v0alpha4/v0alpha5 serialized payload while
+  mapping static scenes to planning kind `other`; native adapter acceptance remains
+  a separate verification gate.
+
 ## 0.9.1 - 2026-08-23
 
 - Add compact immutable uint8 array storage for high-resolution RGB frames while

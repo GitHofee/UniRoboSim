@@ -23,13 +23,15 @@ class EntityKind(StrEnum):
     VOLUME_DEFORMABLE = "volume_deformable"
     PARTICLE_FLUID = "particle_fluid"
     CAMERA_SENSOR = "camera_sensor"
+    STATIC_SCENE = "static_scene"
 
 
 class CameraModality(StrEnum):
-    """Portable camera channels supported by the M3 contract."""
+    """Portable camera channels supported by the Core camera contract."""
 
     RGB = "rgb"
     DEPTH = "depth"
+    NORMALS = "normals"
 
 
 class CommandMode(StrEnum):

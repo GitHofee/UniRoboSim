@@ -113,6 +113,8 @@ class CameraContractTests(unittest.TestCase):
         spec = camera_world()
         capability_ids = {item.capability.value for item in spec.requirements}
         self.assertTrue({"sensor.camera@1", "sensor.camera.rgb@1", "sensor.camera.depth@1"} <= capability_ids)
+        normals_spec = camera_world(modalities=(CameraModality.NORMALS,))
+        self.assertIn("sensor.camera.normals@1", {item.capability.value for item in normals_spec.requirements})
         with self.assertRaises(ValidationError):
             CameraSpec(width_px=0)
         with self.assertRaises(ValidationError):
@@ -164,6 +166,8 @@ class CameraContractTests(unittest.TestCase):
         handle = world.resolve(EntityPath("/camera"))
         with self.assertRaises(ValidationError):
             SensorChannel(CameraModality.RGB, ArrayValue((2, 3, 4), (0,) * 24, dtype="uint8"))
+        with self.assertRaises(ValidationError):
+            SensorChannel(CameraModality.NORMALS, ArrayValue((2, 3, 4), (0.0,) * 24, dtype="float32"))
         with self.assertRaises(ValidationError):
             SensorSample(handle, (), world.tick)
         world.close()
