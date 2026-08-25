@@ -1,0 +1,7 @@
+**/__pycache__/
+**/*.py[cod]
+**/.pytest_cache/
+**/.ruff_cache/
+adapter_spi/teaching_adapter/build/
+adapter_spi/teaching_adapter/dist/
+adapter_spi/teaching_adapter/src/*.egg-info/

@@ -289,9 +289,7 @@ def test_v6_capability_negotiation_fails_before_side_effects(tmp_path: Path, mis
     descriptor = replace(
         FAKE_DESCRIPTOR,
         capabilities=CapabilitySet(
-            tuple(
-                item for item in FAKE_DESCRIPTOR.capabilities if item.capability != CapabilityId(missing_capability)
-            )
+            tuple(item for item in FAKE_DESCRIPTOR.capabilities if item.capability != CapabilityId(missing_capability))
         ),
     )
     session = FakeSession(descriptor)

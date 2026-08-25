@@ -1,0 +1,10 @@
+{
+  "schema_version": "unirobosim.asset-bundle.v1",
+  "name": "demo_robot",
+  "variants": {
+    "fake": {
+      "uri": "assets/demo_robot.urdf",
+      "sha256": "a250a9d6079e07701bb7fbf73a8919e136a8869e4c1cb8dfe8ee39ae94418fa6"
+    }
+  }
+}

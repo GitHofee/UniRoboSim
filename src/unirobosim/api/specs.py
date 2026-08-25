@@ -856,9 +856,7 @@ class WorldSpec:
             WORLD_SCHEMA_VERSION,
             PHYSICAL_WORLD_SCHEMA_VERSION,
             COMPOSITE_WORLD_SCHEMA_VERSION,
-        } and any(
-            entity.kind is EntityKind.CAMERA_SENSOR for entity in entities
-        ):
+        } and any(entity.kind is EntityKind.CAMERA_SENSOR for entity in entities):
             raise _invalid("only v0alpha4/v0alpha5/v0alpha6 worlds can contain camera entities", "world_spec.validate")
         if self.schema_version == WORLD_SCHEMA_VERSION:
             if any(entity.scale_xyz != (1.0, 1.0, 1.0) for entity in entities):

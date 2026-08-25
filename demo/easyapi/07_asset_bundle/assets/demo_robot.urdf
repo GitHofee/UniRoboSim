@@ -1,0 +1,11 @@
+<?xml version="1.0"?>
+<robot name="demo_robot">
+  <link name="base"/>
+  <link name="tool"/>
+  <joint name="base_joint" type="revolute">
+    <parent link="base"/>
+    <child link="tool"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-1" upper="1" effort="1" velocity="1"/>
+  </joint>
+</robot>

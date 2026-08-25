@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "unirobosim-teaching"
+version = "0.1.0"
+description = "Small public-contract UniRoboSim adapter used by the Adapter SPI demos"
+requires-python = ">=3.11,<3.13"
+dependencies = ["unirobosim>=0.10,<0.11"]
+
+[project.entry-points."unirobosim.backends"]
+teaching = "unirobosim_teaching:create_provider"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["B", "E", "F", "I", "UP"]

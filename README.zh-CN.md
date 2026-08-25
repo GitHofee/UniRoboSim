@@ -95,6 +95,8 @@ python -m pip install ./UniRoboSim-usd-converter ./UniRoboSim-studio ./UniRoboSi
 
 ## 3. EasyAPI：快速使用
 
+如需按顺序学习并直接执行，请从 [EasyAPI 示例路径](demo/easyapi/README.zh-CN.md)开始。
+
 ### 一套代码，显式切换后端
 
 安装不同 Adapter 后只修改 `backend`：
@@ -245,6 +247,8 @@ Control Profile 只管理自身创建的会话。写操作需要租约和具备�
 
 ## 5. RuntimeAPI：构建上层框架
 
+框架开发者可以先完成 [Runtime API 示例路径](demo/runtime_api/README.zh-CN.md)，再接入原生后端。
+
 RuntimeAPI 是构建上层框架的接口。它提供不可变世界编译、能力协商、事务化生命周期、类型化命令与观测、确定的资源所有权和可选场景控制，同时不向上暴露原生仿真器 SDK。
 
 框架开发者可以基于 RuntimeAPI 实现面向领域的配置、调度、Controller、策略服务、插件、录制回放和分布式执行。对于需要这些能力以完整产品形态交付的项目，**FastSim 是基于 UniRoboSim 构建并持续维护的上层框架**。UniRoboSim 可以独立使用且不依赖 FastSim；FastSim 通过 RuntimeAPI 保持其上层逻辑与 Isaac Lab、MuJoCo 和 PyBullet 解耦。
@@ -308,6 +312,9 @@ finally:
 因此 FastSim 可以增加配置、Controller、插件、录制/回放、远程资产和 MCP，同时不绑定 Isaac Lab、MuJoCo 或 PyBullet。
 
 ## 6. Adapter SPI：接入新仿真器
+
+[Adapter SPI 示例路径](demo/adapter_spi/README.zh-CN.md)提供可安装的教学 Adapter、公共合同测试、
+entry point 发现和干净 wheel 闸门。
 
 Adapter 是独立 distribution，实现结构化 `Provider`、`Session`、`World` Protocol，并注册一个工厂 entry point；Core 不直接导入它。
 

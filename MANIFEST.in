@@ -1,2 +1,6 @@
 include build_backend.py
 recursive-include tests *.py
+recursive-include demo *.json *.md *.py *.toml *.urdf
+prune demo/adapter_spi/teaching_adapter/.pytest_cache
+prune demo/adapter_spi/teaching_adapter/build
+prune demo/adapter_spi/teaching_adapter/src/*.egg-info

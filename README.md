@@ -95,6 +95,9 @@ For reproducible deployments, pin the exact Core and adapter pair that was teste
 
 ## 3. EasyAPI: quick start
 
+For a progressive, executable introduction, follow the
+[EasyAPI demo path](demo/easyapi/README.md).
+
 ### One application, explicit backend switch
 
 Only the `backend` value changes between installed adapters:
@@ -246,6 +249,9 @@ The complete tool catalog, request contracts, object-state fields, camera-image 
 
 ## 5. RuntimeAPI: building higher-level frameworks
 
+Framework developers can work through the
+[Runtime API demo path](demo/runtime_api/README.md) before integrating a native backend.
+
 RuntimeAPI is the framework-construction interface. It exposes immutable world compilation, capability negotiation, transactional lifecycle, typed commands and observations, deterministic resource ownership, and optional scene control without exposing a native simulator SDK.
 
 Framework authors can use RuntimeAPI to implement domain-specific configuration, scheduling, controllers, policy serving, plugins, recording, replay, and distributed execution. For projects that require these facilities as an integrated product, **FastSim is the maintained upper-layer framework built on UniRoboSim**. UniRoboSim remains independently usable and does not require FastSim; FastSim uses RuntimeAPI so its upper layers remain independent of Isaac Lab, MuJoCo, and PyBullet.
@@ -309,6 +315,9 @@ finally:
 This separation is what allows FastSim to add configuration, controllers, plugins, recording/replay, remote assets, and MCP without becoming tied to Isaac Lab, MuJoCo, or PyBullet.
 
 ## 6. Adapter SPI: integrating a new simulator
+
+The [Adapter SPI demo path](demo/adapter_spi/README.md) contains an installable teaching
+Adapter, public-contract tests, entry-point discovery, and a clean-wheel gate.
 
 An adapter is a separate distribution that implements the structural `Provider`, `Session`, and `World` protocols and registers one factory entry point. Core never imports it directly.
 
