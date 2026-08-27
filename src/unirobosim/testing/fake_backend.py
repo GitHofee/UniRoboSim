@@ -58,6 +58,7 @@ from unirobosim.api.errors import (
 )
 from unirobosim.api.frozen import FrozenMap
 from unirobosim.api.planning_scene import (
+    PLANNING_GEOMETRY_BATCH_READ_LIMIT_BYTES,
     PLANNING_SCENE_CAPABILITY_ID,
     PLANNING_SCENE_SCHEMA_VERSION,
     PLANNING_SYSTEM_ENTITY_ID,
@@ -75,6 +76,7 @@ from unirobosim.api.planning_scene import (
     PlanningFrameSourceKind,
     PlanningFrameState,
     PlanningGeometryAxisConvention,
+    PlanningGeometryBatchLease,
     PlanningGeometryContentProfile,
     PlanningGeometryDescriptor,
     PlanningGeometryDType,
@@ -83,6 +85,7 @@ from unirobosim.api.planning_scene import (
     PlanningGeometryMotionClass,
     PlanningGeometryPurpose,
     PlanningGeometryRepresentation,
+    PlanningGeometryRequest,
     PlanningGeometryResourceDescriptor,
     PlanningGeometryResourceLayout,
     PlanningGeometryStorageKind,
@@ -94,10 +97,14 @@ from unirobosim.api.planning_scene import (
     PlanningLinkState,
     PlanningPose,
     PlanningPrimitiveGeometry,
+    PlanningSceneAttachmentPatch,
     PlanningSceneCatalog,
     PlanningSceneDelta,
     PlanningSceneDeltaKind,
     PlanningSceneState,
+    PlanningSceneStatePatch,
+    PlanningSceneUpdate,
+    PlanningSceneUpdateKind,
     PlanningTwist,
     parse_planning_frame_declarations,
 )
@@ -424,7 +431,9 @@ class _FakePlanningEnvironmentRuntime:
         ],
     ] = field(default_factory=dict)
     catalog: PlanningSceneCatalog | None = None
+    geometry_by_id: dict[str, PlanningGeometryDescriptor] = field(default_factory=dict)
     history: dict[int, PlanningSceneState] = field(default_factory=dict)
+    updates: dict[int, PlanningSceneUpdate] = field(default_factory=dict)
 
 
 @dataclass
@@ -432,10 +441,16 @@ class _FakePlanningRuntime:
     authority_thread_id: int
     environments: dict[int, _FakePlanningEnvironmentRuntime]
     publication_lock: threading.RLock = field(default_factory=threading.RLock)
+    storage_lock: threading.RLock = field(default_factory=threading.RLock)
     storage_cache: dict[tuple[str, PlanningGeometryRepresentation, str], tuple[bytes, str]] = field(
         default_factory=dict
     )
     geometry_materializations: int = 0
+    geometry_hash_calls: int = 0
+    geometry_single_resolves: int = 0
+    geometry_batch_resolves: int = 0
+    geometry_single_reads: int = 0
+    geometry_batch_reads: int = 0
 
 
 @dataclass
@@ -551,19 +566,21 @@ def _planning_error_boundary(
 class _FakePlanningGeometryLease:
     """Worker-safe read-only lease over validated immutable bytes."""
 
-    __slots__ = ("_closed", "_content", "_descriptor", "_epoch", "_lock")
+    __slots__ = ("_closed", "_content", "_descriptor", "_epoch", "_lock", "_runtime")
 
     def __init__(
         self,
         descriptor: PlanningGeometryResourceDescriptor,
         content: bytes,
         epoch: _PlanningLeaseEpoch,
+        runtime: _FakePlanningRuntime,
     ) -> None:
         self._descriptor = descriptor
         self._content = content
         self._epoch = epoch
         self._closed = False
         self._lock = threading.RLock()
+        self._runtime = runtime
 
     def _ensure_live(self) -> None:
         if self._closed or not self._epoch.live:
@@ -597,11 +614,264 @@ class _FakePlanningGeometryLease:
                         "planning geometry storage returned an invalid byte span",
                         operation="planning_geometry.read",
                     ) from None
+                self._runtime.geometry_single_reads += 1
                 return result
 
     def close(self) -> None:
         with self._lock:
             self._closed = True
+
+
+class _FakePlanningGeometryBatchLease:
+    """One atomic worker-safe lease with lazy, deduplicated materialization."""
+
+    __slots__ = (
+        "_closed",
+        "_descriptor_by_id",
+        "_descriptors",
+        "_default_payloads",
+        "_epoch",
+        "_geometry_ids",
+        "_lock",
+        "_resources_by_id",
+        "_runtime",
+        "_world_id",
+    )
+
+    def __init__(
+        self,
+        descriptors: tuple[PlanningGeometryResourceDescriptor, ...],
+        resources_by_id: dict[str, tuple[PlanningGeometryResourceDescriptor, bytes]],
+        epoch: _PlanningLeaseEpoch,
+        runtime: _FakePlanningRuntime,
+        world_id: str,
+    ) -> None:
+        descriptor_by_id: dict[str, PlanningGeometryResourceDescriptor] = {}
+        geometry_ids: list[str] = []
+        for descriptor in descriptors:
+            if descriptor.geometry_id not in descriptor_by_id:
+                descriptor_by_id[descriptor.geometry_id] = descriptor
+                geometry_ids.append(descriptor.geometry_id)
+        self._descriptors = descriptors
+        self._default_payloads: tuple[tuple[str, bytes], ...] | None = None
+        self._descriptor_by_id = descriptor_by_id
+        self._geometry_ids = tuple(geometry_ids)
+        self._resources_by_id = resources_by_id
+        self._epoch = epoch
+        self._runtime = runtime
+        self._world_id = world_id
+        self._closed = False
+        self._lock = threading.RLock()
+
+    def _ensure_live(self) -> None:
+        if self._closed or not self._epoch.live:
+            raise PlanningGeometryResourceRevokedError(
+                "planning geometry resource lease is revoked",
+                operation="planning_geometry.read",
+            ) from None
+
+    @staticmethod
+    def _read_identity(value: object) -> str:
+        canonical: object = None
+        if _planning_actual_base(value, (str,)) is str:
+            try:
+                source_length = str.__len__(value)  # type: ignore[arg-type]
+                if source_length <= 512:
+                    canonical = str.__str__(value)
+            except BaseException:
+                canonical = None
+        if type(canonical) is not str:
+            raise PlanningSceneContractError(
+                "planning geometry ID is invalid",
+                operation="planning_geometry.read",
+            ) from None
+        return canonical
+
+    def _descriptor(self, geometry_id: object) -> PlanningGeometryResourceDescriptor:
+        identity = self._read_identity(geometry_id)
+        descriptor = self._descriptor_by_id.get(identity)
+        if descriptor is None:
+            raise PlanningSceneNotFoundError(
+                "planning geometry ID is absent from the batch lease",
+                operation="planning_geometry.read",
+            ) from None
+        return descriptor
+
+    def _materialize(self, identities: tuple[str, ...], operation: str) -> dict[str, bytes]:
+        return _materialize_planning_resources(
+            self._runtime,
+            self._resources_by_id,
+            identities,
+            operation=operation,
+            world_id=self._world_id,
+        )
+
+    @property
+    def descriptors(self) -> tuple[PlanningGeometryResourceDescriptor, ...]:
+        with self._lock:
+            with self._epoch.lock:
+                self._ensure_live()
+                return self._descriptors
+
+    @property
+    def closed(self) -> bool:
+        with self._lock:
+            with self._epoch.lock:
+                return self._closed or not self._epoch.live
+
+    @_planning_error_boundary
+    def read(self, geometry_id: str, offset: int = 0, length: int | None = None) -> bytes:
+        with self._lock:
+            with self._epoch.lock:
+                self._ensure_live()
+                identity = self._read_identity(geometry_id)
+                descriptor = self._descriptor(identity)
+                start, count = descriptor.read_span(offset, length)
+                content = self._materialize((identity,), "planning_geometry.read")[identity]
+                result = content[start : start + count]
+                if type(result) is not bytes or len(result) != count:
+                    raise PlanningSceneContractError(
+                        "planning geometry storage returned an invalid byte span",
+                        operation="planning_geometry.read",
+                    ) from None
+                self._runtime.geometry_single_reads += 1
+                return result
+
+    @_planning_error_boundary
+    def read_many(
+        self,
+        geometry_ids: tuple[str, ...] | None = None,
+    ) -> tuple[tuple[str, bytes], ...]:
+        with self._lock:
+            with self._epoch.lock:
+                self._ensure_live()
+                if geometry_ids is None:
+                    if self._default_payloads is not None:
+                        self._runtime.geometry_batch_reads += 1
+                        return self._default_payloads
+                    identities = self._geometry_ids
+                else:
+                    if type(geometry_ids) is not tuple or len(geometry_ids) > 100_000:
+                        raise PlanningSceneContractError(
+                            "planning geometry batch read IDs must be a bounded immutable tuple",
+                            operation="planning_geometry.read_many",
+                        ) from None
+                    identities = tuple(self._read_identity(value) for value in geometry_ids)
+                selected = tuple((identity, self._descriptor(identity)) for identity in identities)
+                total = sum(descriptor.byte_size for _, descriptor in selected)
+                if total > PLANNING_GEOMETRY_BATCH_READ_LIMIT_BYTES:
+                    raise PlanningSceneContractError(
+                        "planning geometry batch read exceeds the aggregate byte budget",
+                        operation="planning_geometry.read_many",
+                    ) from None
+                unique_identities = tuple(dict.fromkeys(identities))
+                content_by_id = self._materialize(unique_identities, "planning_geometry.read_many")
+                self._runtime.geometry_batch_reads += 1
+                result = tuple((identity, content_by_id[identity]) for identity, _ in selected)
+                if geometry_ids is None:
+                    self._default_payloads = result
+                return result
+
+    def close(self) -> None:
+        with self._lock:
+            self._closed = True
+
+
+def _materialize_planning_resources(
+    runtime: _FakePlanningRuntime,
+    resources_by_id: dict[str, tuple[PlanningGeometryResourceDescriptor, bytes]],
+    identities: tuple[str, ...],
+    *,
+    operation: str,
+    world_id: str,
+) -> dict[str, bytes]:
+    """Materialize an exact resource set atomically on first payload access."""
+
+    materialized: dict[str, bytes] = {}
+    pending_cache: dict[
+        tuple[str, PlanningGeometryRepresentation, str],
+        tuple[bytes, str],
+    ] = {}
+    with runtime.storage_lock:
+        for identity in identities:
+            descriptor, content = resources_by_id[identity]
+            if type(content) is not bytes:
+                raise PlanningSceneContractError(
+                    "planning geometry storage did not provide immutable bytes",
+                    operation=operation,
+                    world_id=world_id,
+                ) from None
+            resolution_key = descriptor.resolution_key
+            cached = runtime.storage_cache.get(resolution_key)
+            if cached is None:
+                cached = pending_cache.get(resolution_key)
+            if cached is None:
+                runtime.geometry_hash_calls += 1
+                if hashlib.sha256(content).hexdigest() != descriptor.sha256:
+                    raise PlanningSceneHashMismatchError(
+                        "planning geometry content hash does not match the catalog",
+                        operation=operation,
+                        world_id=world_id,
+                    ) from None
+                cached = content, descriptor.locator
+                pending_cache[resolution_key] = cached
+            materialized[identity] = cached[0]
+
+        # A failed hash above leaves both the shared cache and the published
+        # materialization counter unchanged.  Exact duplicate resources reuse
+        # the pending or committed entry without another digest pass.
+        runtime.storage_cache.update(pending_cache)
+        runtime.geometry_materializations += len(pending_cache)
+    return materialized
+
+
+def _trusted_planning_resource_descriptor(
+    *,
+    provider_id: str,
+    world_id: str,
+    generation: int,
+    environment_index: int,
+    catalog_revision: int,
+    geometry_revision: int,
+    catalog_content_sha256: str,
+    lease_token: str,
+    geometry: PlanningGeometryDescriptor,
+) -> PlanningGeometryResourceDescriptor:
+    """Project already-admitted catalog fields without revalidating each field."""
+
+    resource_id = geometry.resource_id
+    content_profile = geometry.content_profile
+    resource_layout = geometry.resource_layout
+    sha256 = geometry.sha256
+    assert resource_id is not None
+    assert content_profile is not None
+    assert resource_layout is not None
+    assert sha256 is not None
+    descriptor = object.__new__(PlanningGeometryResourceDescriptor)
+    values: tuple[tuple[str, object], ...] = (
+        ("provider_id", provider_id),
+        ("world_id", world_id),
+        ("generation", generation),
+        ("environment_index", environment_index),
+        ("catalog_revision", catalog_revision),
+        ("geometry_revision", geometry_revision),
+        ("catalog_content_sha256", catalog_content_sha256),
+        ("lease_token", lease_token),
+        ("resource_id", resource_id),
+        ("geometry_id", geometry.geometry_id),
+        ("representation", geometry.representation),
+        ("storage_kind", PlanningGeometryStorageKind.IMMUTABLE_MEMORY),
+        ("locator", f"cache.{resource_id}"),
+        ("format", content_profile),
+        ("units", "m"),
+        ("axis_convention", PlanningGeometryAxisConvention.RIGHT_HANDED_Z_UP),
+        ("resource_layout", resource_layout),
+        ("byte_size", resource_layout.decoded_byte_size),
+        ("sha256", sha256),
+    )
+    for name, value in values:
+        object.__setattr__(descriptor, name, value)
+    return descriptor
 
 
 def _planning_id(prefix: str, *parts: str) -> str:
@@ -2138,7 +2408,11 @@ class FakeWorld:
         self._planning_candidate_environment = (environment_index, environment_runtime)
         try:
             if rebuild_catalog:
-                environment_runtime.catalog = self._build_planning_catalog(environment_index)
+                catalog = self._build_planning_catalog(environment_index)
+                environment_runtime.catalog = catalog
+                environment_runtime.geometry_by_id = {
+                    geometry.geometry_id: geometry for geometry in catalog.geometries
+                }
             state = self._capture_planning_state(environment_index)
         finally:
             self._planning_candidate_environment = None
@@ -2167,7 +2441,9 @@ class FakeWorld:
             lease_epoch=environment.lease_epoch,
             raw_resources=dict(environment.raw_resources),
             catalog=environment.catalog,
+            geometry_by_id=dict(environment.geometry_by_id),
             history=dict(environment.history),
+            updates=dict(environment.updates),
         )
 
     def _planning_stage_rebuild(
@@ -2193,6 +2469,7 @@ class FakeWorld:
                 candidate.raw_resources = {}
                 candidate.catalog = None
                 candidate.history = {}
+                candidate.updates = {}
             state = self._planning_capture_candidate_state(
                 environment_index,
                 candidate,
@@ -2309,7 +2586,10 @@ class FakeWorld:
         return environment_runtime.history[environment_runtime.sequence]
 
     @staticmethod
-    def _planning_sequence_value(value: object) -> int:
+    def _planning_sequence_value(
+        value: object,
+        operation: str = "world.planning_scene_delta",
+    ) -> int:
         result: object = None
         if _planning_actual_base(value, (bool, int)) is int:
             try:
@@ -2318,8 +2598,8 @@ class FakeWorld:
                 result = None
         if type(result) is not int or not 1 <= result <= 2**63 - 1:
             raise PlanningSceneContractError(
-                "planning delta base_sequence must be a positive bounded integer",
-                operation="world.planning_scene_delta",
+                "planning base_sequence must be a positive bounded integer",
+                operation=operation,
             ) from None
         return result
 
@@ -2369,7 +2649,7 @@ class FakeWorld:
         runtime = self._planning_require_authority(operation)
         environment = self._planning_environment(environment_index, operation)
         environment_runtime = runtime.environments[environment]
-        base_sequence = self._planning_sequence_value(base_sequence)
+        base_sequence = self._planning_sequence_value(base_sequence, operation)
         current = environment_runtime.history[environment_runtime.sequence]
         base = environment_runtime.history.get(base_sequence)
         if environment_runtime.force_resync or base is None:
@@ -2424,7 +2704,181 @@ class FakeWorld:
         )
 
     @staticmethod
-    def _planning_requested_representation(value: object) -> PlanningGeometryRepresentation:
+    def _planning_update_value(
+        current: PlanningSceneState,
+        previous: PlanningSceneState,
+        base_sequence: int,
+        kind: PlanningSceneUpdateKind,
+        *,
+        state_patch: PlanningSceneStatePatch | None = None,
+        attachment_patch: PlanningSceneAttachmentPatch | None = None,
+        catalog: PlanningSceneCatalog | None = None,
+        state: PlanningSceneState | None = None,
+        resync_required: bool = False,
+    ) -> PlanningSceneUpdate:
+        return PlanningSceneUpdate(
+            provider_id=current.provider_id,
+            world_id=current.world_id,
+            generation=current.generation,
+            environment_index=current.environment_index,
+            tick=current.tick,
+            base_sequence=base_sequence,
+            sequence=current.sequence,
+            previous_world_revision=previous.world_revision,
+            world_revision=current.world_revision,
+            previous_catalog_revision=previous.catalog_revision,
+            catalog_revision=current.catalog_revision,
+            previous_catalog_content_sha256=(
+                None if kind is PlanningSceneUpdateKind.RESYNC else previous.catalog_content_sha256
+            ),
+            catalog_content_sha256=(
+                None if kind is PlanningSceneUpdateKind.RESYNC else current.catalog_content_sha256
+            ),
+            previous_geometry_revision=previous.geometry_revision,
+            geometry_revision=current.geometry_revision,
+            previous_transform_revision=previous.transform_revision,
+            transform_revision=current.transform_revision,
+            previous_attachment_revision=previous.attachment_revision,
+            attachment_revision=current.attachment_revision,
+            kind=kind,
+            state_patch=state_patch,
+            attachment_patch=attachment_patch,
+            catalog=catalog,
+            state=state,
+            resync_required=resync_required,
+        )
+
+    @staticmethod
+    def _planning_state_patch(
+        previous: PlanningSceneState,
+        current: PlanningSceneState,
+    ) -> PlanningSceneStatePatch:
+        if (
+            current.entities is previous.entities
+            and current.links is previous.links
+            and current.frames is previous.frames
+            and current.articulations is previous.articulations
+            and current.geometry_transforms is previous.geometry_transforms
+        ):
+            return PlanningSceneStatePatch()
+
+        def changed(values: tuple[object, ...], prior: tuple[object, ...], identity: str) -> tuple[object, ...]:
+            prior_by_id = {getattr(item, identity): item for item in prior}
+            return tuple(item for item in values if prior_by_id.get(getattr(item, identity)) != item)
+
+        return PlanningSceneStatePatch(
+            entities=cast(
+                tuple[PlanningEntityState, ...],
+                changed(current.entities, previous.entities, "entity_id"),
+            ),
+            links=cast(
+                tuple[PlanningLinkState, ...],
+                changed(current.links, previous.links, "link_id"),
+            ),
+            frames=cast(
+                tuple[PlanningFrameState, ...],
+                changed(current.frames, previous.frames, "frame_id"),
+            ),
+            articulations=cast(
+                tuple[PlanningArticulationState, ...],
+                changed(current.articulations, previous.articulations, "entity_id"),
+            ),
+            geometry_transforms=cast(
+                tuple[PlanningGeometryTransform, ...],
+                changed(
+                    current.geometry_transforms,
+                    previous.geometry_transforms,
+                    "geometry_id",
+                ),
+            ),
+        )
+
+    @staticmethod
+    def _planning_attachment_patch(
+        previous: PlanningSceneState,
+        current: PlanningSceneState,
+    ) -> PlanningSceneAttachmentPatch:
+        previous_by_id = {item.attachment_id: item for item in previous.attachments}
+        current_by_id = {item.attachment_id: item for item in current.attachments}
+        return PlanningSceneAttachmentPatch(
+            upserted=tuple(
+                item
+                for item in current.attachments
+                if previous_by_id.get(item.attachment_id) != item
+            ),
+            removed_ids=tuple(
+                identity for identity in previous_by_id if identity not in current_by_id
+            ),
+        )
+
+    def _planning_scene_update_impl(
+        self,
+        base_sequence: int,
+        environment_index: int = 0,
+    ) -> PlanningSceneUpdate:
+        operation = "world.planning_scene_update"
+        runtime = self._planning_require_authority(operation)
+        environment = self._planning_environment(environment_index, operation)
+        environment_runtime = runtime.environments[environment]
+        base_sequence = self._planning_sequence_value(base_sequence, operation)
+        current = environment_runtime.history[environment_runtime.sequence]
+        base = environment_runtime.history.get(base_sequence)
+        if environment_runtime.force_resync or base is None:
+            update = self._planning_update_value(
+                current,
+                current,
+                base_sequence,
+                PlanningSceneUpdateKind.RESYNC,
+                resync_required=True,
+            )
+            environment_runtime.force_resync = False
+            return update
+        cached = environment_runtime.updates.get(base_sequence)
+        if cached is not None and cached.sequence == current.sequence:
+            return cached
+        if current.catalog_revision != base.catalog_revision:
+            catalog = environment_runtime.catalog
+            assert catalog is not None
+            return self._planning_update_value(
+                current,
+                base,
+                base_sequence,
+                PlanningSceneUpdateKind.STRUCTURAL,
+                catalog=catalog,
+                state=current,
+            )
+
+        state_patch = self._planning_state_patch(base, current)
+        attachment_patch = self._planning_attachment_patch(base, current)
+        if not attachment_patch.empty:
+            return self._planning_update_value(
+                current,
+                base,
+                base_sequence,
+                PlanningSceneUpdateKind.ATTACHMENT_PATCH,
+                state_patch=None if state_patch.empty else state_patch,
+                attachment_patch=attachment_patch,
+            )
+        if not state_patch.empty:
+            return self._planning_update_value(
+                current,
+                base,
+                base_sequence,
+                PlanningSceneUpdateKind.STATE_PATCH,
+                state_patch=state_patch,
+            )
+        return self._planning_update_value(
+            current,
+            base,
+            base_sequence,
+            PlanningSceneUpdateKind.UNCHANGED,
+        )
+
+    @staticmethod
+    def _planning_requested_representation(
+        value: object,
+        operation: str = "world.resolve_planning_geometry",
+    ) -> PlanningGeometryRepresentation:
         if type(value) is PlanningGeometryRepresentation:
             return value
         canonical: object = None
@@ -2447,11 +2901,14 @@ class FakeWorld:
                     return representation
         raise PlanningSceneRepresentationError(
             "requested planning geometry representation is unavailable",
-            operation="world.resolve_planning_geometry",
+            operation=operation,
         ) from None
 
     @staticmethod
-    def _planning_geometry_identity(value: object) -> str:
+    def _planning_geometry_identity(
+        value: object,
+        operation: str = "world.resolve_planning_geometry",
+    ) -> str:
         canonical: object = None
         if _planning_actual_base(value, (str,)) is str:
             try:
@@ -2469,15 +2926,169 @@ class FakeWorld:
         if not valid_text:
             raise PlanningSceneContractError(
                 "planning geometry ID is invalid",
-                operation="world.resolve_planning_geometry",
+                operation=operation,
             ) from None
         assert type(canonical) is str
         if len(canonical.encode("utf-8")) > 1024 or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:/-]*", canonical) is None:
             raise PlanningSceneContractError(
                 "planning geometry ID is invalid",
-                operation="world.resolve_planning_geometry",
+                operation=operation,
             ) from None
         return canonical
+
+    def _resolve_planning_geometry_values(
+        self,
+        requests: tuple[PlanningGeometryRequest, ...],
+        environment: int,
+        operation: str,
+        *,
+        validate_internal_metadata: bool,
+    ) -> tuple[
+        tuple[PlanningGeometryResourceDescriptor, ...],
+        dict[str, tuple[PlanningGeometryResourceDescriptor, bytes]],
+    ]:
+        runtime = self._planning_runtime
+        environment_runtime = runtime.environments[environment]
+        catalog = environment_runtime.catalog
+        assert catalog is not None
+        ordered_keys: list[tuple[str, PlanningGeometryRepresentation]] = []
+        unique: dict[
+            tuple[str, PlanningGeometryRepresentation],
+            tuple[
+                PlanningGeometryDescriptor,
+                tuple[
+                    bytes,
+                    PlanningGeometryRepresentation,
+                    str,
+                    PlanningGeometryContentProfile,
+                    tuple[int, int],
+                    tuple[int, int],
+                ],
+            ],
+        ] = {}
+
+        # PlanningGeometryRequest has already detached and validated its public
+        # values.  The provider therefore closes requests directly against its
+        # prebuilt catalog index instead of repeating regex/UTF-8 validation.
+        for request in requests:
+            identity = request.geometry_id
+            geometry = environment_runtime.geometry_by_id.get(identity)
+            if geometry is None:
+                raise PlanningSceneNotFoundError(
+                    "planning geometry ID does not exist",
+                    operation=operation,
+                    world_id=self.world_id,
+                ) from None
+            requested = (
+                geometry.representation
+                if request.representation is None
+                else request.representation
+            )
+            if requested is not geometry.representation or geometry.resolution_key is None:
+                raise PlanningSceneRepresentationError(
+                    "requested planning geometry representation is unavailable",
+                    operation=operation,
+                    world_id=self.world_id,
+                ) from None
+            raw = environment_runtime.raw_resources.get(identity)
+            if raw is None:
+                raise PlanningSceneRepresentationError(
+                    "planning geometry has no materializable resource",
+                    operation=operation,
+                    world_id=self.world_id,
+                ) from None
+            if type(raw) is not tuple or len(raw) != 6:
+                raise PlanningSceneContractError(
+                    "planning geometry resource metadata is invalid",
+                    operation=operation,
+                    world_id=self.world_id,
+                ) from None
+            if validate_internal_metadata:
+                content, raw_representation, resource_id, profile, vertex_shape, index_shape = raw
+                layout = geometry.resource_layout
+                if (
+                    type(layout) is not PlanningGeometryResourceLayout
+                    or type(content) is not bytes
+                    or raw_representation is not requested
+                ):
+                    raise PlanningSceneHashMismatchError(
+                        "planning geometry content metadata does not match the catalog",
+                        operation=operation,
+                        world_id=self.world_id,
+                    ) from None
+                exact_mesh_shapes = (
+                    type(vertex_shape) is tuple
+                    and len(vertex_shape) == 2
+                    and all(type(value) is int for value in vertex_shape)
+                    and type(index_shape) is tuple
+                    and len(index_shape) == 2
+                    and all(type(value) is int for value in index_shape)
+                )
+                if (
+                    type(resource_id) is not str
+                    or resource_id != geometry.resource_id
+                    or profile is not geometry.content_profile
+                    or not exact_mesh_shapes
+                    or vertex_shape != layout.vertex_shape
+                    or index_shape != layout.index_shape
+                ):
+                    raise PlanningSceneContractError(
+                        "planning geometry resource metadata does not match the catalog layout",
+                        operation=operation,
+                        world_id=self.world_id,
+                    ) from None
+            key = identity, requested
+            ordered_keys.append(key)
+            unique.setdefault(key, (geometry, raw))
+
+        if requests and (
+            type(environment_runtime.lease_serial) is not int
+            or not 0 <= environment_runtime.lease_serial < _FAKE_PLANNING_MAX_COUNTER
+        ):
+            raise PlanningSceneContractError(
+                "planning geometry lease identity is exhausted",
+                operation=operation,
+                world_id=self.world_id,
+            ) from None
+
+        next_serial = environment_runtime.lease_serial + (1 if requests else 0)
+        batch_token = (
+            _planning_id(
+                "lease",
+                self.world_id,
+                str(environment_runtime.generation),
+                str(environment),
+                str(next_serial),
+            )
+            if requests
+            else ""
+        )
+        descriptor_by_key: dict[
+            tuple[str, PlanningGeometryRepresentation],
+            PlanningGeometryResourceDescriptor,
+        ] = {}
+        resources_by_id: dict[str, tuple[PlanningGeometryResourceDescriptor, bytes]] = {}
+        for index, (key, (geometry, raw)) in enumerate(unique.items()):
+            descriptor = _trusted_planning_resource_descriptor(
+                provider_id=self._descriptor.provider_id,
+                world_id=self.world_id,
+                generation=environment_runtime.generation,
+                environment_index=environment,
+                catalog_revision=catalog.catalog_revision,
+                geometry_revision=catalog.geometry_revision,
+                catalog_content_sha256=catalog.content_sha256,
+                lease_token=f"{batch_token}.{index}",
+                geometry=geometry,
+            )
+            descriptor_by_key[key] = descriptor
+            resources_by_id[geometry.geometry_id] = descriptor, raw[0]
+
+        # No payload is copied, hashed, or inserted into the shared cache while
+        # opening a lease.  Provider-owned catalog values were admitted once at
+        # publication; re-running public constructor validation here would only
+        # add O(resources * fields) work to the hot path.
+        environment_runtime.lease_serial = next_serial
+        return tuple(descriptor_by_key[key] for key in ordered_keys), resources_by_id
 
     def _resolve_planning_geometry_impl(
         self,
@@ -2488,134 +3099,68 @@ class FakeWorld:
         operation = "world.resolve_planning_geometry"
         runtime = self._planning_require_authority(operation)
         environment = self._planning_environment(environment_index, operation)
-        environment_runtime = runtime.environments[environment]
-        identity = self._planning_geometry_identity(geometry_id)
-        catalog = environment_runtime.catalog
-        assert catalog is not None
-        geometry = next((item for item in catalog.geometries if item.geometry_id == identity), None)
-        if geometry is None:
-            raise PlanningSceneNotFoundError(
-                "planning geometry ID does not exist",
-                operation=operation,
-                world_id=self.world_id,
-            ) from None
+        identity = self._planning_geometry_identity(geometry_id, operation)
         requested = (
-            geometry.representation
+            None
             if representation is None
-            else self._planning_requested_representation(representation)
+            else self._planning_requested_representation(representation, operation)
         )
-        if requested is not geometry.representation or geometry.resolution_key is None:
-            raise PlanningSceneRepresentationError(
-                "requested planning geometry representation is unavailable",
-                operation=operation,
-                world_id=self.world_id,
-            ) from None
-        raw = environment_runtime.raw_resources.get(identity)
-        if raw is None:
-            raise PlanningSceneRepresentationError(
-                "planning geometry has no materializable resource",
-                operation=operation,
-                world_id=self.world_id,
-            ) from None
-        if type(raw) is not tuple or len(raw) != 6:
-            raise PlanningSceneContractError(
-                "planning geometry resource metadata is invalid",
-                operation=operation,
-                world_id=self.world_id,
-            ) from None
-        content, raw_representation, resource_id, profile, vertex_shape, index_shape = raw
-        layout = geometry.resource_layout
-        assert type(layout) is PlanningGeometryResourceLayout
-        if type(content) is not bytes or raw_representation is not requested:
-            raise PlanningSceneHashMismatchError(
-                "planning geometry content hash does not match the catalog",
-                operation=operation,
-                world_id=self.world_id,
-            ) from None
-        digest = hashlib.sha256(content).hexdigest()
-        if digest != geometry.sha256:
-            raise PlanningSceneHashMismatchError(
-                "planning geometry content hash does not match the catalog",
-                operation=operation,
-                world_id=self.world_id,
-            ) from None
-        exact_mesh_shapes = (
-            type(vertex_shape) is tuple
-            and len(vertex_shape) == 2
-            and all(type(value) is int for value in vertex_shape)
-            and type(index_shape) is tuple
-            and len(index_shape) == 2
-            and all(type(value) is int for value in index_shape)
-        )
-        if (
-            type(resource_id) is not str
-            or resource_id != geometry.resource_id
-            or profile is not geometry.content_profile
-            or not exact_mesh_shapes
-            or vertex_shape != layout.vertex_shape
-            or index_shape != layout.index_shape
-        ):
-            raise PlanningSceneContractError(
-                "planning geometry resource metadata does not match the catalog layout",
-                operation=operation,
-                world_id=self.world_id,
-            ) from None
-        if (
-            type(environment_runtime.lease_serial) is not int
-            or not 0 <= environment_runtime.lease_serial < _FAKE_PLANNING_MAX_COUNTER
-        ):
-            raise PlanningSceneContractError(
-                "planning geometry lease identity is exhausted",
-                operation=operation,
-                world_id=self.world_id,
-            ) from None
-        key = geometry.resolution_key
-        assert key is not None
-        cached = runtime.storage_cache.get(key)
-        if cached is None:
-            locator = _planning_id("cache", identity, requested.value, digest)
-            cached = bytes(content), locator
-            if hashlib.sha256(cached[0]).hexdigest() != digest:
-                raise PlanningSceneHashMismatchError(
-                    "planning geometry cache verification failed",
-                    operation=operation,
-                    world_id=self.world_id,
-                ) from None
-            runtime.storage_cache[key] = cached
-            runtime.geometry_materializations += 1
-        immutable_content, locator = cached
-        environment_runtime.lease_serial += 1
-        lease_token = _planning_id(
-            "lease",
-            self.world_id,
-            str(environment_runtime.generation),
-            str(environment),
-            identity,
-            str(environment_runtime.lease_serial),
-        )
-        descriptor = PlanningGeometryResourceDescriptor(
-            self._descriptor.provider_id,
-            self.world_id,
-            environment_runtime.generation,
+        descriptors, resources_by_id = self._resolve_planning_geometry_values(
+            (PlanningGeometryRequest(identity, requested),),
             environment,
-            catalog.catalog_revision,
-            catalog.geometry_revision,
-            catalog.content_sha256,
-            lease_token,
-            resource_id,
-            identity,
-            requested,
-            PlanningGeometryStorageKind.IMMUTABLE_MEMORY,
-            locator,
-            profile,
-            "m",
-            PlanningGeometryAxisConvention.RIGHT_HANDED_Z_UP,
-            layout,
-            len(immutable_content),
-            digest,
+            operation,
+            validate_internal_metadata=True,
         )
-        descriptor.validate_against(catalog)
-        return _FakePlanningGeometryLease(descriptor, immutable_content, environment_runtime.lease_epoch)
+        runtime.geometry_single_resolves += 1
+        descriptor = descriptors[0]
+        content_by_id = _materialize_planning_resources(
+            runtime,
+            resources_by_id,
+            (descriptor.geometry_id,),
+            operation=operation,
+            world_id=self.world_id,
+        )
+        return _FakePlanningGeometryLease(
+            descriptor,
+            content_by_id[descriptor.geometry_id],
+            runtime.environments[environment].lease_epoch,
+            runtime,
+        )
+
+    def _resolve_planning_geometries_impl(
+        self,
+        requests: tuple[PlanningGeometryRequest, ...],
+        environment_index: int = 0,
+    ) -> PlanningGeometryBatchLease:
+        operation = "world.resolve_planning_geometries"
+        runtime = self._planning_require_authority(operation)
+        environment = self._planning_environment(environment_index, operation)
+        if type(requests) is not tuple or len(requests) > 100_000:
+            raise PlanningSceneContractError(
+                "planning geometry requests must be a bounded immutable tuple",
+                operation=operation,
+                world_id=self.world_id,
+            ) from None
+        if any(type(request) is not PlanningGeometryRequest for request in requests):
+            raise PlanningSceneContractError(
+                "planning geometry requests contain an invalid value",
+                operation=operation,
+                world_id=self.world_id,
+            ) from None
+        runtime.geometry_batch_resolves += 1
+        descriptors, resources_by_id = self._resolve_planning_geometry_values(
+            requests,
+            environment,
+            operation,
+            validate_internal_metadata=False,
+        )
+        return _FakePlanningGeometryBatchLease(
+            descriptors,
+            resources_by_id,
+            runtime.environments[environment].lease_epoch,
+            runtime,
+            self.world_id,
+        )
 
     def _planning_require_commit_capacity(
         self,
@@ -2712,6 +3257,40 @@ class FakeWorld:
                 history[state.sequence] = state
                 while len(history) > 128:
                     del history[next(iter(history))]
+            state_patch = self._planning_state_patch(previous, state)
+            attachment_patch = self._planning_attachment_patch(previous, state)
+            if not attachment_patch.empty:
+                update = self._planning_update_value(
+                    state,
+                    previous,
+                    previous.sequence,
+                    PlanningSceneUpdateKind.ATTACHMENT_PATCH,
+                    state_patch=None if state_patch.empty else state_patch,
+                    attachment_patch=attachment_patch,
+                )
+            elif not state_patch.empty:
+                update = self._planning_update_value(
+                    state,
+                    previous,
+                    previous.sequence,
+                    PlanningSceneUpdateKind.STATE_PATCH,
+                    state_patch=state_patch,
+                )
+            else:
+                update = self._planning_update_value(
+                    state,
+                    previous,
+                    previous.sequence,
+                    PlanningSceneUpdateKind.UNCHANGED,
+                )
+            updates = dict(current.updates)
+            updates[previous.sequence] = update
+            retained_sequences = frozenset(history)
+            candidate.updates = {
+                base: retained
+                for base, retained in updates.items()
+                if base in retained_sequences
+            }
             candidate.force_resync = candidate.force_resync or any(
                 counter == _FAKE_PLANNING_MAX_COUNTER
                 for counter in (
@@ -3884,6 +4463,10 @@ class FakePlanningWorld(FakeWorld):
         return self._planning_scene_delta_impl(base_sequence, environment_index)
 
     @_planning_error_boundary
+    def planning_scene_update(self, base_sequence: int, environment_index: int = 0) -> PlanningSceneUpdate:
+        return self._planning_scene_update_impl(base_sequence, environment_index)
+
+    @_planning_error_boundary
     def resolve_planning_geometry(
         self,
         geometry_id: str,
@@ -3891,6 +4474,14 @@ class FakePlanningWorld(FakeWorld):
         environment_index: int = 0,
     ) -> PlanningGeometryLease:
         return self._resolve_planning_geometry_impl(geometry_id, representation, environment_index)
+
+    @_planning_error_boundary
+    def resolve_planning_geometries(
+        self,
+        requests: tuple[PlanningGeometryRequest, ...],
+        environment_index: int = 0,
+    ) -> PlanningGeometryBatchLease:
+        return self._resolve_planning_geometries_impl(requests, environment_index)
 
     @_planning_error_boundary
     def reset(self, environment_indices: Iterable[int] | None = None) -> ResetResult:
@@ -4012,6 +4603,7 @@ class FakePlanningWorld(FakeWorld):
                         environment_runtime.lease_epoch.live = False
                     environment_runtime.history.clear()
                     environment_runtime.catalog = None
+                    environment_runtime.geometry_by_id.clear()
                     environment_runtime.raw_resources.clear()
                 runtime.storage_cache.clear()
             self._planning_candidate_environment = None

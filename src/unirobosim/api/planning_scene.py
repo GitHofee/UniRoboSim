@@ -35,6 +35,7 @@ PLANNING_FRAME_DECLARATIONS_SCHEMA_VERSION = "unirobosim.planning-frame-declarat
 PLANNING_SYSTEM_ENTITY_ID = "system.simulator_effective"
 PLANNING_SYSTEM_ENTITY_PATH = "/system/simulator_effective"
 PLANNING_GEOMETRY_READ_LIMIT_BYTES = 64 * 1024 * 1024
+PLANNING_GEOMETRY_BATCH_READ_LIMIT_BYTES = 512 * 1024 * 1024
 
 _MAX_COUNTER = 2**63 - 1
 _MAX_RESOURCE_BYTES = 8 * 1024 * 1024 * 1024
@@ -362,6 +363,16 @@ class PlanningSceneDeltaKind(StrEnum):
     STRUCTURAL = "structural"
     STATE = "state"
     ATTACHMENT = "attachment"
+    RESYNC = "resync"
+
+
+class PlanningSceneUpdateKind(StrEnum):
+    """Change-only planning publication categories for optional producer SPI."""
+
+    UNCHANGED = "unchanged"
+    STATE_PATCH = "state_patch"
+    ATTACHMENT_PATCH = "attachment_patch"
+    STRUCTURAL = "structural"
     RESYNC = "resync"
 
 
@@ -1522,6 +1533,72 @@ class PlanningAttachment(_PlanningValue):
             raise _invalid("self-frame attachment transform must be canonical identity") from None
 
 
+@dataclass(frozen=True, slots=True)
+class PlanningSceneStatePatch(_PlanningValue):
+    """Canonical changed state records; omitted records retain prior values."""
+
+    entities: tuple[PlanningEntityState, ...] = ()
+    links: tuple[PlanningLinkState, ...] = ()
+    frames: tuple[PlanningFrameState, ...] = ()
+    articulations: tuple[PlanningArticulationState, ...] = ()
+    geometry_transforms: tuple[PlanningGeometryTransform, ...] = ()
+
+    def __post_init__(self) -> None:
+        groups: tuple[tuple[str, tuple[object, ...], type, str], ...] = (
+            ("entities", self.entities, PlanningEntityState, "entity_id"),
+            ("links", self.links, PlanningLinkState, "link_id"),
+            ("frames", self.frames, PlanningFrameState, "frame_id"),
+            ("articulations", self.articulations, PlanningArticulationState, "entity_id"),
+            (
+                "geometry_transforms",
+                self.geometry_transforms,
+                PlanningGeometryTransform,
+                "geometry_id",
+            ),
+        )
+        total = 0
+        for name, values, item_type, identity in groups:
+            canonical = _typed_tuple(values, item_type, f"state patch {name}")
+            _unique_sorted(canonical, identity, f"state patch {name}")
+            object.__setattr__(self, name, canonical)
+            total += len(canonical)
+        if total > _MAX_ITEMS:
+            raise _invalid("state patch exceeds the aggregate node budget") from None
+
+    @property
+    def empty(self) -> bool:
+        return not (
+            self.entities
+            or self.links
+            or self.frames
+            or self.articulations
+            or self.geometry_transforms
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class PlanningSceneAttachmentPatch(_PlanningValue):
+    """Canonical attachment upserts and removals."""
+
+    upserted: tuple[PlanningAttachment, ...] = ()
+    removed_ids: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        upserted = _typed_tuple(self.upserted, PlanningAttachment, "attachment patch upserted")
+        _unique_sorted(upserted, "attachment_id", "attachment patch upserted")
+        removed_ids = _identifier_tuple(self.removed_ids, "attachment patch removed_ids")
+        if frozenset(item.attachment_id for item in upserted) & frozenset(removed_ids):
+            raise _invalid("attachment patch upserts and removals must be disjoint") from None
+        if len(upserted) + len(removed_ids) > _MAX_ITEMS:
+            raise _invalid("attachment patch exceeds the aggregate node budget") from None
+        object.__setattr__(self, "upserted", upserted)
+        object.__setattr__(self, "removed_ids", removed_ids)
+
+    @property
+    def empty(self) -> bool:
+        return not self.upserted and not self.removed_ids
+
+
 def _is_identity_pose(pose: PlanningPose) -> bool:
     return pose.position_m == (0.0, 0.0, 0.0) and pose.orientation_xyzw == (0.0, 0.0, 0.0, 1.0)
 
@@ -1792,6 +1869,210 @@ class PlanningSceneState(_PlanningValue):
                     raise _invalid("attachment geometry owner must be the child entity") from None
                 if attachment.child_link_id is not None and attached_geometry.owner_link_id != attachment.child_link_id:
                     raise _invalid("attachment geometry link owner must be the child link") from None
+
+
+@dataclass(frozen=True, slots=True)
+class PlanningSceneUpdate(_PlanningValue):
+    """Optional producer-native change-only planning publication."""
+
+    provider_id: str
+    world_id: str
+    generation: int
+    environment_index: int
+    tick: Tick
+    base_sequence: int
+    sequence: int
+    previous_world_revision: int
+    world_revision: int
+    previous_catalog_revision: int
+    catalog_revision: int
+    previous_catalog_content_sha256: str | None
+    catalog_content_sha256: str | None
+    previous_geometry_revision: int
+    geometry_revision: int
+    previous_transform_revision: int
+    transform_revision: int
+    previous_attachment_revision: int
+    attachment_revision: int
+    kind: PlanningSceneUpdateKind
+    state_patch: PlanningSceneStatePatch | None = None
+    attachment_patch: PlanningSceneAttachmentPatch | None = None
+    catalog: PlanningSceneCatalog | None = None
+    state: PlanningSceneState | None = None
+    resync_required: bool = False
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "provider_id", _text(self.provider_id, "update provider_id", identifier=True))
+        object.__setattr__(self, "world_id", _text(self.world_id, "update world_id", identifier=True))
+        object.__setattr__(self, "generation", _integer(self.generation, "update generation", minimum=1))
+        object.__setattr__(
+            self,
+            "environment_index",
+            _integer(self.environment_index, "update environment_index"),
+        )
+        object.__setattr__(self, "tick", _tick(self.tick, "update tick"))
+        object.__setattr__(
+            self,
+            "base_sequence",
+            _integer(self.base_sequence, "update base_sequence", minimum=1),
+        )
+        object.__setattr__(self, "sequence", _integer(self.sequence, "update sequence", minimum=1))
+        kind = _enum(self.kind, PlanningSceneUpdateKind, "update kind")
+        object.__setattr__(self, "kind", kind)
+        if kind not in {PlanningSceneUpdateKind.UNCHANGED, PlanningSceneUpdateKind.RESYNC} and (
+            self.sequence <= self.base_sequence
+        ):
+            raise _invalid("changed update sequence must advance beyond base_sequence") from None
+        if kind is PlanningSceneUpdateKind.UNCHANGED and self.sequence < self.base_sequence:
+            raise _invalid("unchanged update sequence cannot precede base_sequence") from None
+
+        revision_pairs: dict[str, tuple[int, int]] = {}
+        for name in ("world", "catalog", "geometry", "transform", "attachment"):
+            previous = _integer(
+                getattr(self, f"previous_{name}_revision"),
+                f"update previous {name} revision",
+                minimum=1,
+            )
+            current = _integer(getattr(self, f"{name}_revision"), f"update {name} revision", minimum=1)
+            if current < previous:
+                raise _invalid("update revisions cannot move backwards") from None
+            object.__setattr__(self, f"previous_{name}_revision", previous)
+            object.__setattr__(self, f"{name}_revision", current)
+            revision_pairs[name] = previous, current
+
+        if kind is PlanningSceneUpdateKind.RESYNC:
+            if self.previous_catalog_content_sha256 is not None or self.catalog_content_sha256 is not None:
+                raise _invalid("resync update cannot claim catalog content digests") from None
+        else:
+            previous_digest = _sha256(
+                self.previous_catalog_content_sha256,
+                "update previous catalog_content_sha256",
+            )
+            current_digest = _sha256(self.catalog_content_sha256, "update catalog_content_sha256")
+            object.__setattr__(self, "previous_catalog_content_sha256", previous_digest)
+            object.__setattr__(self, "catalog_content_sha256", current_digest)
+
+        if kind is not PlanningSceneUpdateKind.STRUCTURAL:
+            if (
+                revision_pairs["catalog"][0] != revision_pairs["catalog"][1]
+                or revision_pairs["geometry"][0] != revision_pairs["geometry"][1]
+            ):
+                raise _invalid("non-structural update cannot change static revisions") from None
+            if kind is not PlanningSceneUpdateKind.RESYNC and (
+                self.previous_catalog_content_sha256 != self.catalog_content_sha256
+            ):
+                raise _invalid("non-structural update cannot change catalog digest") from None
+
+        if self.state_patch is not None and type(self.state_patch) is not PlanningSceneStatePatch:
+            raise _invalid("update state_patch has an invalid type") from None
+        if self.attachment_patch is not None and type(self.attachment_patch) is not PlanningSceneAttachmentPatch:
+            raise _invalid("update attachment_patch has an invalid type") from None
+        if type(self.resync_required) is not bool:
+            raise _invalid("update resync_required must be an exact boolean") from None
+
+        has_state_patch = self.state_patch is not None and not self.state_patch.empty
+        has_attachment_patch = self.attachment_patch is not None and not self.attachment_patch.empty
+        if kind is PlanningSceneUpdateKind.UNCHANGED:
+            if (
+                self.state_patch is not None
+                or self.attachment_patch is not None
+                or self.catalog is not None
+                or self.state is not None
+                or self.resync_required
+            ):
+                raise _invalid("unchanged update must be payload-free") from None
+            if revision_pairs["attachment"][0] != revision_pairs["attachment"][1]:
+                raise _invalid("unchanged update cannot advance attachment revision") from None
+            if self.sequence == self.base_sequence and any(
+                previous != current for previous, current in revision_pairs.values()
+            ):
+                raise _invalid("same-sequence unchanged update cannot advance revisions") from None
+            if (
+                self.sequence > self.base_sequence
+                and revision_pairs["world"][1] <= revision_pairs["world"][0]
+            ):
+                raise _invalid("advanced unchanged update must advance world revision") from None
+        elif kind is PlanningSceneUpdateKind.STATE_PATCH:
+            if (
+                not has_state_patch
+                or self.attachment_patch is not None
+                or self.catalog is not None
+                or self.state is not None
+                or self.resync_required
+            ):
+                raise _invalid("state update requires exactly one non-empty state patch") from None
+            if (
+                revision_pairs["world"][1] <= revision_pairs["world"][0]
+                or revision_pairs["transform"][1] <= revision_pairs["transform"][0]
+                or revision_pairs["attachment"][0] != revision_pairs["attachment"][1]
+            ):
+                raise _invalid("state update revisions do not match its payload") from None
+        elif kind is PlanningSceneUpdateKind.ATTACHMENT_PATCH:
+            if (
+                not has_attachment_patch
+                or self.catalog is not None
+                or self.state is not None
+                or self.resync_required
+                or self.state_patch is not None
+                and not has_state_patch
+            ):
+                raise _invalid("attachment update requires a non-empty attachment patch") from None
+            expected_transform_advance = revision_pairs["transform"][1] > revision_pairs["transform"][0]
+            if (
+                revision_pairs["world"][1] <= revision_pairs["world"][0]
+                or revision_pairs["attachment"][1] <= revision_pairs["attachment"][0]
+                or expected_transform_advance is not has_state_patch
+            ):
+                raise _invalid("attachment update revisions do not match its payload") from None
+        elif kind is PlanningSceneUpdateKind.STRUCTURAL:
+            if (
+                type(self.catalog) is not PlanningSceneCatalog
+                or type(self.state) is not PlanningSceneState
+                or self.state_patch is not None
+                or self.attachment_patch is not None
+                or self.resync_required
+                or revision_pairs["world"][1] <= revision_pairs["world"][0]
+                or revision_pairs["catalog"][1] <= revision_pairs["catalog"][0]
+            ):
+                raise _invalid("structural update requires exactly a full catalog and state") from None
+            self.state.validate_against(self.catalog)
+        else:
+            if (
+                not self.resync_required
+                or self.state_patch is not None
+                or self.attachment_patch is not None
+                or self.catalog is not None
+                or self.state is not None
+            ):
+                raise _invalid("resync update must be terminal and payload-free") from None
+
+        for snapshot in (self.catalog, self.state):
+            if snapshot is None:
+                continue
+            if (
+                snapshot.provider_id != self.provider_id
+                or snapshot.world_id != self.world_id
+                or snapshot.generation != self.generation
+                or snapshot.environment_index != self.environment_index
+            ):
+                raise _invalid("update payload envelope does not match update") from None
+        if self.catalog is not None and (
+            self.catalog.catalog_revision != self.catalog_revision
+            or self.catalog.geometry_revision != self.geometry_revision
+            or self.catalog.content_sha256 != self.catalog_content_sha256
+        ):
+            raise _invalid("update catalog identity does not match its payload") from None
+        if self.state is not None and (
+            self.state.sequence != self.sequence
+            or self.state.tick != self.tick
+            or self.state.world_revision != self.world_revision
+            or self.state.catalog_revision != self.catalog_revision
+            or self.state.catalog_content_sha256 != self.catalog_content_sha256
+            or self.state.geometry_revision != self.geometry_revision
+            or self.state.transform_revision != self.transform_revision
+            or self.state.attachment_revision != self.attachment_revision
+        ):
+            raise _invalid("update state identity does not match its payload") from None
 
 
 @dataclass(frozen=True, slots=True)
@@ -2226,6 +2507,73 @@ class PlanningGeometryLease(Protocol):
     def close(self) -> None: ...
 
 
+@dataclass(frozen=True, slots=True)
+class PlanningGeometryRequest(_PlanningValue):
+    """One exact resource request in a native planning-geometry batch."""
+
+    geometry_id: str
+    representation: PlanningGeometryRepresentation | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "geometry_id", _text(self.geometry_id, "request geometry_id", identifier=True))
+        if self.representation is not None:
+            object.__setattr__(
+                self,
+                "representation",
+                _enum(self.representation, PlanningGeometryRepresentation, "request representation"),
+            )
+
+
+@runtime_checkable
+class PlanningGeometryBatchLease(Protocol):
+    """Worker-safe atomic lease over an ordered geometry request batch."""
+
+    @property
+    def descriptors(self) -> tuple[PlanningGeometryResourceDescriptor, ...]: ...
+
+    @property
+    def closed(self) -> bool: ...
+
+    def read(self, geometry_id: str, offset: int = 0, length: int | None = None) -> bytes: ...
+
+    def read_many(
+        self,
+        geometry_ids: tuple[str, ...] | None = None,
+    ) -> tuple[tuple[str, bytes], ...]: ...
+
+    def close(self) -> None: ...
+
+
+@runtime_checkable
+class PlanningGeometryBatchWorld(Protocol):
+    """Optional native batch extension kept separate from PlanningSceneWorld."""
+
+    def resolve_planning_geometries(
+        self,
+        requests: tuple[PlanningGeometryRequest, ...],
+        environment_index: int = 0,
+    ) -> PlanningGeometryBatchLease:
+        """Resolve all requests atomically and preserve their input order.
+
+        Repeated requests may share immutable materialization and descriptor
+        objects.  If any request fails, no live lease is returned.  Closing the
+        lease revokes every descriptor and read in the batch at once.
+        """
+
+        ...
+
+
+@runtime_checkable
+class PlanningSceneUpdateWorld(Protocol):
+    """Optional native change-only extension kept separate from PlanningSceneWorld."""
+
+    def planning_scene_update(
+        self,
+        base_sequence: int,
+        environment_index: int = 0,
+    ) -> PlanningSceneUpdate: ...
+
+
 @runtime_checkable
 class PlanningSceneWorld(Protocol):
     """Optional synchronous authority-thread endpoint for ``planning.scene@2``."""
@@ -2255,6 +2603,7 @@ class PlanningSceneWorld(Protocol):
 
 __all__ = [
     "PLANNING_FRAME_DECLARATIONS_SCHEMA_VERSION",
+    "PLANNING_GEOMETRY_BATCH_READ_LIMIT_BYTES",
     "PLANNING_GEOMETRY_READ_LIMIT_BYTES",
     "PLANNING_GRID_INDEX_ORDER",
     "PLANNING_HEIGHTFIELD_SAMPLE_CONVENTION",
@@ -2266,6 +2615,7 @@ __all__ = [
     "PLANNING_VOXEL_OCCUPANCY_CONVENTION",
     "PlanningArticulationState",
     "PlanningAttachment",
+    "PlanningSceneAttachmentPatch",
     "PlanningCompoundGeometry",
     "PlanningCompoundPart",
     "PlanningEntityDescriptor",
@@ -2279,6 +2629,8 @@ __all__ = [
     "PlanningFrameSourceKind",
     "PlanningFrameState",
     "PlanningGeometryAxisConvention",
+    "PlanningGeometryBatchLease",
+    "PlanningGeometryBatchWorld",
     "PlanningGeometryContentProfile",
     "PlanningGeometryDType",
     "PlanningGeometryDescriptor",
@@ -2288,6 +2640,7 @@ __all__ = [
     "PlanningGeometryMotionClass",
     "PlanningGeometryPurpose",
     "PlanningGeometryRepresentation",
+    "PlanningGeometryRequest",
     "PlanningGeometryResourceDescriptor",
     "PlanningGeometryResourceLayout",
     "PlanningGeometryStorageKind",
@@ -2302,6 +2655,10 @@ __all__ = [
     "PlanningSceneDelta",
     "PlanningSceneDeltaKind",
     "PlanningSceneState",
+    "PlanningSceneStatePatch",
+    "PlanningSceneUpdate",
+    "PlanningSceneUpdateKind",
+    "PlanningSceneUpdateWorld",
     "PlanningSceneWorld",
     "PlanningTwist",
     "parse_planning_frame_declarations",
