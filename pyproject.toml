@@ -9,7 +9,7 @@ version = "0.10.0"
 description = "Backend-neutral contracts and runtime foundation for robot simulators"
 readme = "README.md"
 requires-python = ">=3.11,<3.13"
-authors = [{name = "UniRoboSim Contributors"}]
+authors = [{name = "Hofee", email = "lexhofee@gmail.com"}]
 classifiers = [
   "Development Status :: 4 - Beta",
   "Intended Audience :: Developers",
