@@ -412,6 +412,7 @@ class ParticleFluidSpec:
     dynamic_viscosity_pa_s: float = 0.001
     surface_tension_n_m: float = 0.072
     material_id: str | None = None
+    color_rgba: tuple[float, float, float, float] | None = None
 
     def __post_init__(self) -> None:
         _validate_point_array(self.initial_particle_positions_m, "initial_particle_positions_m")
@@ -453,6 +454,20 @@ class ParticleFluidSpec:
             raise _invalid("particle fluid properties are out of range", "particle_fluid_spec.validate")
         if self.material_id is not None and (not isinstance(self.material_id, str) or not self.material_id.strip()):
             raise _invalid("material ID must be a non-empty string", "particle_fluid_spec.validate")
+        if self.color_rgba is not None:
+            try:
+                color = tuple(float(value) for value in self.color_rgba)
+            except (TypeError, ValueError) as exc:
+                raise _invalid(
+                    "particle fluid color must be finite RGBA in [0, 1]",
+                    "particle_fluid_spec.validate",
+                ) from exc
+            if len(color) != 4 or not all(math.isfinite(value) and 0.0 <= value <= 1.0 for value in color):
+                raise _invalid(
+                    "particle fluid color must be finite RGBA in [0, 1]",
+                    "particle_fluid_spec.validate",
+                )
+            object.__setattr__(self, "color_rgba", color)
         object.__setattr__(self, "particle_radius_m", radius)
         object.__setattr__(self, "rest_density_kg_m3", density)
         object.__setattr__(self, "particle_mass_kg", mass)
@@ -487,6 +502,8 @@ class ParticleFluidSpec:
             "surface_tension_n_m": self.surface_tension_n_m,
             "material_id": self.material_id,
         }
+        if self.color_rgba is not None:
+            result["color_rgba"] = list(self.color_rgba)
         if self.initial_particle_velocities_m_s is not None:
             result["initial_particle_velocities_m_s"] = self.initial_particle_velocities_m_s.nested()
         return result

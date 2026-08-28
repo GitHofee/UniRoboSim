@@ -141,6 +141,11 @@ class ParticleFluidSpecTests(unittest.TestCase):
         self.assertIs(fluid.initial_velocities(), velocities)
         self.assertIn("initial_particle_velocities_m_s", fluid.to_dict())
 
+    def test_optional_visual_color_is_validated_and_serialized(self) -> None:
+        fluid = fluid_body(color_rgba=(0.72, 0.42, 0.18, 0.85))
+        self.assertEqual(fluid.color_rgba, (0.72, 0.42, 0.18, 0.85))
+        self.assertEqual(fluid.to_dict()["color_rgba"], [0.72, 0.42, 0.18, 0.85])
+
     def test_invalid_particle_properties_are_rejected(self) -> None:
         invalid = (
             {"initial_particle_positions_m": ArrayValue((2, 2), (0, 0, 0, 0))},
@@ -153,6 +158,8 @@ class ParticleFluidSpecTests(unittest.TestCase):
             {"surface_tension_n_m": -1},
             {"surface_tension_n_m": "bad"},
             {"material_id": ""},
+            {"color_rgba": (1.0, 0.0, 0.0)},
+            {"color_rgba": (1.0, 0.0, 0.0, 1.1)},
         )
         for overrides in invalid:
             with self.subTest(overrides=overrides), self.assertRaises(ValidationError):

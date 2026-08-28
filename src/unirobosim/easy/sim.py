@@ -807,6 +807,7 @@ class Sim:
         particle_mass_kg: float | None = None,
         dynamic_viscosity_pa_s: float = 0.001,
         surface_tension_n_m: float = 0.072,
+        color_rgba: Sequence[float] | None = None,
         position_m: Sequence[float] = (0.0, 0.0, 0.0),
         orientation_xyzw: Sequence[float] = (0.0, 0.0, 0.0, 1.0),
     ) -> ParticleFluid:
@@ -818,6 +819,8 @@ class Sim:
             particle_mass_kg,
             dynamic_viscosity_pa_s,
             surface_tension_n_m,
+            None,
+            None if color_rgba is None else tuple(color_rgba),  # type: ignore[arg-type]
         )
         spec = EntitySpec(
             _path(name),

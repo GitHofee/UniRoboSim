@@ -78,6 +78,12 @@ from .errors import (
     WorldBuildError,
 )
 from .frozen import FrozenMap, freeze_json, thaw_json
+from .kinematics import (
+    SELECTED_KINEMATICS_CAPABILITY,
+    KinematicState,
+    KinematicTarget,
+    SelectedKinematicsWorld,
+)
 from .planning_scene import (
     PLANNING_FRAME_DECLARATIONS_SCHEMA_VERSION,
     PLANNING_GEOMETRY_BATCH_READ_LIMIT_BYTES,
@@ -275,6 +281,8 @@ __all__ = [
     "EnvironmentSpec",
     "ENTITY_SCALE_UNSUPPORTED",
     "FrozenMap",
+    "KinematicState",
+    "KinematicTarget",
     "LifecycleError",
     "LocalSourceIdentity",
     "LEGACY_WORLD_SCHEMA_VERSION",
@@ -365,6 +373,7 @@ __all__ = [
     "ProviderRegistrationError",
     "ProviderSelectionError",
     "RUNTIME_DIAGNOSTICS_CAPABILITY",
+    "SELECTED_KINEMATICS_CAPABILITY",
     "ResetResult",
     "RigidBodyCommand",
     "RigidBodyState",
@@ -387,6 +396,7 @@ __all__ = [
     "SensorSample",
     "Session",
     "SessionState",
+    "SelectedKinematicsWorld",
     "SOFT_MATTER_WORLD_SCHEMA_VERSION",
     "StaleHandleError",
     "SUPPORTED_WORLD_SCHEMA_VERSIONS",
