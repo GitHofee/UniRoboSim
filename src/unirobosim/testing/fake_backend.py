@@ -4206,12 +4206,16 @@ class FakeWorld:
 
     def _apply_fake_attachments(self) -> None:
         for attachment in self._attachments.values():
+            child_runtime = self._rigids.get(attachment.child_path)
+            if child_runtime is None:
+                # The deterministic fake records articulation-link constraints for contract and
+                # planning tests, but it does not solve closed articulation loops.
+                continue
             parent = self._entities[attachment.parent_path]
             parent_position, parent_orientation, parent_linear, parent_angular = (
                 self._entity_transform_and_twist(parent, attachment.environment_index)
             )
             offset = _planning_rotate(attachment.parent_T_child.position, parent_orientation)
-            child_runtime = self._rigids[attachment.child_path]
             environment = attachment.environment_index
             child_runtime.positions[environment] = [
                 parent_position[axis] + offset[axis] for axis in range(3)
@@ -4398,20 +4402,25 @@ class FakeWorld:
                 error_code="target_not_found",
                 message="entity or environment does not exist",
             )
-        if entity.kind is not EntityKind.RIGID_BODY:
+        attachment_command = command.kind in {SceneCommandKind.ATTACH, SceneCommandKind.DETACH}
+        if entity.kind is not EntityKind.RIGID_BODY and not (
+            attachment_command and entity.kind is EntityKind.ARTICULATION
+        ):
             return self._scene_result(
                 command,
                 SceneCommandStatus.REJECTED,
                 error_code="unsupported_entity_kind",
-                message="the fake adapter exposes scene manipulation only for rigid bodies",
+                message="scene manipulation requires a rigid body, or an articulation attachment endpoint",
             )
-        runtime = self._rigids[entity.path]
+        runtime = self._rigids.get(entity.path)
         environment = command.environment_index
         if command.kind is SceneCommandKind.SET_POSE:
             assert command.target_pose is not None
+            assert runtime is not None
             self._set_rigid_pose(runtime, environment, command.target_pose)
         elif command.kind is SceneCommandKind.DRAG_BEGIN:
             assert command.drag_id is not None
+            assert runtime is not None
             if command.drag_mode is not SceneDragMode.KINEMATIC:
                 return self._scene_result(
                     command,
@@ -4461,13 +4470,6 @@ class FakeWorld:
                     error_code="unsupported_parent_kind",
                     message="attachment parent must be a rigid body or articulation",
                 )
-            if command.parent_link_name is not None or command.child_link_name is not None:
-                return self._scene_result(
-                    command,
-                    SceneCommandStatus.REJECTED,
-                    error_code="unsupported_attachment_endpoint",
-                    message="the fake adapter supports root-body attachment endpoints only",
-                )
             key = (environment, command.attachment_id)
             if key in self._attachments:
                 return self._scene_result(
@@ -4477,7 +4479,9 @@ class FakeWorld:
                     message="attachment ID is already active",
                 )
             if any(
-                attachment.environment_index == environment and attachment.child_path == entity.path
+                attachment.environment_index == environment
+                and attachment.child_path == entity.path
+                and attachment.child_link_name == command.child_link_name
                 for attachment in self._attachments.values()
             ):
                 return self._scene_result(
@@ -4500,7 +4504,8 @@ class FakeWorld:
                 command.child_link_name,
                 relative_pose,
             )
-            self._apply_fake_attachments()
+            if entity.kind is EntityKind.RIGID_BODY:
+                self._apply_fake_attachments()
         elif command.kind is SceneCommandKind.DETACH:
             assert command.attachment_id is not None
             key = (environment, command.attachment_id)
@@ -4525,8 +4530,10 @@ class FakeWorld:
                 )
             if command.kind is SceneCommandKind.DRAG_UPDATE:
                 assert command.target_pose is not None
+                assert runtime is not None
                 self._set_rigid_pose(runtime, environment, command.target_pose)
             elif command.kind is SceneCommandKind.DRAG_CANCEL:
+                assert runtime is not None
                 self._set_rigid_pose(runtime, environment, active[2])
                 del self._active_drags[command.drag_id]
             else:

@@ -245,6 +245,105 @@ def test_fake_attachment_follows_parent_detaches_and_reset_clears_it() -> None:
         session.close()
 
 
+def test_fake_accepts_articulation_link_as_attachment_child_without_widening_pose_commands() -> None:
+    spec = WorldSpec(
+        world_id="articulation-attachment-world",
+        environments=EnvironmentSpec(1),
+        physics=PhysicsSpec(time_step_seconds=0.01),
+        entities=(
+            EntitySpec(EntityPath("/gripper"), EntityKind.RIGID_BODY, pose=Pose((0.0, 0.0, 1.0))),
+            EntitySpec(
+                EntityPath("/refrigerator"),
+                EntityKind.ARTICULATION,
+                joint_names=("door_hinge",),
+                initial_joint_positions=(0.0,),
+            ),
+        ),
+    )
+    session = FakeProvider().open()
+    world = session.build(spec)
+    try:
+        attached = world.apply_scene_command(
+            SceneCommand(
+                "attach-door",
+                "mission",
+                "lease",
+                world.generation,
+                SceneCommandKind.ATTACH,
+                EntityPath("/refrigerator"),
+                attachment_id="held-door",
+                parent_entity_path=EntityPath("/gripper"),
+                child_link_name="door",
+            )
+        )
+        assert attached.status is SceneCommandStatus.APPLIED
+        assert attached.attachment_id == "held-door"
+        second_link = world.apply_scene_command(
+            SceneCommand(
+                "attach-drawer",
+                "mission",
+                "lease",
+                world.generation,
+                SceneCommandKind.ATTACH,
+                EntityPath("/refrigerator"),
+                attachment_id="held-drawer",
+                parent_entity_path=EntityPath("/gripper"),
+                child_link_name="drawer",
+            )
+        )
+        assert second_link.status is SceneCommandStatus.APPLIED
+        duplicate_link = world.apply_scene_command(
+            SceneCommand(
+                "attach-door-twice",
+                "mission",
+                "lease",
+                world.generation,
+                SceneCommandKind.ATTACH,
+                EntityPath("/refrigerator"),
+                attachment_id="held-door-again",
+                parent_entity_path=EntityPath("/gripper"),
+                child_link_name="door",
+            )
+        )
+        assert duplicate_link.error_code == "child_already_attached"
+        assert world.apply_scene_command(
+            SceneCommand(
+                "move-articulation",
+                "mission",
+                "lease",
+                world.generation,
+                SceneCommandKind.SET_POSE,
+                EntityPath("/refrigerator"),
+                target_pose=Pose((1.0, 0.0, 0.0)),
+            )
+        ).error_code == "unsupported_entity_kind"
+        detached = world.apply_scene_command(
+            SceneCommand(
+                "detach-door",
+                "mission",
+                "lease",
+                world.generation,
+                SceneCommandKind.DETACH,
+                EntityPath("/refrigerator"),
+                attachment_id="held-door",
+            )
+        )
+        assert detached.status is SceneCommandStatus.APPLIED
+        assert world.apply_scene_command(
+            SceneCommand(
+                "detach-drawer",
+                "mission",
+                "lease",
+                world.generation,
+                SceneCommandKind.DETACH,
+                EntityPath("/refrigerator"),
+                attachment_id="held-drawer",
+            )
+        ).status is SceneCommandStatus.APPLIED
+    finally:
+        session.close()
+
+
 def test_scene_command_validation_and_closed_world() -> None:
     with pytest.raises(ValidationError):
         command(SceneCommandKind.SET_POSE, "missing-pose", 1)
