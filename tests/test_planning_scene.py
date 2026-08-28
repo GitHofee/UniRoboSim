@@ -198,6 +198,46 @@ def entity_by_path(catalog: PlanningSceneCatalog, path: str) -> PlanningEntityDe
     return next(entity for entity in catalog.entities if entity.path == path)
 
 
+def test_runtime_attachment_is_published_and_removed_atomically(planning_world) -> None:
+    initial = planning_world.planning_scene_state(0)
+    attach = SceneCommand(
+        "attach-runtime",
+        "plugin",
+        "lease",
+        planning_world.generation,
+        SceneCommandKind.ATTACH,
+        EntityPath("/rigid_robot"),
+        attachment_id="attachment.runtime",
+        parent_entity_path=EntityPath("/robot"),
+    )
+    result = planning_world.apply_scene_command(attach)
+    assert result.status is SceneCommandStatus.APPLIED
+    attached = planning_world.planning_scene_state(0)
+    runtime_attachment = next(
+        item for item in attached.attachments if item.attachment_id == "attachment.runtime"
+    )
+    assert runtime_attachment.parent_entity_id == entity_by_path(
+        planning_world.planning_scene_catalog(0), "/robot"
+    ).entity_id
+    assert attached.attachment_revision == initial.attachment_revision + 1
+
+    detached = planning_world.apply_scene_command(
+        SceneCommand(
+            "detach-runtime",
+            "plugin",
+            "lease",
+            planning_world.generation,
+            SceneCommandKind.DETACH,
+            EntityPath("/rigid_robot"),
+            attachment_id="attachment.runtime",
+        )
+    )
+    assert detached.status is SceneCommandStatus.APPLIED
+    final = planning_world.planning_scene_state(0)
+    assert all(item.attachment_id != "attachment.runtime" for item in final.attachments)
+    assert final.attachment_revision == attached.attachment_revision + 1
+
+
 def resource_geometry_id(catalog: PlanningSceneCatalog) -> str:
     return next(
         geometry.geometry_id

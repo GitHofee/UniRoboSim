@@ -8,8 +8,11 @@ from tests.helpers import make_world_spec
 from unirobosim import (
     EntityKind,
     EntityPath,
+    EntitySpec,
+    EnvironmentSpec,
     FrozenMap,
     LifecycleError,
+    PhysicsSpec,
     Pose,
     SceneCommand,
     SceneCommandKind,
@@ -24,6 +27,7 @@ from unirobosim import (
     SceneVisualKind,
     Tick,
     ValidationError,
+    WorldSpec,
 )
 from unirobosim.testing import FakeProvider
 
@@ -160,6 +164,87 @@ def test_fake_drag_transaction_commit_cancel_and_failures() -> None:
         session.close()
 
 
+def test_fake_attachment_follows_parent_detaches_and_reset_clears_it() -> None:
+    spec = WorldSpec(
+        world_id="attachment-world",
+        environments=EnvironmentSpec(1),
+        physics=PhysicsSpec(time_step_seconds=0.01),
+        entities=(
+            EntitySpec(EntityPath("/parent"), EntityKind.RIGID_BODY, pose=Pose((0.0, 0.0, 1.0))),
+            EntitySpec(EntityPath("/child"), EntityKind.RIGID_BODY, pose=Pose((0.2, 0.0, 1.0))),
+        ),
+    )
+    session = FakeProvider().open()
+    world = session.build(spec)
+    try:
+        tick_before = world.tick
+        attach = SceneCommand(
+            "attach-1",
+            "plugin",
+            "lease",
+            world.generation,
+            SceneCommandKind.ATTACH,
+            EntityPath("/child"),
+            attachment_id="held-object",
+            parent_entity_path=EntityPath("/parent"),
+        )
+        attached = world.apply_scene_command(attach)
+        assert attached.status is SceneCommandStatus.APPLIED
+        assert attached.attachment_id == "held-object"
+        assert attached.tick == tick_before
+        duplicate = world.apply_scene_command(attach)
+        assert duplicate.status is SceneCommandStatus.DUPLICATE
+        assert duplicate.attachment_id == "held-object"
+
+        move_parent = SceneCommand(
+            "move-parent",
+            "plugin",
+            "lease",
+            world.generation,
+            SceneCommandKind.SET_POSE,
+            EntityPath("/parent"),
+            target_pose=Pose((2.0, 0.0, 1.0)),
+        )
+        world.apply_scene_command(move_parent)
+        world.step()
+        snapshot = world.scene_snapshot()
+        parent = next(item for item in snapshot.entities if item.path == EntityPath("/parent"))
+        child = next(item for item in snapshot.entities if item.path == EntityPath("/child"))
+        assert child.pose.position[0] == pytest.approx(parent.pose.position[0] + 0.2)
+
+        detached = world.apply_scene_command(
+            SceneCommand(
+                "detach-1",
+                "plugin",
+                "lease",
+                world.generation,
+                SceneCommandKind.DETACH,
+                EntityPath("/child"),
+                attachment_id="held-object",
+            )
+        )
+        assert detached.status is SceneCommandStatus.APPLIED
+        world.apply_scene_command(
+            replace(move_parent, command_id="move-parent-again", target_pose=Pose((4.0, 0.0, 1.0)))
+        )
+        world.step()
+        detached_child = next(
+            item for item in world.scene_snapshot().entities if item.path == EntityPath("/child")
+        )
+        assert detached_child.pose.position[0] < 3.0
+
+        world.apply_scene_command(replace(attach, command_id="attach-before-reset"))
+        world.reset()
+        world.apply_scene_command(
+            replace(move_parent, command_id="move-after-reset", target_pose=Pose((3.0, 0.0, 1.0)))
+        )
+        world.step()
+        reset_child = next(item for item in world.scene_snapshot().entities if item.path == EntityPath("/child"))
+        assert reset_child.pose.position[0] < 1.0
+    finally:
+        session.close()
+
+
 def test_scene_command_validation_and_closed_world() -> None:
     with pytest.raises(ValidationError):
         command(SceneCommandKind.SET_POSE, "missing-pose", 1)
@@ -167,6 +252,27 @@ def test_scene_command_validation_and_closed_world() -> None:
         command(SceneCommandKind.DRAG_BEGIN, "missing-mode", 1, drag_id="drag")
     with pytest.raises(ValidationError):
         command(SceneCommandKind.DRAG_END, "bad-extra", 1, drag_id="drag", mode=SceneDragMode.KINEMATIC)
+    with pytest.raises(ValidationError):
+        SceneCommand(
+            "bad-attach",
+            "client",
+            "lease",
+            1,
+            SceneCommandKind.ATTACH,
+            EntityPath("/child"),
+            attachment_id="held",
+        )
+    with pytest.raises(ValidationError):
+        SceneCommand(
+            "bad-detach",
+            "client",
+            "lease",
+            1,
+            SceneCommandKind.DETACH,
+            EntityPath("/child"),
+            attachment_id="held",
+            parent_entity_path=EntityPath("/parent"),
+        )
     session = FakeProvider().open()
     world = session.build(make_world_spec())
     world.close()

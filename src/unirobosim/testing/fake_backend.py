@@ -270,6 +270,7 @@ FAKE_CAPABILITIES = CapabilitySet(
         CapabilityDeclaration(CapabilityId("scene.snapshot@1")),
         CapabilityDeclaration(CapabilityId("scene.delta@1")),
         CapabilityDeclaration(CapabilityId("scene.command.pose@1")),
+        CapabilityDeclaration(CapabilityId("scene.command.attachment@1")),
         CapabilityDeclaration(
             CapabilityId("scene.command.drag@1"),
             FrozenMap({"entity_kinds": ["rigid_body"], "modes": ["kinematic"]}),
@@ -472,6 +473,7 @@ class _FakePlanningSceneCommandSnapshot:
     scene_sequence: int
     scene_results: dict[str, SceneCommandResult]
     active_drags: dict[str, tuple[EntityPath, int, Pose]]
+    attachments: dict[tuple[int, str], _FakeAttachment]
     rigids: dict[
         EntityPath,
         tuple[list[list[float]], list[list[float]], list[list[float]], list[list[float]]],
@@ -482,6 +484,7 @@ class _FakePlanningSceneCommandSnapshot:
 class _FakePlanningResetSnapshot:
     reset_count: int
     scene_sequence: int
+    attachments: dict[tuple[int, str], _FakeAttachment]
     articulations: dict[
         EntityPath,
         tuple[
@@ -513,6 +516,17 @@ class _FakePlanningResetSnapshot:
     ]
     debug_primitives: dict[tuple[str, str, str], DebugPrimitive]
     debug_expirations: dict[tuple[str, str, str], int | None]
+
+
+@dataclass(frozen=True)
+class _FakeAttachment:
+    attachment_id: str
+    environment_index: int
+    parent_path: EntityPath
+    child_path: EntityPath
+    parent_link_name: str | None
+    child_link_name: str | None
+    parent_T_child: Pose
 
 
 @dataclass(frozen=True)
@@ -1391,6 +1405,7 @@ class FakeWorld:
         self._scene_sequence = 0
         self._scene_results: dict[str, SceneCommandResult] = {}
         self._active_drags: dict[str, tuple[EntityPath, int, Pose]] = {}
+        self._attachments: dict[tuple[int, str], _FakeAttachment] = {}
         self._entities = {entity.path: entity for entity in spec.entities}
         self._articulations: dict[EntityPath, _ArticulationRuntime] = {}
         self._rigids: dict[EntityPath, _RigidRuntime] = {}
@@ -2138,6 +2153,7 @@ class FakeWorld:
         self,
         catalog: PlanningSceneCatalog,
         frame_states: tuple[PlanningFrameState, ...],
+        environment_index: int,
     ) -> tuple[PlanningAttachment, ...]:
         raw = self._spec.metadata.get("planning_attachments", ())
         if type(raw) is not tuple or tuple.__len__(raw) > _FAKE_PLANNING_MAX_METADATA_ITEMS:
@@ -2150,6 +2166,26 @@ class FakeWorld:
                 "fake planning attachments lack an exclusive authoritative registry",
                 operation="planning_scene.preflight",
             ) from None
+        dynamic = tuple(
+            attachment
+            for (attachment_environment, _attachment_id), attachment in self._attachments.items()
+            if attachment_environment == environment_index
+        )
+        dynamic_relative_by_id = {
+            attachment.attachment_id: attachment.parent_T_child for attachment in dynamic
+        }
+        raw = raw + tuple(
+            FrozenMap(
+                {
+                    "attachment_id": attachment.attachment_id,
+                    "parent_path": attachment.parent_path.value,
+                    "child_path": attachment.child_path.value,
+                    "parent_link_name": attachment.parent_link_name,
+                    "child_link_name": attachment.child_link_name,
+                }
+            )
+            for attachment in dynamic
+        )
         entity_by_path = {entity.path: entity for entity in catalog.entities}
         frame_pose = {frame.frame_id: frame.world_pose for frame in frame_states}
         links_by_entity: dict[str, tuple[PlanningLinkDescriptor, ...]] = {
@@ -2243,7 +2279,13 @@ class FakeWorld:
                     child.entity_id,
                     parent_frame,
                     child_frame,
-                    _planning_relative(frame_pose[parent_frame], frame_pose[child_frame], parent_frame),
+                    PlanningPose(
+                        parent_frame,
+                        dynamic_relative_by_id[attachment_id].position,
+                        dynamic_relative_by_id[attachment_id].orientation_xyzw,
+                    )
+                    if attachment_id in dynamic_relative_by_id
+                    else _planning_relative(frame_pose[parent_frame], frame_pose[child_frame], parent_frame),
                     child_geometry_ids,
                     parent_link.link_id,
                     child_link.link_id,
@@ -2318,7 +2360,7 @@ class FakeWorld:
                 key=lambda item: item.geometry_id,
             )
         )
-        attachments = self._planning_attachment_values(catalog, sorted_frames)
+        attachments = self._planning_attachment_values(catalog, sorted_frames, environment_index)
         state = PlanningSceneState(
             self._descriptor.provider_id,
             self.world_id,
@@ -3243,6 +3285,8 @@ class FakeWorld:
                         operation=operation,
                         world_id=self.world_id,
                     ) from None
+                if self._planning_state_patch(previous, state).empty:
+                    candidate.transform_revision = current.transform_revision
                 candidate.attachment_revision += 1
                 candidate.force_resync = True
                 state = self._planning_capture_candidate_state(
@@ -3332,6 +3376,7 @@ class FakeWorld:
             self._scene_sequence,
             dict(self._scene_results),
             dict(self._active_drags),
+            dict(self._attachments),
             {
                 path: (
                     _copy_vectors(runtime.positions),
@@ -3350,6 +3395,7 @@ class FakeWorld:
         self._scene_sequence = snapshot.scene_sequence
         self._scene_results = snapshot.scene_results
         self._active_drags = snapshot.active_drags
+        self._attachments = snapshot.attachments
         for path, (
             positions,
             orientations,
@@ -3419,6 +3465,7 @@ class FakeWorld:
         return _FakePlanningResetSnapshot(
             self._reset_count,
             self._scene_sequence,
+            dict(self._attachments),
             {
                 path: (
                     _copy_vectors(runtime.positions),
@@ -3455,6 +3502,7 @@ class FakeWorld:
     def _planning_restore_reset_snapshot(self, snapshot: _FakePlanningResetSnapshot) -> None:
         self._reset_count = snapshot.reset_count
         self._scene_sequence = snapshot.scene_sequence
+        self._attachments = snapshot.attachments
         for path, (positions, velocities, modes, targets) in snapshot.articulations.items():
             articulation_runtime = self._articulations[path]
             articulation_runtime.positions = positions
@@ -3633,6 +3681,13 @@ class FakeWorld:
         for key in reset_debug_keys:
             del self._debug_primitives[key]
             del self._debug_expirations[key]
+        if self._attachments:
+            selected_environments = frozenset(environments)
+            self._attachments = {
+                key: attachment
+                for key, attachment in self._attachments.items()
+                if attachment.environment_index not in selected_environments
+            }
         self._reset_count += 1
         self._scene_sequence += 1
         return ResetResult(environments, self._reset_count, self.tick)
@@ -4105,6 +4160,8 @@ class FakeWorld:
                             articulation_runtime.positions[environment][degree] += (
                                 articulation_runtime.velocities[environment][degree] * time_step
                             )
+            if self._attachments:
+                self._apply_fake_attachments()
             for point_runtime in self._points.values():
                 damping_factor = max(0.0, 1.0 - point_runtime.linear_damping_per_s * time_step)
                 for environment in range(self._spec.environments.count):
@@ -4146,6 +4203,34 @@ class FakeWorld:
                 del self._debug_expirations[key]
         self._scene_sequence += count
         return self.tick
+
+    def _apply_fake_attachments(self) -> None:
+        for attachment in self._attachments.values():
+            parent = self._entities[attachment.parent_path]
+            parent_position, parent_orientation, parent_linear, parent_angular = (
+                self._entity_transform_and_twist(parent, attachment.environment_index)
+            )
+            offset = _planning_rotate(attachment.parent_T_child.position, parent_orientation)
+            child_runtime = self._rigids[attachment.child_path]
+            environment = attachment.environment_index
+            child_runtime.positions[environment] = [
+                parent_position[axis] + offset[axis] for axis in range(3)
+            ]
+            child_runtime.orientations[environment] = list(
+                _planning_quaternion_multiply(
+                    parent_orientation,
+                    attachment.parent_T_child.orientation_xyzw,
+                )
+            )
+            tangential = (
+                parent_angular[1] * offset[2] - parent_angular[2] * offset[1],
+                parent_angular[2] * offset[0] - parent_angular[0] * offset[2],
+                parent_angular[0] * offset[1] - parent_angular[1] * offset[0],
+            )
+            child_runtime.linear_velocities[environment] = [
+                parent_linear[axis] + tangential[axis] for axis in range(3)
+            ]
+            child_runtime.angular_velocities[environment] = list(parent_angular)
 
     def _scene_visual(self, entity: EntitySpec) -> tuple[SceneVisual, ...]:
         if entity.kind in {EntityKind.STATIC_SCENE, EntityKind.COMPOSITE_SCENE}:
@@ -4272,6 +4357,11 @@ class FakeWorld:
             self.tick,
             error_code,
             message,
+            attachment_id=(
+                command.attachment_id
+                if command.kind in {SceneCommandKind.ATTACH, SceneCommandKind.DETACH}
+                else None
+            ),
         )
         self._scene_results[command.command_id] = result
         if len(self._scene_results) > 4096:
@@ -4291,6 +4381,7 @@ class FakeWorld:
                 previous.scene_sequence,
                 previous.tick,
                 message="original command result already recorded",
+                attachment_id=previous.attachment_id,
             )
         if command.expected_generation != self.generation:
             return self._scene_result(
@@ -4352,6 +4443,76 @@ class FakeWorld:
                     ),
                 ),
             )
+        elif command.kind is SceneCommandKind.ATTACH:
+            assert command.attachment_id is not None
+            assert command.parent_entity_path is not None
+            parent = self._entities.get(command.parent_entity_path)
+            if parent is None:
+                return self._scene_result(
+                    command,
+                    SceneCommandStatus.REJECTED,
+                    error_code="parent_not_found",
+                    message="attachment parent entity does not exist",
+                )
+            if parent.kind not in {EntityKind.RIGID_BODY, EntityKind.ARTICULATION}:
+                return self._scene_result(
+                    command,
+                    SceneCommandStatus.REJECTED,
+                    error_code="unsupported_parent_kind",
+                    message="attachment parent must be a rigid body or articulation",
+                )
+            if command.parent_link_name is not None or command.child_link_name is not None:
+                return self._scene_result(
+                    command,
+                    SceneCommandStatus.REJECTED,
+                    error_code="unsupported_attachment_endpoint",
+                    message="the fake adapter supports root-body attachment endpoints only",
+                )
+            key = (environment, command.attachment_id)
+            if key in self._attachments:
+                return self._scene_result(
+                    command,
+                    SceneCommandStatus.REJECTED,
+                    error_code="attachment_exists",
+                    message="attachment ID is already active",
+                )
+            if any(
+                attachment.environment_index == environment and attachment.child_path == entity.path
+                for attachment in self._attachments.values()
+            ):
+                return self._scene_result(
+                    command,
+                    SceneCommandStatus.REJECTED,
+                    error_code="child_already_attached",
+                    message="attachment child already has an active parent",
+                )
+            relative_pose = command.parent_T_child or self._fake_relative_pose(
+                parent,
+                entity,
+                environment,
+            )
+            self._attachments[key] = _FakeAttachment(
+                command.attachment_id,
+                environment,
+                parent.path,
+                entity.path,
+                command.parent_link_name,
+                command.child_link_name,
+                relative_pose,
+            )
+            self._apply_fake_attachments()
+        elif command.kind is SceneCommandKind.DETACH:
+            assert command.attachment_id is not None
+            key = (environment, command.attachment_id)
+            attachment = self._attachments.get(key)
+            if attachment is None or attachment.child_path != entity.path:
+                return self._scene_result(
+                    command,
+                    SceneCommandStatus.REJECTED,
+                    error_code="attachment_not_active",
+                    message="attachment is missing or targets a different child entity",
+                )
+            del self._attachments[key]
         else:
             assert command.drag_id is not None
             active = self._active_drags.get(command.drag_id)
@@ -4373,6 +4534,25 @@ class FakeWorld:
         self._scene_sequence += 1
         return self._scene_result(command, SceneCommandStatus.APPLIED)
 
+    def _fake_relative_pose(
+        self,
+        parent: EntitySpec,
+        child: EntitySpec,
+        environment_index: int,
+    ) -> Pose:
+        parent_position, parent_orientation, _parent_linear, _parent_angular = (
+            self._entity_transform_and_twist(parent, environment_index)
+        )
+        child_position, child_orientation, _child_linear, _child_angular = (
+            self._entity_transform_and_twist(child, environment_index)
+        )
+        relative = _planning_relative(
+            PlanningPose("parent", parent_position, parent_orientation),
+            PlanningPose("parent", child_position, child_orientation),
+            "parent",
+        )
+        return Pose(relative.position_m, relative.orientation_xyzw)
+
     @staticmethod
     def _set_rigid_pose(runtime: _RigidRuntime, environment: int, pose: Pose) -> None:
         runtime.positions[environment] = list(pose.position)
@@ -4390,6 +4570,7 @@ class FakeWorld:
         self._points.clear()
         self._debug_primitives.clear()
         self._debug_expirations.clear()
+        self._attachments.clear()
         if notify_session:
             self._session._world_closed(self)
 
@@ -4568,6 +4749,16 @@ class FakePlanningWorld(FakeWorld):
             return False
         if command.kind is SceneCommandKind.SET_POSE:
             return True
+        if command.kind is SceneCommandKind.ATTACH:
+            return (
+                command.parent_entity_path in self._entities
+                and command.parent_link_name is None
+                and command.child_link_name is None
+                and (command.environment_index, command.attachment_id) not in self._attachments
+            )
+        if command.kind is SceneCommandKind.DETACH:
+            attachment = self._attachments.get((command.environment_index, command.attachment_id))
+            return attachment is not None and attachment.child_path == command.entity_path
         assert command.drag_id is not None
         if command.kind is SceneCommandKind.DRAG_BEGIN:
             return command.drag_mode is SceneDragMode.KINEMATIC and command.drag_id not in self._active_drags

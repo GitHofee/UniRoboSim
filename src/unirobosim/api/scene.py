@@ -41,6 +41,8 @@ class SceneVisualKind(StrEnum):
 
 class SceneCommandKind(StrEnum):
     SET_POSE = "set_pose"
+    ATTACH = "attach"
+    DETACH = "detach"
     DRAG_BEGIN = "drag_begin"
     DRAG_UPDATE = "drag_update"
     DRAG_END = "drag_end"
@@ -295,6 +297,11 @@ class SceneCommand:
     drag_id: str | None = None
     drag_mode: SceneDragMode | None = None
     grab_point_world_m: tuple[float, float, float] | None = None
+    attachment_id: str | None = None
+    parent_entity_path: EntityPath | None = None
+    parent_link_name: str | None = None
+    child_link_name: str | None = None
+    parent_T_child: Pose | None = None
 
     def __post_init__(self) -> None:
         identifiers = (self.command_id, self.client_id, self.lease_id)
@@ -311,7 +318,12 @@ class SceneCommand:
             or self.environment_index < 0
         ):
             raise _invalid("scene command target is invalid")
-        drag_kind = self.kind is not SceneCommandKind.SET_POSE
+        drag_kind = self.kind in {
+            SceneCommandKind.DRAG_BEGIN,
+            SceneCommandKind.DRAG_UPDATE,
+            SceneCommandKind.DRAG_END,
+            SceneCommandKind.DRAG_CANCEL,
+        }
         if self.kind in {SceneCommandKind.SET_POSE, SceneCommandKind.DRAG_UPDATE} and not isinstance(
             self.target_pose, Pose
         ):
@@ -323,7 +335,7 @@ class SceneCommand:
         if not drag_kind and any(
             value is not None for value in (self.drag_id, self.drag_mode, self.grab_point_world_m)
         ):
-            raise _invalid("set_pose cannot contain drag fields")
+            raise _invalid("non-drag commands cannot contain drag fields")
         if self.kind is SceneCommandKind.DRAG_BEGIN:
             if not isinstance(self.drag_mode, SceneDragMode) or self.grab_point_world_m is None:
                 raise _invalid("drag_begin requires mode and grab point")
@@ -335,6 +347,35 @@ class SceneCommand:
                 "grab_point_world_m",
                 _finite(self.grab_point_world_m, 3, "grab_point_world_m"),
             )
+        attachment_kind = self.kind in {SceneCommandKind.ATTACH, SceneCommandKind.DETACH}
+        attachment_fields = (
+            self.attachment_id,
+            self.parent_entity_path,
+            self.parent_link_name,
+            self.child_link_name,
+            self.parent_T_child,
+        )
+        if not attachment_kind and any(value is not None for value in attachment_fields):
+            raise _invalid("non-attachment commands cannot contain attachment fields")
+        if attachment_kind:
+            if not isinstance(self.attachment_id, str) or not _IDENTIFIER.fullmatch(self.attachment_id):
+                raise _invalid("attachment commands require a valid attachment ID")
+            for name in ("parent_link_name", "child_link_name"):
+                value = getattr(self, name)
+                if value is not None and (not isinstance(value, str) or not _IDENTIFIER.fullmatch(value)):
+                    raise _invalid(f"{name} is invalid")
+        if self.kind is SceneCommandKind.ATTACH:
+            if not isinstance(self.parent_entity_path, EntityPath):
+                raise _invalid("attach requires parent_entity_path")
+            if self.parent_entity_path == self.entity_path:
+                raise _invalid("an attachment must connect two different entities")
+            if self.parent_T_child is not None and not isinstance(self.parent_T_child, Pose):
+                raise _invalid("parent_T_child must be a Pose or null")
+        elif self.kind is SceneCommandKind.DETACH and any(
+            value is not None
+            for value in (self.parent_entity_path, self.parent_link_name, self.child_link_name, self.parent_T_child)
+        ):
+            raise _invalid("detach accepts only entity_path and attachment_id")
 
 
 @dataclass(frozen=True)
@@ -346,6 +387,7 @@ class SceneCommandResult:
     tick: Tick
     error_code: str | None = None
     message: str | None = None
+    attachment_id: str | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -367,6 +409,10 @@ class SceneCommandResult:
         for value in (self.error_code, self.message):
             if value is not None and (not isinstance(value, str) or not value):
                 raise _invalid("scene command result text is invalid")
+        if self.attachment_id is not None and (
+            not isinstance(self.attachment_id, str) or not _IDENTIFIER.fullmatch(self.attachment_id)
+        ):
+            raise _invalid("scene command result attachment ID is invalid")
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -377,6 +423,7 @@ class SceneCommandResult:
             "tick": _tick_dict(self.tick),
             "error_code": self.error_code,
             "message": self.message,
+            "attachment_id": self.attachment_id,
         }
 
 
