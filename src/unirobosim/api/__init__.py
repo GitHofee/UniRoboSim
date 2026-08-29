@@ -84,6 +84,7 @@ from .kinematics import (
     KinematicTarget,
     SelectedKinematicsWorld,
 )
+from .media import EncodedSensorFrame, EncodedSensorRequest, EncodedSensorWorld
 from .planning_scene import (
     PLANNING_FRAME_DECLARATIONS_SCHEMA_VERSION,
     PLANNING_GEOMETRY_BATCH_READ_LIMIT_BYTES,
@@ -280,6 +281,9 @@ __all__ = [
     "EmbeddedPrimBinding",
     "EnvironmentSpec",
     "ENTITY_SCALE_UNSUPPORTED",
+    "EncodedSensorFrame",
+    "EncodedSensorRequest",
+    "EncodedSensorWorld",
     "FrozenMap",
     "KinematicState",
     "KinematicTarget",
