@@ -41,12 +41,12 @@ Capability availability remains backend-specific. Isaac Lab is the current full-
 
 ### Core
 
-Python 3.12 is recommended for Core, Isaac Lab, MuJoCo, Studio, the USD converter, and MCP:
+Python 3.12 is recommended for Core, Isaac Lab, MuJoCo, the USD converter, and MCP:
 
 ```bash
 conda create -n unirobosim python=3.12 pip -y
 conda activate unirobosim
-git clone https://github.com/GitHofee/UniRoboSim.git
+git clone --branch v0.10.0 --depth 1 https://github.com/GitHofee/UniRoboSim.git
 python -m pip install ./UniRoboSim
 ```
 
@@ -58,11 +58,11 @@ Install Core and the selected adapter in the same environment after its native S
 
 ```bash
 # MuJoCo / Python 3.12
-git clone https://github.com/GitHofee/UniRoboSim-mujoco.git
+git clone --branch v0.9.3 --depth 1 https://github.com/GitHofee/UniRoboSim-mujoco.git
 python -m pip install ./UniRoboSim-mujoco
 
 # Isaac Lab / Python 3.12; install the verified NVIDIA SDK stack first
-git clone https://github.com/GitHofee/UniRoboSim-isaaclab.git
+git clone --branch v0.10.6 --depth 1 https://github.com/GitHofee/UniRoboSim-isaaclab.git
 python -m pip install ./UniRoboSim-isaaclab
 ```
 
@@ -71,27 +71,35 @@ PyBullet uses a separate Python 3.11 environment:
 ```bash
 conda create -n unirobosim-pybullet python=3.11 pip -y
 conda activate unirobosim-pybullet
-git clone https://github.com/GitHofee/UniRoboSim.git
-git clone https://github.com/GitHofee/UniRoboSim-pybullet.git
+git clone --branch v0.10.0 --depth 1 https://github.com/GitHofee/UniRoboSim.git
+git clone --branch v0.9.3 --depth 1 https://github.com/GitHofee/UniRoboSim-pybullet.git
 python -m pip install ./UniRoboSim ./UniRoboSim-pybullet
 ```
 
+### Verified release matrix
+
+| Distribution | Release tag | Python | Core compatibility |
+| --- | --- | --- | --- |
+| `unirobosim` | `v0.10.0` | `>=3.11,<3.13` | Core |
+| `unirobosim-isaaclab` | `v0.10.6` | `>=3.12,<3.13` | `unirobosim>=0.10,<0.11` |
+| `unirobosim-mujoco` | `v0.9.3` | `>=3.12,<3.13` | `unirobosim>=0.9,<0.11` |
+| `unirobosim-pybullet` | `v0.9.3` | `>=3.11,<3.12` | `unirobosim>=0.9,<0.11` |
+| `unirobosim-usd-converter` | `v0.10.0` | `>=3.11,<3.13` | `unirobosim>=0.10,<0.11` |
+| `unirobosim-mcp` | `v0.10.0` | `>=3.11,<3.13` | `unirobosim>=0.10,<0.11` |
+
+This table is the published and mutually compatible source release line. Use these tags for reproducible installations; `main` is the development branch and can move independently.
+
 ### Optional packages
 
-| Package | Purpose | Python |
-| --- | --- | --- |
-| `unirobosim-usd-converter` | rigid USD conversion and Isaac physics normalization | `>=3.11,<3.13` |
-| `unirobosim-studio` | browser Native Stream and Unified Scene control plane | `>=3.11,<3.13` |
-| `unirobosim-mcp` | evidence queries, simulation reads, backend-camera images, and controlled agent actions | `>=3.11,<3.13` |
-
 ```bash
-git clone https://github.com/GitHofee/UniRoboSim-usd-converter.git
-git clone https://github.com/GitHofee/UniRoboSim-studio.git
-git clone https://github.com/GitHofee/UniRoboSim-mcp.git
-python -m pip install ./UniRoboSim-usd-converter ./UniRoboSim-studio ./UniRoboSim-mcp
+git clone --branch v0.10.0 --depth 1 https://github.com/GitHofee/UniRoboSim-usd-converter.git
+git clone --branch v0.10.0 --depth 1 https://github.com/GitHofee/UniRoboSim-mcp.git
+python -m pip install ./UniRoboSim-usd-converter ./UniRoboSim-mcp
 ```
 
-For reproducible deployments, pin the exact Core and adapter pair that was tested. Core 0.10 adapters must declare `unirobosim>=0.10,<0.11` and their exact supported World schemas. A provider must not list v0alpha6 until it passes the composite-scene native gate.
+`unirobosim-studio` is not part of the current published release set and is intentionally omitted from installation commands.
+
+Core 0.10 adapters must declare their exact supported World schemas. A provider must not list v0alpha6 until it passes the composite-scene native gate.
 
 ## 3. EasyAPI: quick start
 

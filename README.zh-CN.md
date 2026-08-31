@@ -41,12 +41,12 @@ UniRoboSim 是面向机器人仿真的后端中立互操作层。它定义可移
 
 ### Core
 
-Core、Isaac Lab、MuJoCo、Studio、USD Converter 和 MCP 推荐 Python 3.12：
+Core、Isaac Lab、MuJoCo、USD Converter 和 MCP 推荐 Python 3.12：
 
 ```bash
 conda create -n unirobosim python=3.12 pip -y
 conda activate unirobosim
-git clone https://github.com/GitHofee/UniRoboSim.git
+git clone --branch v0.10.0 --depth 1 https://github.com/GitHofee/UniRoboSim.git
 python -m pip install ./UniRoboSim
 ```
 
@@ -58,11 +58,11 @@ Core 无第三方运行时依赖，支持 Python `>=3.11,<3.13`。
 
 ```bash
 # MuJoCo / Python 3.12
-git clone https://github.com/GitHofee/UniRoboSim-mujoco.git
+git clone --branch v0.9.3 --depth 1 https://github.com/GitHofee/UniRoboSim-mujoco.git
 python -m pip install ./UniRoboSim-mujoco
 
 # Isaac Lab / Python 3.12；先安装已验证的 NVIDIA SDK 运行栈
-git clone https://github.com/GitHofee/UniRoboSim-isaaclab.git
+git clone --branch v0.10.6 --depth 1 https://github.com/GitHofee/UniRoboSim-isaaclab.git
 python -m pip install ./UniRoboSim-isaaclab
 ```
 
@@ -71,27 +71,35 @@ PyBullet 使用单独的 Python 3.11 环境：
 ```bash
 conda create -n unirobosim-pybullet python=3.11 pip -y
 conda activate unirobosim-pybullet
-git clone https://github.com/GitHofee/UniRoboSim.git
-git clone https://github.com/GitHofee/UniRoboSim-pybullet.git
+git clone --branch v0.10.0 --depth 1 https://github.com/GitHofee/UniRoboSim.git
+git clone --branch v0.9.3 --depth 1 https://github.com/GitHofee/UniRoboSim-pybullet.git
 python -m pip install ./UniRoboSim ./UniRoboSim-pybullet
 ```
 
+### 已验证发布矩阵
+
+| Distribution | 发布标签 | Python | Core 兼容范围 |
+| --- | --- | --- | --- |
+| `unirobosim` | `v0.10.0` | `>=3.11,<3.13` | Core |
+| `unirobosim-isaaclab` | `v0.10.6` | `>=3.12,<3.13` | `unirobosim>=0.10,<0.11` |
+| `unirobosim-mujoco` | `v0.9.3` | `>=3.12,<3.13` | `unirobosim>=0.9,<0.11` |
+| `unirobosim-pybullet` | `v0.9.3` | `>=3.11,<3.12` | `unirobosim>=0.9,<0.11` |
+| `unirobosim-usd-converter` | `v0.10.0` | `>=3.11,<3.13` | `unirobosim>=0.10,<0.11` |
+| `unirobosim-mcp` | `v0.10.0` | `>=3.11,<3.13` | `unirobosim>=0.10,<0.11` |
+
+该表是已经发布且相互兼容的源码版本线。可复现安装应固定这些标签；`main` 是持续演进的开发分支，可能独立更新。
+
 ### 可选包
 
-| 包 | 作用 | Python |
-| --- | --- | --- |
-| `unirobosim-usd-converter` | 刚体 USD 转换与 Isaac 物理规范化 | `>=3.11,<3.13` |
-| `unirobosim-studio` | 浏览器 Native Stream 与 Unified Scene 控制面 | `>=3.11,<3.13` |
-| `unirobosim-mcp` | 证据查询、仿真读取、后端相机图像和受控 Agent 操作 | `>=3.11,<3.13` |
-
 ```bash
-git clone https://github.com/GitHofee/UniRoboSim-usd-converter.git
-git clone https://github.com/GitHofee/UniRoboSim-studio.git
-git clone https://github.com/GitHofee/UniRoboSim-mcp.git
-python -m pip install ./UniRoboSim-usd-converter ./UniRoboSim-studio ./UniRoboSim-mcp
+git clone --branch v0.10.0 --depth 1 https://github.com/GitHofee/UniRoboSim-usd-converter.git
+git clone --branch v0.10.0 --depth 1 https://github.com/GitHofee/UniRoboSim-mcp.git
+python -m pip install ./UniRoboSim-usd-converter ./UniRoboSim-mcp
 ```
 
-可复现部署应固定实际验收过的 Core 与 Adapter 版本组合。Core 0.10 Adapter 必须声明 `unirobosim>=0.10,<0.11` 及精确支持的 World schema。Provider 在通过复合场景原生闸门前不得声明支持 v0alpha6。
+`unirobosim-studio` 不属于当前已发布版本集，因此有意不写入安装命令。
+
+Core 0.10 Adapter 必须声明实际支持的 World schema。Provider 在通过复合场景原生闸门前不得声明支持 v0alpha6。
 
 ## 3. EasyAPI：快速使用
 
