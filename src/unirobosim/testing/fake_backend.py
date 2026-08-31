@@ -20,7 +20,7 @@ from contextlib import ExitStack
 from dataclasses import dataclass, field
 from functools import wraps
 from types import TracebackType
-from typing import TypeVar, cast
+from typing import Any, TypeVar, cast
 
 from unirobosim.api.build import BuildInput
 from unirobosim.api.capabilities import (
@@ -108,6 +108,12 @@ from unirobosim.api.planning_scene import (
     PlanningTwist,
     parse_planning_frame_declarations,
 )
+from unirobosim.api.render_state import (
+    RENDER_STATE_CAPABILITY_ID,
+    PackedFloat32Array,
+    RenderStateFrame,
+    RenderStateResult,
+)
 from unirobosim.api.reports import (
     ArticulationState,
     BuildFingerprint,
@@ -188,6 +194,22 @@ FAKE_CAPABILITIES = CapabilitySet(
             limitations=("fake reference backend has no collision model and therefore reports zero",),
         ),
         CapabilityDeclaration(CapabilityId("state.articulation@1")),
+        CapabilityDeclaration(
+            RENDER_STATE_CAPABILITY_ID,
+            FrozenMap(
+                {
+                    "atomic_scope": "frame",
+                    "physics_advance": False,
+                    "state_kinds": [
+                        "articulation-joints",
+                        "articulation-root",
+                        "rigid-root",
+                        "particle-fluid-range",
+                    ],
+                }
+            ),
+            limitations=("deterministic contract reference; not a renderer",),
+        ),
         CapabilityDeclaration(CapabilityId("state.articulation.axis-units@1")),
         CapabilityDeclaration(CapabilityId("control.articulation.position@1")),
         CapabilityDeclaration(CapabilityId("control.articulation.position.axis-units@1")),
@@ -306,7 +328,7 @@ FAKE_CAPABILITIES = CapabilitySet(
 FAKE_DESCRIPTOR = ProviderDescriptor(
     provider_id="reference.fake",
     display_name="UniRoboSim Fake Reference Backend",
-    version="0.10.0",
+    version="0.10.1",
     contract_version="v0alpha6",
     capabilities=FAKE_CAPABILITIES,
     supported_world_schema_versions=(
@@ -369,6 +391,12 @@ def _scrub_private_failure(error: BaseException) -> None:
 @dataclass
 class _ArticulationRuntime:
     spec: EntitySpec
+    initial_root_position: list[float]
+    initial_root_orientation: list[float]
+    root_positions: list[list[float]]
+    root_orientations: list[list[float]]
+    root_linear_velocities: list[list[float]]
+    root_angular_velocities: list[list[float]]
     positions: list[list[float]]
     velocities: list[list[float]]
     modes: list[list[CommandMode]]
@@ -458,7 +486,17 @@ class _FakePlanningRuntime:
 class _FakePlanningStepSnapshot:
     step_index: int
     scene_sequence: int
-    articulations: dict[EntityPath, tuple[list[list[float]], list[list[float]]]]
+    articulations: dict[
+        EntityPath,
+        tuple[
+            list[list[float]],
+            list[list[float]],
+            list[list[float]],
+            list[list[float]],
+            list[list[float]],
+            list[list[float]],
+        ],
+    ]
     rigids: dict[
         EntityPath,
         tuple[list[list[float]], list[list[float]], list[list[float]], list[list[float]]],
@@ -491,6 +529,10 @@ class _FakePlanningResetSnapshot:
             list[list[float]],
             list[list[float]],
             list[list[CommandMode]],
+            list[list[float]],
+            list[list[float]],
+            list[list[float]],
+            list[list[float]],
             list[list[float]],
         ],
     ]
@@ -1403,6 +1445,7 @@ class FakeWorld:
         self._step_index = 0
         self._reset_count = 0
         self._scene_sequence = 0
+        self._render_state_revision = 0
         self._scene_results: dict[str, SceneCommandResult] = {}
         self._active_drags: dict[str, tuple[EntityPath, int, Pose]] = {}
         self._attachments: dict[tuple[int, str], _FakeAttachment] = {}
@@ -1431,8 +1474,16 @@ class FakeWorld:
             elif entity.kind is EntityKind.ARTICULATION:
                 initial = list(entity.initial_joint_positions)
                 positions = [initial.copy() for _ in range(spec.environments.count)]
+                root_position = list(entity.pose.position)
+                root_orientation = list(entity.pose.orientation_xyzw)
                 self._articulations[entity.path] = _ArticulationRuntime(
                     spec=entity,
+                    initial_root_position=root_position,
+                    initial_root_orientation=root_orientation,
+                    root_positions=[root_position.copy() for _ in range(spec.environments.count)],
+                    root_orientations=[root_orientation.copy() for _ in range(spec.environments.count)],
+                    root_linear_velocities=[[0.0, 0.0, 0.0] for _ in range(spec.environments.count)],
+                    root_angular_velocities=[[0.0, 0.0, 0.0] for _ in range(spec.environments.count)],
                     positions=positions,
                     velocities=[[0.0] * len(initial) for _ in range(spec.environments.count)],
                     modes=[[CommandMode.POSITION] * len(initial) for _ in range(spec.environments.count)],
@@ -2097,11 +2148,23 @@ class FakeWorld:
         tuple[float, float, float],
     ]:
         if entity.kind is EntityKind.RIGID_BODY:
-            runtime = self._rigids[entity.path]
-            position = runtime.positions[environment_index]
-            orientation = runtime.orientations[environment_index]
-            linear = runtime.linear_velocities[environment_index]
-            angular = runtime.angular_velocities[environment_index]
+            rigid_runtime = self._rigids[entity.path]
+            position = rigid_runtime.positions[environment_index]
+            orientation = rigid_runtime.orientations[environment_index]
+            linear = rigid_runtime.linear_velocities[environment_index]
+            angular = rigid_runtime.angular_velocities[environment_index]
+            return (
+                (position[0], position[1], position[2]),
+                (orientation[0], orientation[1], orientation[2], orientation[3]),
+                (linear[0], linear[1], linear[2]),
+                (angular[0], angular[1], angular[2]),
+            )
+        if entity.kind is EntityKind.ARTICULATION:
+            articulation_runtime = self._articulations[entity.path]
+            position = articulation_runtime.root_positions[environment_index]
+            orientation = articulation_runtime.root_orientations[environment_index]
+            linear = articulation_runtime.root_linear_velocities[environment_index]
+            angular = articulation_runtime.root_angular_velocities[environment_index]
             return (
                 (position[0], position[1], position[2]),
                 (orientation[0], orientation[1], orientation[2], orientation[3]),
@@ -3413,7 +3476,14 @@ class FakeWorld:
             self._step_index,
             self._scene_sequence,
             {
-                path: (_copy_vectors(runtime.positions), _copy_vectors(runtime.velocities))
+                path: (
+                    _copy_vectors(runtime.positions),
+                    _copy_vectors(runtime.velocities),
+                    _copy_vectors(runtime.root_positions),
+                    _copy_vectors(runtime.root_orientations),
+                    _copy_vectors(runtime.root_linear_velocities),
+                    _copy_vectors(runtime.root_angular_velocities),
+                )
                 for path, runtime in self._articulations.items()
             },
             {
@@ -3439,10 +3509,21 @@ class FakeWorld:
     def _planning_restore_step_snapshot(self, snapshot: _FakePlanningStepSnapshot) -> None:
         self._step_index = snapshot.step_index
         self._scene_sequence = snapshot.scene_sequence
-        for path, (articulation_positions, articulation_velocities) in snapshot.articulations.items():
+        for path, (
+            articulation_positions,
+            articulation_velocities,
+            root_positions,
+            root_orientations,
+            root_linear_velocities,
+            root_angular_velocities,
+        ) in snapshot.articulations.items():
             articulation_runtime = self._articulations[path]
             articulation_runtime.positions = articulation_positions
             articulation_runtime.velocities = articulation_velocities
+            articulation_runtime.root_positions = root_positions
+            articulation_runtime.root_orientations = root_orientations
+            articulation_runtime.root_linear_velocities = root_linear_velocities
+            articulation_runtime.root_angular_velocities = root_angular_velocities
         for path, (
             rigid_positions,
             rigid_orientations,
@@ -3472,6 +3553,10 @@ class FakeWorld:
                     _copy_vectors(runtime.velocities),
                     [list(values) for values in runtime.modes],
                     _copy_vectors(runtime.targets),
+                    _copy_vectors(runtime.root_positions),
+                    _copy_vectors(runtime.root_orientations),
+                    _copy_vectors(runtime.root_linear_velocities),
+                    _copy_vectors(runtime.root_angular_velocities),
                 )
                 for path, runtime in self._articulations.items()
             },
@@ -3503,12 +3588,25 @@ class FakeWorld:
         self._reset_count = snapshot.reset_count
         self._scene_sequence = snapshot.scene_sequence
         self._attachments = snapshot.attachments
-        for path, (positions, velocities, modes, targets) in snapshot.articulations.items():
+        for path, (
+            positions,
+            velocities,
+            modes,
+            targets,
+            root_positions,
+            root_orientations,
+            root_linear_velocities,
+            root_angular_velocities,
+        ) in snapshot.articulations.items():
             articulation_runtime = self._articulations[path]
             articulation_runtime.positions = positions
             articulation_runtime.velocities = velocities
             articulation_runtime.modes = modes
             articulation_runtime.targets = targets
+            articulation_runtime.root_positions = root_positions
+            articulation_runtime.root_orientations = root_orientations
+            articulation_runtime.root_linear_velocities = root_linear_velocities
+            articulation_runtime.root_angular_velocities = root_angular_velocities
         for path, (
             positions,
             orientations,
@@ -3651,6 +3749,12 @@ class FakeWorld:
             for environment in environments:
                 articulation_runtime.positions[environment] = list(initial)
                 articulation_runtime.velocities[environment] = [0.0] * len(initial)
+                articulation_runtime.root_positions[environment] = articulation_runtime.initial_root_position.copy()
+                articulation_runtime.root_orientations[environment] = (
+                    articulation_runtime.initial_root_orientation.copy()
+                )
+                articulation_runtime.root_linear_velocities[environment] = [0.0, 0.0, 0.0]
+                articulation_runtime.root_angular_velocities[environment] = [0.0, 0.0, 0.0]
                 articulation_runtime.modes[environment] = [CommandMode.POSITION] * len(initial)
                 articulation_runtime.targets[environment] = list(initial)
         for rigid_runtime in self._rigids.values():
@@ -3691,6 +3795,259 @@ class FakeWorld:
         self._reset_count += 1
         self._scene_sequence += 1
         return ResetResult(environments, self._reset_count, self.tick)
+
+    def apply_render_state(self, frame: RenderStateFrame) -> RenderStateResult:
+        """Prevalidate and publish one state frame without advancing the fake physics clock."""
+
+        operation = "world.apply_render_state"
+        self._ensure_ready(operation)
+        if self._descriptor.capabilities.get(RENDER_STATE_CAPABILITY_ID) is None:
+            raise UnsupportedCapabilityError(
+                "provider does not support render-state application",
+                operation=operation,
+                backend_id=self._descriptor.provider_id,
+                world_id=self.world_id,
+                details={"capability_id": RENDER_STATE_CAPABILITY_ID.value},
+            ) from None
+        if type(frame) is not RenderStateFrame:
+            raise ValidationError("operation requires a RenderStateFrame", operation=operation)
+
+        def particle_rows(value: ArrayValue | PackedFloat32Array) -> tuple[tuple[tuple[float, ...], ...], ...]:
+            if isinstance(value, ArrayValue):
+                return value.nested()
+            scalars = struct.unpack(f"<{len(value.data) // 4}f", value.data)
+            if not all(math.isfinite(component) for component in scalars):
+                raise ValidationError("packed render state must contain finite values", operation=operation)
+            environment_count, particle_count, _ = value.shape
+            return tuple(
+                tuple(
+                    tuple(float(component) for component in scalars[offset : offset + 3])
+                    for offset in range(
+                        environment * particle_count * 3,
+                        (environment + 1) * particle_count * 3,
+                        3,
+                    )
+                )
+                for environment in range(environment_count)
+            )
+
+        articulation_updates: list[tuple[Any, ...]] = []
+        for articulation_update in frame.articulations:
+            entity = self._validate_handle(articulation_update.handle, operation)
+            if entity.kind is not EntityKind.ARTICULATION:
+                raise CommandError("render state entity is not an articulation", operation=operation)
+            environments = self._indices(
+                articulation_update.environment_indices,
+                self._spec.environments.count,
+                "environment_indices",
+                operation=operation,
+            )
+            degrees = self._indices(
+                articulation_update.degree_of_freedom_indices,
+                len(entity.joint_names),
+                "degree_of_freedom_indices",
+                operation=operation,
+            )
+            expected = (len(environments), len(degrees))
+            if (
+                articulation_update.joint_positions.shape != expected
+                or articulation_update.joint_velocities.shape != expected
+            ):
+                raise CommandError(
+                    "render articulation state shape does not match its selections",
+                    operation=operation,
+                    entity_path=entity.path.value,
+                    details={"expected_shape": list(expected)},
+                )
+            root_values = (
+                articulation_update.root_positions_m,
+                articulation_update.root_orientations_xyzw,
+                articulation_update.root_linear_velocities_m_s,
+                articulation_update.root_angular_velocities_rad_s,
+            )
+            if any(value is not None for value in root_values):
+                if any(value is None for value in root_values):
+                    raise CommandError(
+                        "render articulation root pose and velocity must be supplied together",
+                        operation=operation,
+                        entity_path=entity.path.value,
+                    )
+                assert articulation_update.root_positions_m is not None
+                assert articulation_update.root_orientations_xyzw is not None
+                assert articulation_update.root_linear_velocities_m_s is not None
+                assert articulation_update.root_angular_velocities_rad_s is not None
+                if (
+                    articulation_update.root_positions_m.shape != (len(environments), 3)
+                    or articulation_update.root_orientations_xyzw.shape != (len(environments), 4)
+                    or articulation_update.root_linear_velocities_m_s.shape != (len(environments), 3)
+                    or articulation_update.root_angular_velocities_rad_s.shape != (len(environments), 3)
+                ):
+                    raise CommandError(
+                        "render articulation root state shape does not match its environment selection",
+                        operation=operation,
+                        entity_path=entity.path.value,
+                    )
+            articulation_updates.append(
+                (
+                    self._articulations[entity.path],
+                    environments,
+                    degrees,
+                    articulation_update.joint_positions.rows(),
+                    articulation_update.joint_velocities.rows(),
+                    None
+                    if articulation_update.root_positions_m is None
+                    else articulation_update.root_positions_m.rows(),
+                    None
+                    if articulation_update.root_orientations_xyzw is None
+                    else articulation_update.root_orientations_xyzw.rows(),
+                    None
+                    if articulation_update.root_linear_velocities_m_s is None
+                    else articulation_update.root_linear_velocities_m_s.rows(),
+                    None
+                    if articulation_update.root_angular_velocities_rad_s is None
+                    else articulation_update.root_angular_velocities_rad_s.rows(),
+                )
+            )
+
+        rigid_updates: list[tuple[Any, ...]] = []
+        for rigid_update in frame.rigid_bodies:
+            entity = self._validate_handle(rigid_update.handle, operation)
+            if entity.kind is not EntityKind.RIGID_BODY:
+                raise CommandError("render state entity is not a rigid body", operation=operation)
+            environments = self._indices(
+                rigid_update.environment_indices,
+                self._spec.environments.count,
+                "environment_indices",
+                operation=operation,
+            )
+            row_count = len(environments)
+            if (
+                rigid_update.positions_m.shape != (row_count, 3)
+                or rigid_update.orientations_xyzw.shape != (row_count, 4)
+                or rigid_update.linear_velocities_m_s.shape != (row_count, 3)
+                or rigid_update.angular_velocities_rad_s.shape != (row_count, 3)
+            ):
+                raise CommandError(
+                    "render rigid-body state shape does not match its environment selection",
+                    operation=operation,
+                    entity_path=entity.path.value,
+                )
+            rigid_updates.append(
+                (
+                    self._rigids[entity.path],
+                    environments,
+                    rigid_update.positions_m.rows(),
+                    rigid_update.orientations_xyzw.rows(),
+                    rigid_update.linear_velocities_m_s.rows(),
+                    rigid_update.angular_velocities_rad_s.rows(),
+                )
+            )
+
+        fluid_updates: list[tuple[Any, ...]] = []
+        for fluid_update in frame.particle_fluids:
+            entity = self._validate_handle(fluid_update.handle, operation)
+            if entity.kind is not EntityKind.PARTICLE_FLUID or entity.particle_fluid is None:
+                raise CommandError("render state entity is not a particle fluid", operation=operation)
+            environments = self._indices(
+                fluid_update.environment_indices,
+                self._spec.environments.count,
+                "environment_indices",
+                operation=operation,
+            )
+            particle_count = fluid_update.positions_m.shape[1]
+            if (
+                fluid_update.positions_m.shape != (len(environments), particle_count, 3)
+                or fluid_update.first_particle_index + particle_count > entity.particle_fluid.particle_count
+                or (
+                    fluid_update.velocities_m_s is not None
+                    and fluid_update.velocities_m_s.shape != fluid_update.positions_m.shape
+                )
+            ):
+                raise CommandError(
+                    "render particle-fluid state range or shape is invalid",
+                    operation=operation,
+                    entity_path=entity.path.value,
+                )
+            fluid_updates.append(
+                (
+                    self._points[entity.path],
+                    environments,
+                    fluid_update.first_particle_index,
+                    particle_rows(fluid_update.positions_m),
+                    None
+                    if fluid_update.velocities_m_s is None
+                    else particle_rows(fluid_update.velocities_m_s),
+                )
+            )
+
+        for (
+            articulation_runtime,
+            environments,
+            degrees,
+            positions,
+            velocities,
+            root_positions,
+            root_orientations,
+            root_linear,
+            root_angular,
+        ) in articulation_updates:
+            for row_index, environment in enumerate(environments):
+                for column_index, degree in enumerate(degrees):
+                    position = float(positions[row_index][column_index])
+                    velocity = float(velocities[row_index][column_index])
+                    articulation_runtime.positions[environment][degree] = position
+                    articulation_runtime.velocities[environment][degree] = velocity
+                    articulation_runtime.modes[environment][degree] = CommandMode.POSITION
+                    articulation_runtime.targets[environment][degree] = position
+                if root_positions is not None:
+                    assert root_orientations is not None and root_linear is not None and root_angular is not None
+                    articulation_runtime.root_positions[environment] = [
+                        float(value) for value in root_positions[row_index]
+                    ]
+                    articulation_runtime.root_orientations[environment] = [
+                        float(value) for value in root_orientations[row_index]
+                    ]
+                    articulation_runtime.root_linear_velocities[environment] = [
+                        float(value) for value in root_linear[row_index]
+                    ]
+                    articulation_runtime.root_angular_velocities[environment] = [
+                        float(value) for value in root_angular[row_index]
+                    ]
+        for rigid_runtime, environments, positions, orientations, linear, angular in rigid_updates:
+            for row_index, environment in enumerate(environments):
+                rigid_runtime.positions[environment] = [float(value) for value in positions[row_index]]
+                rigid_runtime.orientations[environment] = [float(value) for value in orientations[row_index]]
+                rigid_runtime.linear_velocities[environment] = [float(value) for value in linear[row_index]]
+                rigid_runtime.angular_velocities[environment] = [float(value) for value in angular[row_index]]
+                rigid_runtime.forces[environment] = [0.0, 0.0, 0.0]
+                rigid_runtime.torques[environment] = [0.0, 0.0, 0.0]
+        for point_runtime, environments, first, positions, velocities in fluid_updates:
+            for row_index, environment in enumerate(environments):
+                for column_index, position in enumerate(positions[row_index]):
+                    particle = first + column_index
+                    point_runtime.positions[environment][particle] = [float(value) for value in position]
+                    if velocities is not None:
+                        point_runtime.velocities[environment][particle] = [
+                            float(value) for value in velocities[row_index][column_index]
+                        ]
+                    point_runtime.modes[environment][particle] = PointCommandMode.FORCE
+                    point_runtime.targets[environment][particle] = [0.0, 0.0, 0.0]
+
+        self._render_state_revision += 1
+        self._scene_sequence += 1
+        self._session._native_count += 1
+        self._session._command_count += 1
+        self._session._state_mutation_count += (
+            len(articulation_updates) + len(rigid_updates) + len(fluid_updates)
+        )
+        return RenderStateResult(
+            generation=self.generation,
+            tick=self.tick,
+            state_revision=self._render_state_revision,
+            articulation_count=len(articulation_updates),
+            rigid_body_count=len(rigid_updates),
+            particle_fluid_count=len(fluid_updates),
+        )
 
     def apply_articulation_command(self, command: ArticulationCommand) -> None:
         self._ensure_ready("world.apply_articulation_command")
