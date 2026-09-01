@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.10.4 - 2026-09-01
+
+- Define entity pose as the imported asset/model root frame; USD adapters expose
+  the spawned entity Prim rather than an inferred articulation root link.
+- Allow entity-level pose commands for articulations while preserving every
+  physical body's relative transform and the current joint state.
+- Keep physical root and child-link state available through explicit link state.
+
 ## 0.10.3 - 2026-09-01
 
 - Add immutable triangle-mesh debug resources and batched mesh instances with

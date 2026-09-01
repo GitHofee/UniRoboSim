@@ -584,6 +584,31 @@ def test_catalog_covers_rigid_generic_articulation_robot_and_unicode(planning_wo
     state.validate_against(catalog)
 
 
+def test_articulation_entity_state_uses_entity_prim_not_physical_root_link(planning_world) -> None:
+    catalog = planning_world.planning_scene_catalog()
+    robot = entity_by_path(catalog, "/robot")
+    root_link = next(
+        item
+        for item in catalog.links
+        if item.entity_id == robot.entity_id and item.parent_link_id is None
+    )
+
+    runtime = planning_world._articulations[EntityPath("/robot")]
+    runtime.root_positions[0] = [3.0, 2.0, 1.0]
+    planning_world._planning_commit_state((0,))
+
+    state = planning_world.planning_scene_state(0)
+    entity_state = next(item for item in state.entities if item.entity_id == robot.entity_id)
+    link_state = next(item for item in state.links if item.link_id == root_link.link_id)
+    scene_state = next(
+        item for item in planning_world.scene_snapshot().entities if item.path == EntityPath("/robot")
+    )
+
+    assert entity_state.pose.position_m == (0.0, 0.0, 0.0)
+    assert scene_state.pose.position == (0.0, 0.0, 0.0)
+    assert link_state.pose.position_m == (3.0, 2.0, 1.0)
+
+
 def test_v2_system_entity_owns_exact_implicit_halfspace(planning_world) -> None:
     catalog = planning_world.planning_scene_catalog()
     system = next(item for item in catalog.entities if item.entity_id == PLANNING_SYSTEM_ENTITY_ID)
@@ -1916,7 +1941,7 @@ def test_planning_step_and_scene_predictor_reject_defensive_boundaries(planning_
         expected_generation=planning_world.generation,
         entity_path=EntityPath("/robot"),
     )
-    assert planning_world._planning_scene_command_will_commit(articulation_target) is False
+    assert planning_world._planning_scene_command_will_commit(articulation_target) is True
     valid = replace(stale, command_id="valid-predictor", expected_generation=planning_world.generation)
     assert planning_world._planning_scene_command_will_commit(valid) is True
     drag = SceneCommand(

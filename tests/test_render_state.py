@@ -100,8 +100,11 @@ def test_render_state_applies_immediately_without_advancing_physics() -> None:
             for entity in world.scene_snapshot().entities
             if entity.path == EntityPath("/robot") and entity.environment_index == 1
         )
-        assert robot_scene.pose.position == (9.0, 8.0, 7.0)
-        assert robot_scene.linear_velocity_m_s == (0.6, 0.5, 0.4)
+        assert robot_scene.pose.position == (0.0, 0.0, 0.0)
+        assert robot_scene.linear_velocity_m_s == (0.0, 0.0, 0.0)
+        robot_physics = world._articulations[EntityPath("/robot")]  # type: ignore[attr-defined]
+        assert robot_physics.root_positions[1] == [9.0, 8.0, 7.0]
+        assert robot_physics.root_linear_velocities[1] == [0.6, 0.5, 0.4]
         rigid = world.read_rigid_body(world.resolve(EntityPath("/box")))
         assert rigid.positions_m.rows()[0] == (3.0, 2.0, 1.0)
         assert rigid.linear_velocities_m_s.rows()[0] == (0.1, 0.2, 0.3)

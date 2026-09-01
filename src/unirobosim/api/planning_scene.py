@@ -1423,6 +1423,14 @@ class PlanningSceneCatalog(_PlanningValue):
 
 @dataclass(frozen=True, slots=True)
 class PlanningEntityState(_PlanningValue):
+    """Dynamic state of the entity asset-root frame.
+
+    ``pose`` is never an implicit articulation root-link pose. An adapter must
+    publish the imported asset/model root frame here (the spawned entity Prim in
+    USD backends). Physical link poses, including the root link, belong in
+    :class:`PlanningLinkState`.
+    """
+
     entity_id: str
     pose: PlanningPose
     twist: PlanningTwist
@@ -1558,7 +1566,7 @@ class PlanningSceneStatePatch(_PlanningValue):
         )
         total = 0
         for name, values, item_type, identity in groups:
-            canonical = _typed_tuple(values, item_type, f"state patch {name}")
+            canonical: tuple[object, ...] = _typed_tuple(values, item_type, f"state patch {name}")
             _unique_sorted(canonical, identity, f"state patch {name}")
             object.__setattr__(self, name, canonical)
             total += len(canonical)

@@ -105,6 +105,12 @@ class SceneVisual:
 
 @dataclass(frozen=True)
 class SceneEntityState:
+    """Browser-facing state of one entity asset-root frame.
+
+    ``pose`` denotes the imported asset/model root. In a USD adapter it is the
+    spawned entity Prim pose, not an inferred articulation root-link pose.
+    """
+
     path: EntityPath
     kind: EntityKind
     environment_index: int

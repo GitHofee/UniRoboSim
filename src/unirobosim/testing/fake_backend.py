@@ -329,7 +329,7 @@ FAKE_CAPABILITIES = CapabilitySet(
 FAKE_DESCRIPTOR = ProviderDescriptor(
     provider_id="reference.fake",
     display_name="UniRoboSim Fake Reference Backend",
-    version="0.10.3",
+    version="0.10.4",
     contract_version="v0alpha6",
     capabilities=FAKE_CAPABILITIES,
     supported_world_schema_versions=(
@@ -513,6 +513,11 @@ class _FakePlanningSceneCommandSnapshot:
     scene_results: dict[str, SceneCommandResult]
     active_drags: dict[str, tuple[EntityPath, int, Pose]]
     attachments: dict[tuple[int, str], _FakeAttachment]
+    entity_prim_poses: dict[EntityPath, list[Pose]]
+    articulation_roots: dict[
+        EntityPath,
+        tuple[list[list[float]], list[list[float]], list[list[float]], list[list[float]]],
+    ]
     rigids: dict[
         EntityPath,
         tuple[list[list[float]], list[list[float]], list[list[float]], list[list[float]]],
@@ -524,6 +529,7 @@ class _FakePlanningResetSnapshot:
     reset_count: int
     scene_sequence: int
     attachments: dict[tuple[int, str], _FakeAttachment]
+    entity_prim_poses: dict[EntityPath, list[Pose]]
     articulations: dict[
         EntityPath,
         tuple[
@@ -1451,6 +1457,10 @@ class FakeWorld:
         self._active_drags: dict[str, tuple[EntityPath, int, Pose]] = {}
         self._attachments: dict[tuple[int, str], _FakeAttachment] = {}
         self._entities = {entity.path: entity for entity in spec.entities}
+        self._entity_prim_poses = {
+            entity.path: [entity.pose for _ in range(spec.environments.count)]
+            for entity in spec.entities
+        }
         self._articulations: dict[EntityPath, _ArticulationRuntime] = {}
         self._rigids: dict[EntityPath, _RigidRuntime] = {}
         self._points: dict[EntityPath, _PointRuntime] = {}
@@ -2201,13 +2211,32 @@ class FakeWorld:
             parent_angular,
         )
 
+    def _entity_prim_transform_and_twist(
+        self,
+        entity: EntitySpec,
+        environment_index: int,
+    ) -> tuple[
+        tuple[float, float, float],
+        tuple[float, float, float, float],
+        tuple[float, float, float],
+        tuple[float, float, float],
+    ]:
+        """Return the logical asset-root frame independently from articulation links."""
+
+        if entity.kind is EntityKind.ARTICULATION:
+            pose = self._entity_prim_poses[entity.path][environment_index]
+            return pose.position, pose.orientation_xyzw, (0.0, 0.0, 0.0), (0.0, 0.0, 0.0)
+        return self._entity_transform_and_twist(entity, environment_index)
+
     def _planning_entity_pose_and_twist(
         self,
         entity: EntitySpec,
         environment_index: int,
         world_frame_id: str,
     ) -> tuple[PlanningPose, PlanningTwist]:
-        position, orientation, linear, angular = self._entity_transform_and_twist(entity, environment_index)
+        position, orientation, linear, angular = self._entity_prim_transform_and_twist(
+            entity, environment_index
+        )
         return (
             PlanningPose(world_frame_id, position, orientation),
             PlanningTwist(world_frame_id, linear, angular),
@@ -2385,15 +2414,32 @@ class FakeWorld:
             pose_by_entity[descriptor.entity_id] = pose
             twist_by_entity[descriptor.entity_id] = twist
             entity_states.append(PlanningEntityState(descriptor.entity_id, pose, twist))
+        descriptor_by_id = {descriptor.entity_id: descriptor for descriptor in catalog.entities}
+        link_pose_by_id: dict[str, PlanningPose] = {}
         for link in catalog.links:
-            pose = pose_by_entity[link.entity_id]
-            twist = twist_by_entity[link.entity_id]
+            descriptor = descriptor_by_id[link.entity_id]
+            spec = spec_by_path[descriptor.path]
+            if spec.kind is EntityKind.ARTICULATION:
+                position, orientation, linear, angular = self._entity_transform_and_twist(
+                    spec, environment_index
+                )
+                pose = PlanningPose(catalog.world_frame_id, position, orientation)
+                twist = PlanningTwist(catalog.world_frame_id, linear, angular)
+            else:
+                pose = pose_by_entity[link.entity_id]
+                twist = twist_by_entity[link.entity_id]
+            link_pose_by_id[link.link_id] = pose
             link_states.append(PlanningLinkState(link.link_id, pose, twist))
         for frame in catalog.frames:
             if frame.kind is PlanningFrameKind.WORLD:
                 continue
             assert frame.owner_entity_id is not None
-            frame_states.append(PlanningFrameState(frame.frame_id, pose_by_entity[frame.owner_entity_id]))
+            pose = (
+                link_pose_by_id[frame.owner_link_id]
+                if frame.owner_link_id is not None
+                else pose_by_entity[frame.owner_entity_id]
+            )
+            frame_states.append(PlanningFrameState(frame.frame_id, pose))
         sorted_frames = tuple(sorted(frame_states, key=lambda item: item.frame_id))
         frame_pose = {frame.frame_id: frame.world_pose for frame in sorted_frames}
         articulation_states: list[PlanningArticulationState] = []
@@ -3441,6 +3487,16 @@ class FakeWorld:
             dict(self._scene_results),
             dict(self._active_drags),
             dict(self._attachments),
+            {path: list(poses) for path, poses in self._entity_prim_poses.items()},
+            {
+                path: (
+                    _copy_vectors(runtime.root_positions),
+                    _copy_vectors(runtime.root_orientations),
+                    _copy_vectors(runtime.root_linear_velocities),
+                    _copy_vectors(runtime.root_angular_velocities),
+                )
+                for path, runtime in self._articulations.items()
+            },
             {
                 path: (
                     _copy_vectors(runtime.positions),
@@ -3460,17 +3516,29 @@ class FakeWorld:
         self._scene_results = snapshot.scene_results
         self._active_drags = snapshot.active_drags
         self._attachments = snapshot.attachments
+        self._entity_prim_poses = snapshot.entity_prim_poses
+        for path, (
+            root_positions,
+            root_orientations,
+            root_linear_velocities,
+            root_angular_velocities,
+        ) in snapshot.articulation_roots.items():
+            articulation_runtime = self._articulations[path]
+            articulation_runtime.root_positions = root_positions
+            articulation_runtime.root_orientations = root_orientations
+            articulation_runtime.root_linear_velocities = root_linear_velocities
+            articulation_runtime.root_angular_velocities = root_angular_velocities
         for path, (
             positions,
             orientations,
             linear_velocities,
             angular_velocities,
         ) in snapshot.rigids.items():
-            runtime = self._rigids[path]
-            runtime.positions = positions
-            runtime.orientations = orientations
-            runtime.linear_velocities = linear_velocities
-            runtime.angular_velocities = angular_velocities
+            rigid_runtime = self._rigids[path]
+            rigid_runtime.positions = positions
+            rigid_runtime.orientations = orientations
+            rigid_runtime.linear_velocities = linear_velocities
+            rigid_runtime.angular_velocities = angular_velocities
 
     def _planning_capture_step_snapshot(self) -> _FakePlanningStepSnapshot:
         return _FakePlanningStepSnapshot(
@@ -3548,6 +3616,7 @@ class FakeWorld:
             self._reset_count,
             self._scene_sequence,
             dict(self._attachments),
+            {path: list(poses) for path, poses in self._entity_prim_poses.items()},
             {
                 path: (
                     _copy_vectors(runtime.positions),
@@ -3589,6 +3658,7 @@ class FakeWorld:
         self._reset_count = snapshot.reset_count
         self._scene_sequence = snapshot.scene_sequence
         self._attachments = snapshot.attachments
+        self._entity_prim_poses = snapshot.entity_prim_poses
         for path, (
             positions,
             velocities,
@@ -3748,6 +3818,9 @@ class FakeWorld:
         for articulation_runtime in self._articulations.values():
             initial = articulation_runtime.spec.initial_joint_positions
             for environment in environments:
+                self._entity_prim_poses[articulation_runtime.spec.path][environment] = (
+                    articulation_runtime.spec.pose
+                )
                 articulation_runtime.positions[environment] = list(initial)
                 articulation_runtime.velocities[environment] = [0.0] * len(initial)
                 articulation_runtime.root_positions[environment] = articulation_runtime.initial_root_position.copy()
@@ -4651,7 +4724,9 @@ class FakeWorld:
         entities: list[SceneEntityState] = []
         for entity in self._spec.entities:
             for environment in range(self._spec.environments.count):
-                position, orientation, linear, angular = self._entity_transform_and_twist(entity, environment)
+                position, orientation, linear, angular = self._entity_prim_transform_and_twist(
+                    entity, environment
+                )
                 pose = Pose(position, orientation)
                 if entity.kind is EntityKind.ARTICULATION:
                     runtime_articulation = self._articulations[entity.path]
@@ -4761,21 +4836,27 @@ class FakeWorld:
                 message="entity or environment does not exist",
             )
         attachment_command = command.kind in {SceneCommandKind.ATTACH, SceneCommandKind.DETACH}
+        pose_command = command.kind is SceneCommandKind.SET_POSE
         if entity.kind is not EntityKind.RIGID_BODY and not (
-            attachment_command and entity.kind is EntityKind.ARTICULATION
+            entity.kind is EntityKind.ARTICULATION and (attachment_command or pose_command)
         ):
             return self._scene_result(
                 command,
                 SceneCommandStatus.REJECTED,
                 error_code="unsupported_entity_kind",
-                message="scene manipulation requires a rigid body, or an articulation attachment endpoint",
+                message="scene manipulation requires a rigid body or articulation entity",
             )
         runtime = self._rigids.get(entity.path)
         environment = command.environment_index
         if command.kind is SceneCommandKind.SET_POSE:
             assert command.target_pose is not None
-            assert runtime is not None
-            self._set_rigid_pose(runtime, environment, command.target_pose)
+            if entity.kind is EntityKind.ARTICULATION:
+                self._set_articulation_entity_pose(
+                    self._articulations[entity.path], environment, command.target_pose
+                )
+            else:
+                assert runtime is not None
+                self._set_rigid_pose(runtime, environment, command.target_pose)
         elif command.kind is SceneCommandKind.DRAG_BEGIN:
             assert command.drag_id is not None
             assert runtime is not None
@@ -4925,11 +5006,40 @@ class FakeWorld:
         runtime.linear_velocities[environment] = [0.0, 0.0, 0.0]
         runtime.angular_velocities[environment] = [0.0, 0.0, 0.0]
 
+    def _set_articulation_entity_pose(
+        self,
+        runtime: _ArticulationRuntime,
+        environment: int,
+        pose: Pose,
+    ) -> None:
+        old_entity = self._entity_prim_poses[runtime.spec.path][environment]
+        old_root = PlanningPose(
+            "world",
+            tuple(runtime.root_positions[environment]),  # type: ignore[arg-type]
+            tuple(runtime.root_orientations[environment]),  # type: ignore[arg-type]
+        )
+        relative = _planning_relative(
+            PlanningPose("world", old_entity.position, old_entity.orientation_xyzw),
+            old_root,
+            "entity",
+        )
+        offset = _planning_rotate(relative.position_m, pose.orientation_xyzw)
+        runtime.root_positions[environment] = [
+            pose.position[axis] + offset[axis] for axis in range(3)
+        ]
+        runtime.root_orientations[environment] = list(
+            _planning_quaternion_multiply(pose.orientation_xyzw, relative.orientation_xyzw)
+        )
+        runtime.root_linear_velocities[environment] = [0.0, 0.0, 0.0]
+        runtime.root_angular_velocities[environment] = [0.0, 0.0, 0.0]
+        self._entity_prim_poses[runtime.spec.path][environment] = pose
+
     def _close(self, *, notify_session: bool) -> None:
         if self._state is WorldState.CLOSED:
             return
         self._state = WorldState.CLOSED
         self._entities.clear()
+        self._entity_prim_poses.clear()
         self._articulations.clear()
         self._rigids.clear()
         self._points.clear()
@@ -5109,11 +5219,13 @@ class FakePlanningWorld(FakeWorld):
         if (
             entity is None
             or command.environment_index >= self._spec.environments.count
-            or entity.kind is not EntityKind.RIGID_BODY
+            or entity.kind not in {EntityKind.RIGID_BODY, EntityKind.ARTICULATION}
         ):
             return False
         if command.kind is SceneCommandKind.SET_POSE:
             return True
+        if entity.kind is EntityKind.ARTICULATION:
+            return False
         if command.kind is SceneCommandKind.ATTACH:
             return (
                 command.parent_entity_path in self._entities
@@ -5122,6 +5234,7 @@ class FakePlanningWorld(FakeWorld):
                 and (command.environment_index, command.attachment_id) not in self._attachments
             )
         if command.kind is SceneCommandKind.DETACH:
+            assert command.attachment_id is not None
             attachment = self._attachments.get((command.environment_index, command.attachment_id))
             return attachment is not None and attachment.child_path == command.entity_path
         assert command.drag_id is not None

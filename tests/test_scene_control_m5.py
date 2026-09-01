@@ -106,14 +106,35 @@ def test_fake_snapshot_delta_pose_and_idempotency() -> None:
         assert delta.base_sequence == 0 and delta.sequence == 1 and len(delta.upserts) == 4
         assert world.scene_delta(delta.sequence).upserts == ()
 
+        articulation_target = Pose((0.4, 0.5, 0.6), (0.0, 0.0, 0.70710678, 0.70710678))
+        articulation_result = world.apply_scene_command(
+            SceneCommand(
+                "pose-articulation",
+                "browser-1",
+                "lease-1",
+                world.generation,
+                SceneCommandKind.SET_POSE,
+                EntityPath("/robot"),
+                0,
+                articulation_target,
+            )
+        )
+        assert articulation_result.status is SceneCommandStatus.APPLIED
+        articulation_state = next(
+            item
+            for item in world.scene_snapshot().entities
+            if item.path == EntityPath("/robot") and item.environment_index == 0
+        )
+        assert articulation_state.pose == articulation_target
+
         stale = world.apply_scene_command(
             command(SceneCommandKind.SET_POSE, "stale-1", world.generation + 1, pose=target)
         )
         assert stale.status is SceneCommandStatus.REJECTED and stale.error_code == "stale_generation"
         world.step(2)
-        assert world.scene_delta(1).sequence == 3
+        assert world.scene_delta(1).sequence == 4
         with pytest.raises(ValidationError):
-            world.scene_delta(4)
+            world.scene_delta(5)
     finally:
         session.close()
 
@@ -245,7 +266,7 @@ def test_fake_attachment_follows_parent_detaches_and_reset_clears_it() -> None:
         session.close()
 
 
-def test_fake_accepts_articulation_link_as_attachment_child_without_widening_pose_commands() -> None:
+def test_fake_accepts_articulation_link_as_attachment_child_and_entity_prim_pose_commands() -> None:
     spec = WorldSpec(
         world_id="articulation-attachment-world",
         environments=EnvironmentSpec(1),
@@ -306,7 +327,7 @@ def test_fake_accepts_articulation_link_as_attachment_child_without_widening_pos
             )
         )
         assert duplicate_link.error_code == "child_already_attached"
-        assert world.apply_scene_command(
+        moved = world.apply_scene_command(
             SceneCommand(
                 "move-articulation",
                 "mission",
@@ -316,7 +337,14 @@ def test_fake_accepts_articulation_link_as_attachment_child_without_widening_pos
                 EntityPath("/refrigerator"),
                 target_pose=Pose((1.0, 0.0, 0.0)),
             )
-        ).error_code == "unsupported_entity_kind"
+        )
+        assert moved.status is SceneCommandStatus.APPLIED
+        moved_state = next(
+            item
+            for item in world.scene_snapshot().entities
+            if item.path == EntityPath("/refrigerator")
+        )
+        assert moved_state.pose == Pose((1.0, 0.0, 0.0))
         detached = world.apply_scene_command(
             SceneCommand(
                 "detach-door",

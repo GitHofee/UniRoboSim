@@ -6,10 +6,9 @@
 
 UniRoboSim is a backend-neutral interoperability layer for robotics simulation. It defines portable scene, lifecycle, command, state, sensor, asset, debug, and scene-control contracts while keeping native simulator SDKs in independently packaged adapters. Applications and upper-layer frameworks can select a backend without propagating simulator-specific types through their architecture.
 
-Version `0.10.3` adds immutable triangle-mesh debug resources and lightweight mesh
-instances. Planning and diagnostic tools can display filled collision geometry while
-reusing topology across updates; these overlays remain render-only and never enter
-physics or planning queries.
+Version `0.10.4` defines every entity pose as its imported asset/model root frame. In
+USD backends this is the spawned entity Prim, never an inferred articulation root
+link; physical link poses remain available through explicit link-state APIs.
 
 <img src="assets/readme/unirobosim-architecture.svg" alt="UniRoboSim architecture: applications, FastSim, policies and agents use EasyAPI, RuntimeAPI, MCP and Studio; portable contracts connect them to independent simulator adapters." width="100%">
 
@@ -49,7 +48,7 @@ Python 3.12 is recommended for Core, Isaac Lab, MuJoCo, the USD converter, and M
 ```bash
 conda create -n unirobosim python=3.12 pip -y
 conda activate unirobosim
-git clone --branch v0.10.0 --depth 1 https://github.com/GitHofee/UniRoboSim.git
+git clone --branch v0.10.4 --depth 1 https://github.com/GitHofee/UniRoboSim.git
 python -m pip install ./UniRoboSim
 ```
 
@@ -65,7 +64,7 @@ git clone --branch v0.9.3 --depth 1 https://github.com/GitHofee/UniRoboSim-mujoc
 python -m pip install ./UniRoboSim-mujoco
 
 # Isaac Lab / Python 3.12; install the verified NVIDIA SDK stack first
-git clone --branch v0.10.6 --depth 1 https://github.com/GitHofee/UniRoboSim-isaaclab.git
+git clone --branch v0.10.12 --depth 1 https://github.com/GitHofee/UniRoboSim-isaaclab.git
 python -m pip install ./UniRoboSim-isaaclab
 ```
 
@@ -74,7 +73,7 @@ PyBullet uses a separate Python 3.11 environment:
 ```bash
 conda create -n unirobosim-pybullet python=3.11 pip -y
 conda activate unirobosim-pybullet
-git clone --branch v0.10.0 --depth 1 https://github.com/GitHofee/UniRoboSim.git
+git clone --branch v0.10.4 --depth 1 https://github.com/GitHofee/UniRoboSim.git
 git clone --branch v0.9.3 --depth 1 https://github.com/GitHofee/UniRoboSim-pybullet.git
 python -m pip install ./UniRoboSim ./UniRoboSim-pybullet
 ```
@@ -84,7 +83,7 @@ python -m pip install ./UniRoboSim ./UniRoboSim-pybullet
 | Distribution | Release tag | Python | Core compatibility |
 | --- | --- | --- | --- |
 | `unirobosim` | `v0.10.0` | `>=3.11,<3.13` | Core |
-| `unirobosim-isaaclab` | `v0.10.6` | `>=3.12,<3.13` | `unirobosim>=0.10,<0.11` |
+| `unirobosim-isaaclab` | `v0.10.12` | `>=3.12,<3.13` | `unirobosim>=0.10.4,<0.11` |
 | `unirobosim-mujoco` | `v0.9.3` | `>=3.12,<3.13` | `unirobosim>=0.9,<0.11` |
 | `unirobosim-pybullet` | `v0.9.3` | `>=3.11,<3.12` | `unirobosim>=0.9,<0.11` |
 | `unirobosim-usd-converter` | `v0.10.0` | `>=3.11,<3.13` | `unirobosim>=0.10,<0.11` |
