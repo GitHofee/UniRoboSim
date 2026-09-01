@@ -64,7 +64,7 @@ git clone --branch v0.9.3 --depth 1 https://github.com/GitHofee/UniRoboSim-mujoc
 python -m pip install ./UniRoboSim-mujoco
 
 # Isaac Lab / Python 3.12；先安装已验证的 NVIDIA SDK 运行栈
-git clone --branch v0.10.12 --depth 1 https://github.com/GitHofee/UniRoboSim-isaaclab.git
+git clone --branch v0.10.13 --depth 1 https://github.com/GitHofee/UniRoboSim-isaaclab.git
 python -m pip install ./UniRoboSim-isaaclab
 ```
 
@@ -83,7 +83,7 @@ python -m pip install ./UniRoboSim ./UniRoboSim-pybullet
 | Distribution | 发布标签 | Python | Core 兼容范围 |
 | --- | --- | --- | --- |
 | `unirobosim` | `v0.10.0` | `>=3.11,<3.13` | Core |
-| `unirobosim-isaaclab` | `v0.10.12` | `>=3.12,<3.13` | `unirobosim>=0.10.4,<0.11` |
+| `unirobosim-isaaclab` | `v0.10.13` | `>=3.12,<3.13` | `unirobosim>=0.10.4,<0.11` |
 | `unirobosim-mujoco` | `v0.9.3` | `>=3.12,<3.13` | `unirobosim>=0.9,<0.11` |
 | `unirobosim-pybullet` | `v0.9.3` | `>=3.11,<3.12` | `unirobosim>=0.9,<0.11` |
 | `unirobosim-usd-converter` | `v0.10.0` | `>=3.11,<3.13` | `unirobosim>=0.10,<0.11` |
