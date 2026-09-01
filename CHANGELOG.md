@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.10.2 - 2026-09-01
+
+- Allow positive XYZ scale on `composite_scene` entities and automatically require
+  the additive `entity.scale.composite_scene@1` Provider capability for non-unit
+  values.
+- Expose the same value through
+  `Sim.add_composite_scene(..., scale_xyz=(x, y, z))` in EasyAPI.
+- Preserve fail-closed backend negotiation: Providers that do not implement
+  physically consistent composite scaling reject the World before native allocation.
+- Keep rigid/static-scene XYZ scale and standalone articulation uniform-scale
+  semantics unchanged.
+
 ## 0.10.0 - 2026-08-24
 
 - Add `unirobosim.world/v0alpha6`, the unit-scale `composite_scene` container, and

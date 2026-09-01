@@ -103,6 +103,16 @@ def _pose(position: Sequence[float], orientation_xyzw: Sequence[float]) -> Pose:
     return Pose(tuple(position), tuple(orientation_xyzw))  # type: ignore[arg-type]
 
 
+def _scale(values: Sequence[float]) -> tuple[float, float, float]:
+    try:
+        scale = tuple(float(value) for value in values)
+    except (TypeError, ValueError) as exc:
+        raise _invalid("scale_xyz must contain three positive numbers", "easy.entity.scale") from exc
+    if len(scale) != 3:
+        raise _invalid("scale_xyz must contain three positive numbers", "easy.entity.scale")
+    return (scale[0], scale[1], scale[2])
+
+
 def _prim_bindings(
     values: Mapping[str, str] | Iterable[EmbeddedPrimBinding],
     operation: str,
@@ -637,6 +647,7 @@ class Sim:
         asset_uri: str,
         position_m: Sequence[float] = (0.0, 0.0, 0.0),
         orientation_xyzw: Sequence[float] = (0.0, 0.0, 0.0, 1.0),
+        scale_xyz: Sequence[float] = (1.0, 1.0, 1.0),
     ) -> CompositeScene:
         path = _path(name)
         spec = EntitySpec(
@@ -644,6 +655,7 @@ class Sim:
             EntityKind.COMPOSITE_SCENE,
             pose=_pose(position_m, orientation_xyzw),
             asset_uri=asset_uri,
+            scale_xyz=_scale(scale_xyz),
         )
         scene = cast(CompositeScene, self._add(CompositeScene(self, spec)))
         self._ensure_required("scene.composite@1", "EasyAPI composite scene")

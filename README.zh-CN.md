@@ -6,7 +6,9 @@
 
 UniRoboSim 是面向机器人仿真的后端中立互操作层。它定义可移植的场景、生命周期、命令、状态、传感器、资产、调试与场景控制合同，并将原生仿真器 SDK 隔离在独立发布的 Adapter 中。应用和上层框架可以选择仿真后端，而不必让仿真器专用类型扩散到整体架构。
 
-`0.10.0` 新增 v0alpha6 复合场景合同，用于一个 USD 资产同时包含静态建筑、刚体和铰接机构的情况。显式声明的嵌入实体继续使用普通状态与控制 API，且不会再次组合源资产。既有 v0alpha4 与 v0alpha5 payload 的字节级含义保持不变。
+`0.10.2` 为 v0alpha6 复合场景合同增加受能力门禁的 XYZ scale。显式声明的嵌入实体
+继续使用普通状态与控制 API，且不会再次组合源资产。既有 v0alpha4 与 v0alpha5 payload
+的字节级含义保持不变。
 
 <img src="assets/readme/unirobosim-architecture.zh-CN.svg" alt="UniRoboSim 架构：应用、FastSim、策略和智能体通过 EasyAPI、MCP、RuntimeAPI 与 Studio 使用可移植合同，并连接到独立仿真器适配器。" width="100%">
 
@@ -175,7 +177,11 @@ Prim。`Sim.start(build_input=...)` 必须接收完整且摘要固定的 `BuildI
 `BuildResourceManifest` 依赖图。
 
 ```python
-scene = sim.add_composite_scene("room", asset_uri="assets/room.usd")
+scene = sim.add_composite_scene(
+    "room",
+    asset_uri="assets/room.usd",
+    scale_xyz=(0.1, 0.1, 0.1),           # 下方绑定了铰接门，因此使用等比缩放
+)
 door = sim.add_embedded_articulation(
     "cabinet_door",                       # 逻辑路径为 /room/cabinet_door
     container=scene,
@@ -193,6 +199,10 @@ door.command((0.7,))
 绑定中的 Prim path 均相对于组合容器，不能使用绝对路径或路径穿越片段。
 MuJoCo 与 PyBullet 在各自 Provider 明确实现 `scene.composite@1` 和
 `entity.embedded-binding@1` 前会拒绝该 profile。
+
+Core 会保留每一个正数 XYZ 值，并自动要求 `entity.scale.composite_scene@1`；具体物理
+有效性由所选 Provider 负责。因此 Provider 可以支持静态场景非等比缩放，同时明确拒绝
+同样的变换包裹铰接机构，而不会静默改变物理含义。
 
 ### 资产
 

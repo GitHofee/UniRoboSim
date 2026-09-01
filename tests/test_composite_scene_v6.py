@@ -233,13 +233,29 @@ def test_embedded_binding_and_entity_validation_is_closed() -> None:
             joint_names=("other",),
             embedded_binding=replace(_binding(), root_body_prim_path="root/cabinet/base"),
         )
-    with pytest.raises(ValidationError, match="unit scale"):
-        EntitySpec(
-            EntityPath("/scene"),
-            EntityKind.COMPOSITE_SCENE,
-            asset_uri="scene.usd",
-            scale_xyz=(2.0, 2.0, 2.0),
-        )
+    scaled_scene = EntitySpec(
+        EntityPath("/scene"),
+        EntityKind.COMPOSITE_SCENE,
+        asset_uri="scene.usd",
+        scale_xyz=(0.1, 0.2, 0.15),
+    )
+    assert scaled_scene.scale_xyz == (0.1, 0.2, 0.15)
+
+
+def test_non_unit_composite_scale_requires_provider_capability(tmp_path: Path) -> None:
+    build_input, layer = _build_input(tmp_path)
+    scene, door = _entities(str(layer))
+    scaled = replace(scene, scale_xyz=(0.1, 0.2, 0.15))
+    world = WorldSpec(
+        "scaled-composite",
+        (scaled, door),
+        schema_version=COMPOSITE_WORLD_SCHEMA_VERSION,
+        build_resource_manifest_sha256=build_input.manifest.sha256,
+    )
+
+    requirements = {item.capability.value: item.required for item in world.requirements}
+    assert requirements["entity.scale.composite_scene@1"]
+    assert world.to_dict()["entities"][0]["scale_xyz"] == [0.1, 0.2, 0.15]
 
 
 def test_world_requires_v6_unique_container_descendants_and_unambiguous_prims(tmp_path: Path) -> None:
@@ -330,7 +346,7 @@ def test_fake_composes_once_and_embedded_control_state_reset_close(tmp_path: Pat
 def test_easyapi_composite_build_input_and_embedded_articulation(tmp_path: Path) -> None:
     build_input, layer = _build_input(tmp_path)
     sim = Sim(provider=FakeProvider(), num_envs=2)
-    scene = sim.add_composite_scene("scene", asset_uri=str(layer))
+    scene = sim.add_composite_scene("scene", asset_uri=str(layer), scale_xyz=(0.1, 0.2, 0.15))
     door = sim.add_embedded_articulation(
         "door",
         container=scene,
@@ -344,6 +360,7 @@ def test_easyapi_composite_build_input_and_embedded_articulation(tmp_path: Path)
         sim.start()
     sim.start(build_input=build_input)
     assert sim.world_spec.schema_version == COMPOSITE_WORLD_SCHEMA_VERSION
+    assert sim.world_spec.entities[0].scale_xyz == (0.1, 0.2, 0.15)
     door.command((0.6,))
     sim.step()
     assert door.state.joint_positions.rows() == ((0.6,), (0.6,))

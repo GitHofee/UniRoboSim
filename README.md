@@ -6,7 +6,10 @@
 
 UniRoboSim is a backend-neutral interoperability layer for robotics simulation. It defines portable scene, lifecycle, command, state, sensor, asset, debug, and scene-control contracts while keeping native simulator SDKs in independently packaged adapters. Applications and upper-layer frameworks can select a backend without propagating simulator-specific types through their architecture.
 
-Version `0.10.0` adds the v0alpha6 composite-scene contract for one USD asset that contains static architecture, rigid bodies, and jointed mechanisms. Declared embedded entities use the ordinary state and command APIs without composing the source asset again. Existing v0alpha4 and v0alpha5 payloads retain their byte-level meaning.
+Version `0.10.2` extends the v0alpha6 composite-scene contract with capability-gated
+XYZ scale. Declared embedded entities use the ordinary state and command APIs without
+composing the source asset again. Existing v0alpha4 and v0alpha5 payloads retain their
+byte-level meaning.
 
 <img src="assets/readme/unirobosim-architecture.svg" alt="UniRoboSim architecture: applications, FastSim, policies and agents use EasyAPI, RuntimeAPI, MCP and Studio; portable contracts connect them to independent simulator adapters." width="100%">
 
@@ -176,7 +179,11 @@ digest-pinned `BuildInput`; every consumed local layer, mesh, and texture belong
 its existing `BuildResourceManifest` dependency graph.
 
 ```python
-scene = sim.add_composite_scene("room", asset_uri="assets/room.usd")
+scene = sim.add_composite_scene(
+    "room",
+    asset_uri="assets/room.usd",
+    scale_xyz=(0.1, 0.1, 0.1),           # uniform because a jointed door is bound below
+)
 door = sim.add_embedded_articulation(
     "cabinet_door",                       # becomes /room/cabinet_door
     container=scene,
@@ -195,6 +202,11 @@ Prim paths in bindings are relative to the composed container and cannot contain
 absolute or traversal segments. MuJoCo and PyBullet reject this profile until their
 providers explicitly implement both `scene.composite@1` and
 `entity.embedded-binding@1`.
+
+Core preserves every positive XYZ value and automatically requires
+`entity.scale.composite_scene@1`; the selected Provider owns the physical validity
+rules. A Provider may therefore accept a static non-uniform scene while rejecting the
+same transform around a jointed mechanism rather than silently changing its physics.
 
 ### Assets
 

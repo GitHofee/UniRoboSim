@@ -676,12 +676,6 @@ class EntitySpec:
                 "only rigid bodies, articulations, static scenes, and composite scenes can use non-unit scale",
                 "entity_spec.validate",
             )
-        if self.kind is EntityKind.COMPOSITE_SCENE and scale != (1.0, 1.0, 1.0):
-            raise _invalid(
-                "the composite-scene v1 profile requires unit scale",
-                "entity_spec.validate",
-                detail_code="ENTITY_SCALE_UNSUPPORTED",
-            )
         if self.kind is EntityKind.ARTICULATION and not (scale[0] == scale[1] == scale[2]):
             raise _invalid(
                 "articulation scale must be uniform",
@@ -1024,6 +1018,8 @@ class WorldSpec:
                     automatic += (CapabilityId("entity.scale.rigid@1"),)
                 if entity.kind is EntityKind.STATIC_SCENE and entity.scale_xyz != (1.0, 1.0, 1.0):
                     automatic += (CapabilityId("entity.scale.static_scene@1"),)
+                if entity.kind is EntityKind.COMPOSITE_SCENE and entity.scale_xyz != (1.0, 1.0, 1.0):
+                    automatic += (CapabilityId("entity.scale.composite_scene@1"),)
                 if entity.kind is EntityKind.ARTICULATION:
                     if entity.scale_xyz != (1.0, 1.0, 1.0):
                         automatic += (CapabilityId("entity.scale.articulation.uniform@1"),)

@@ -308,6 +308,7 @@ FAKE_CAPABILITIES = CapabilitySet(
         CapabilityDeclaration(CapabilityId("entity.scale.rigid@1")),
         CapabilityDeclaration(CapabilityId("entity.scale.articulation.uniform@1")),
         CapabilityDeclaration(CapabilityId("entity.scale.static_scene@1")),
+        CapabilityDeclaration(CapabilityId("entity.scale.composite_scene@1")),
         CapabilityDeclaration(
             CapabilityId("planning.scene@2"),
             FrozenMap(
@@ -328,7 +329,7 @@ FAKE_CAPABILITIES = CapabilitySet(
 FAKE_DESCRIPTOR = ProviderDescriptor(
     provider_id="reference.fake",
     display_name="UniRoboSim Fake Reference Backend",
-    version="0.10.1",
+    version="0.10.2",
     contract_version="v0alpha6",
     capabilities=FAKE_CAPABILITIES,
     supported_world_schema_versions=(
