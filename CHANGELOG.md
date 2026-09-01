@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.10.3 - 2026-09-01
+
+- Add immutable triangle-mesh debug resources and batched mesh instances with
+  non-uniform scale and solid, wireframe, or solid-with-edges presentation.
+- Keep mesh topology on a cold, content-addressed path so repeated frame updates
+  carry transforms and appearance only.
+- Preserve render-only semantics: debug meshes never become collision or planning
+  geometry.
+
 ## 0.10.2 - 2026-09-01
 
 - Allow positive XYZ scale on `composite_scene` entities and automatically require

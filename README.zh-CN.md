@@ -6,9 +6,8 @@
 
 UniRoboSim 是面向机器人仿真的后端中立互操作层。它定义可移植的场景、生命周期、命令、状态、传感器、资产、调试与场景控制合同，并将原生仿真器 SDK 隔离在独立发布的 Adapter 中。应用和上层框架可以选择仿真后端，而不必让仿真器专用类型扩散到整体架构。
 
-`0.10.2` 为 v0alpha6 复合场景合同增加受能力门禁的 XYZ scale。显式声明的嵌入实体
-继续使用普通状态与控制 API，且不会再次组合源资产。既有 v0alpha4 与 v0alpha5 payload
-的字节级含义保持不变。
+`0.10.3` 增加不可变三角网格调试资源与轻量网格实例。规划和诊断工具可以复用拓扑，
+显示实心碰撞几何；这些覆盖物始终只参与渲染，不进入物理或规划查询。
 
 <img src="assets/readme/unirobosim-architecture.zh-CN.svg" alt="UniRoboSim 架构：应用、FastSim、策略和智能体通过 EasyAPI、MCP、RuntimeAPI 与 Studio 使用可移植合同，并连接到独立仿真器适配器。" width="100%">
 

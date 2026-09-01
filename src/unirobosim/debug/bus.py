@@ -12,7 +12,16 @@ from typing import Protocol, runtime_checkable
 from unirobosim.api.errors import LifecycleError, ValidationError
 from unirobosim.api.frozen import FrozenMap
 
-from .model import DebugBatch, DebugLifetime, DebugLifetimeMode, DebugPrimitive, DebugSelection, _validate_name
+from .model import (
+    DebugBatch,
+    DebugLifetime,
+    DebugLifetimeMode,
+    DebugMeshResource,
+    DebugPrimitive,
+    DebugPrimitiveKind,
+    DebugSelection,
+    _validate_name,
+)
 
 
 @runtime_checkable
@@ -40,6 +49,8 @@ class DebugBudget:
     max_events_per_second: int = 120
     max_payload_bytes_per_second: int = 16 * 1024 * 1024
     max_publish_duration_ms: float = 16.0
+    max_mesh_vertices_per_publish: int = 2_000_000
+    max_mesh_resource_bytes_per_publish: int = 256 * 1024 * 1024
 
     def __post_init__(self) -> None:
         integer_values = (
@@ -48,6 +59,8 @@ class DebugBudget:
             self.max_vertices_per_publish,
             self.max_events_per_second,
             self.max_payload_bytes_per_second,
+            self.max_mesh_vertices_per_publish,
+            self.max_mesh_resource_bytes_per_publish,
         )
         if any(not isinstance(value, int) or isinstance(value, bool) or value <= 0 for value in integer_values):
             raise ValidationError("debug integer budgets must be positive", operation="debug_budget.validate")
@@ -161,6 +174,7 @@ class DebugBus:
         self._budget = budget or DebugBudget()
         self._clock = clock
         self._active: dict[tuple[str, str, str], DebugLifetime] = {}
+        self._mesh_resources: dict[str, DebugMeshResource] = {}
         self._rate_window: deque[tuple[float, int]] = deque()
         self._closed = False
 
@@ -190,16 +204,24 @@ class DebugBus:
         while self._rate_window and now - self._rate_window[0][0] >= 1.0:
             self._rate_window.popleft()
 
-    def _select_and_limit(self, batch: DebugBatch, now: float) -> tuple[list[DebugPrimitive], int, dict[str, int], int]:
+    def _select_and_limit(
+        self,
+        batch: DebugBatch,
+        now: float,
+    ) -> tuple[list[DebugPrimitive], tuple[DebugMeshResource, ...], int, dict[str, int], int]:
         reasons: dict[str, int] = {}
         selected: list[DebugPrimitive] = []
+        selected_resources: dict[str, DebugMeshResource] = {}
         filtered = 0
         vertices = 0
         payload_bytes = 0
+        mesh_vertices = 0
+        mesh_bytes = 0
+        offered_resources = {item.resource_id: item for item in batch.mesh_resources}
         self._purge_rate_window(now)
         if len(self._rate_window) >= self._budget.max_events_per_second:
             _increment(reasons, "event_rate", len(batch.primitives))
-            return selected, filtered, reasons, payload_bytes
+            return selected, (), filtered, reasons, payload_bytes
         bytes_used = sum(item[1] for item in self._rate_window)
         active_keys = set(self._active)
         for primitive in batch.primitives:
@@ -220,22 +242,44 @@ class DebugBus:
             if filtered_primitive.key not in active_keys and len(active_keys) >= self._budget.max_active_primitives:
                 _increment(reasons, "active_primitive_limit")
                 continue
+            if filtered_primitive.kind is DebugPrimitiveKind.MESH_INSTANCE:
+                assert filtered_primitive.mesh_resource_id is not None
+                resource_id = filtered_primitive.mesh_resource_id
+                cached = self._mesh_resources.get(resource_id)
+                offered = offered_resources.get(resource_id)
+                if cached is not None and offered is not None and cached.content_sha256 != offered.content_sha256:
+                    _increment(reasons, "mesh_resource_conflict")
+                    continue
+                resource = cached or offered
+                if resource is None:
+                    _increment(reasons, "mesh_resource_missing")
+                    continue
+                if cached is None and resource_id not in selected_resources:
+                    if mesh_vertices + resource.vertex_count > self._budget.max_mesh_vertices_per_publish:
+                        _increment(reasons, "mesh_vertex_limit")
+                        continue
+                    if mesh_bytes + resource.estimated_payload_bytes > self._budget.max_mesh_resource_bytes_per_publish:
+                        _increment(reasons, "mesh_payload_limit")
+                        continue
+                    selected_resources[resource_id] = resource
+                    mesh_vertices += resource.vertex_count
+                    mesh_bytes += resource.estimated_payload_bytes
             selected.append(filtered_primitive)
             vertices += filtered_primitive.vertex_count
             payload_bytes += primitive_bytes
             active_keys.add(filtered_primitive.key)
-        return selected, filtered, reasons, payload_bytes
+        return selected, tuple(selected_resources.values()), filtered, reasons, payload_bytes
 
     def publish(self, batch: DebugBatch) -> DebugPublishReport:
         self._ensure_open("debug_bus.publish")
         if not isinstance(batch, DebugBatch):
             raise ValidationError("publish requires a DebugBatch", operation="debug_bus.publish")
         started = self._clock()
-        selected, filtered, reasons, payload_bytes = self._select_and_limit(batch, started)
+        selected, selected_resources, filtered, reasons, payload_bytes = self._select_and_limit(batch, started)
         failures: list[str] = []
         successful_sinks = 0
         if selected:
-            selected_batch = batch.with_primitives(selected)
+            selected_batch = batch.with_primitives(selected, selected_resources)
             for index, sink in enumerate(self._sinks):
                 elapsed = (self._clock() - started) * 1000.0
                 if elapsed > self._budget.max_publish_duration_ms:
@@ -248,6 +292,8 @@ class DebugBus:
                     failures.append(f"sink[{index}] {type(exc).__name__}: {exc}")
         accepted = len(selected) if successful_sinks else 0
         if accepted:
+            for resource in selected_resources:
+                self._mesh_resources[resource.resource_id] = resource
             for primitive in selected:
                 self._active[primitive.key] = primitive.lifetime
             self._rate_window.append((started, payload_bytes))
@@ -356,5 +402,6 @@ class DebugBus:
             except Exception:
                 continue
         self._active.clear()
+        self._mesh_resources.clear()
         self._rate_window.clear()
         self._closed = True

@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import re
+import struct
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -26,6 +28,13 @@ class DebugPrimitiveKind(StrEnum):
     TEXT = "text"
     BOUNDING_BOX = "bounding_box"
     TRAJECTORY = "trajectory"
+    MESH_INSTANCE = "mesh_instance"
+
+
+class DebugMeshStyle(StrEnum):
+    SOLID = "solid"
+    WIREFRAME = "wireframe"
+    SOLID_WITH_EDGES = "solid_with_edges"
 
 
 class DebugLifetimeMode(StrEnum):
@@ -162,12 +171,108 @@ def _validate_geometry(kind: DebugPrimitiveKind, geometry: ArrayValue) -> None:
             _validate_unit_quaternions(geometry, 10, 6, operation)
     elif kind is DebugPrimitiveKind.TRAJECTORY:
         valid = len(shape) == 3 and shape[-1] == 3 and shape[1] >= 2
+    elif kind is DebugPrimitiveKind.MESH_INSTANCE:
+        valid = len(shape) == 3 and shape[-1] == 10
+        if valid:
+            _validate_unit_quaternions(geometry, 10, 3, operation)
+            for row_index in range(math.prod(shape[:-1])):
+                start = row_index * 10
+                if any(float(item) <= 0.0 for item in geometry.values[start + 7 : start + 10]):
+                    raise ValidationError("debug mesh-instance scales must be positive", operation=operation)
     if not valid:
         raise ValidationError(
             "debug geometry shape does not match its primitive kind",
             operation=operation,
             details={"shape": list(shape), "kind": kind.value},
         )
+
+
+def _mesh_content_sha256(vertices_m: ArrayValue, triangle_indices: ArrayValue) -> str:
+    digest = hashlib.sha256(b"unirobosim-debug-triangle-mesh-v1\0")
+    digest.update(struct.pack(">Q", vertices_m.shape[0]))
+    for value in vertices_m.values:
+        digest.update(struct.pack(">d", float(value)))
+    digest.update(struct.pack(">Q", triangle_indices.shape[0]))
+    for value in triangle_indices.values:
+        digest.update(struct.pack(">Q", int(value)))
+    return digest.hexdigest()
+
+
+@dataclass(frozen=True)
+class DebugMeshResource:
+    """Immutable local-space triangle topology shared by mesh instances."""
+
+    resource_id: str
+    vertices_m: ArrayValue
+    triangle_indices: ArrayValue
+    content_sha256: str = field(init=False)
+
+    def __post_init__(self) -> None:
+        operation = "debug_mesh_resource.validate"
+        _validate_name(self.resource_id, "mesh resource_id")
+        if (
+            not isinstance(self.vertices_m, ArrayValue)
+            or not self.vertices_m.dtype.startswith("float")
+            or len(self.vertices_m.shape) != 2
+            or self.vertices_m.shape[1] != 3
+        ):
+            raise ValidationError("debug mesh vertices must be a floating [vertex, 3] array", operation=operation)
+        if (
+            not isinstance(self.triangle_indices, ArrayValue)
+            or self.triangle_indices.dtype not in {"int32", "int64"}
+            or len(self.triangle_indices.shape) != 2
+            or self.triangle_indices.shape[1] != 3
+        ):
+            raise ValidationError("debug mesh indices must be an integer [triangle, 3] array", operation=operation)
+        vertex_count = self.vertices_m.shape[0]
+        if any(int(value) < 0 or int(value) >= vertex_count for value in self.triangle_indices.values):
+            raise ValidationError("debug mesh contains an out-of-range triangle index", operation=operation)
+        object.__setattr__(self, "content_sha256", _mesh_content_sha256(self.vertices_m, self.triangle_indices))
+
+    @property
+    def vertex_count(self) -> int:
+        return self.vertices_m.shape[0]
+
+    @property
+    def triangle_count(self) -> int:
+        return self.triangle_indices.shape[0]
+
+    @property
+    def estimated_payload_bytes(self) -> int:
+        scalar_bytes = 4 if self.vertices_m.dtype == "float32" else 8
+        index_bytes = 4 if self.triangle_indices.dtype == "int32" else 8
+        return self.vertex_count * 3 * scalar_bytes + self.triangle_count * 3 * index_bytes + 512
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "resource_id": self.resource_id,
+            "vertices_m": self.vertices_m.nested(),
+            "vertices_dtype": self.vertices_m.dtype,
+            "triangle_indices": self.triangle_indices.nested(),
+            "triangle_indices_dtype": self.triangle_indices.dtype,
+            "content_sha256": self.content_sha256,
+        }
+
+    @classmethod
+    def from_dict(cls, value: object) -> DebugMeshResource:
+        operation = "debug_mesh_resource.decode"
+        payload = _mapping(value, "mesh resource", operation)
+        try:
+            resource = cls(
+                resource_id=cast(str, payload["resource_id"]),
+                vertices_m=ArrayValue.from_nested(
+                    payload["vertices_m"], dtype=cast(str, payload.get("vertices_dtype", "float64"))
+                ),
+                triangle_indices=ArrayValue.from_nested(
+                    payload["triangle_indices"],
+                    dtype=cast(str, payload.get("triangle_indices_dtype", "int64")),
+                ),
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValidationError("trace contains an invalid debug mesh resource", operation=operation) from exc
+        if payload.get("content_sha256") != resource.content_sha256:
+            raise ValidationError("trace debug mesh digest does not match its content", operation=operation)
+        return resource
 
 
 def _normalize_text(value: object, shape: tuple[int, ...]) -> tuple[tuple[str, ...], ...]:
@@ -206,6 +311,8 @@ class DebugPrimitive:
     text: tuple[tuple[str, ...], ...] | None = None
     sample_times_s: ArrayValue | None = None
     metadata: FrozenMap = field(default_factory=FrozenMap)
+    mesh_resource_id: str | None = None
+    mesh_style: DebugMeshStyle | None = None
 
     def __post_init__(self) -> None:
         operation = "debug_primitive.validate"
@@ -253,6 +360,14 @@ class DebugPrimitive:
                         raise ValidationError("trajectory sample times must increase strictly", operation=operation)
         elif self.sample_times_s is not None:
             raise ValidationError("only trajectory primitives accept sample times", operation=operation)
+        if self.kind is DebugPrimitiveKind.MESH_INSTANCE:
+            if self.mesh_resource_id is None:
+                raise ValidationError("mesh instances require a mesh resource ID", operation=operation)
+            _validate_name(self.mesh_resource_id, "mesh resource_id")
+            if not isinstance(self.mesh_style, DebugMeshStyle):
+                raise ValidationError("mesh instances require a portable mesh style", operation=operation)
+        elif self.mesh_resource_id is not None or self.mesh_style is not None:
+            raise ValidationError("only mesh instances accept mesh resource/style fields", operation=operation)
         if not isinstance(self.metadata, FrozenMap):
             raise ValidationError("debug metadata must be a FrozenMap", operation=operation)
         object.__setattr__(self, "environment_indices", environments)
@@ -274,6 +389,7 @@ class DebugPrimitive:
             DebugPrimitiveKind.TEXT: 1,
             DebugPrimitiveKind.BOUNDING_BOX: 24,
             DebugPrimitiveKind.TRAJECTORY: 1,
+            DebugPrimitiveKind.MESH_INSTANCE: 1,
         }
         return count * multipliers[self.kind]
 
@@ -318,6 +434,8 @@ class DebugPrimitive:
             text=text,
             sample_times_s=sample_times,
             metadata=self.metadata,
+            mesh_resource_id=self.mesh_resource_id,
+            mesh_style=self.mesh_style,
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -340,6 +458,10 @@ class DebugPrimitive:
         if self.sample_times_s is not None:
             result["sample_times_s"] = self.sample_times_s.nested()
             result["sample_times_dtype"] = self.sample_times_s.dtype
+        if self.mesh_resource_id is not None:
+            result["mesh_resource_id"] = self.mesh_resource_id
+            assert self.mesh_style is not None
+            result["mesh_style"] = self.mesh_style.value
         return result
 
     @classmethod
@@ -364,21 +486,30 @@ class DebugPrimitive:
             sample_times = ArrayValue.from_nested(
                 payload["sample_times_s"], dtype=cast(str, payload.get("sample_times_dtype", "float64"))
             )
-        return cls(
-            primitive_id=cast(str, primitive_id),
-            layer=cast(str, layer),
-            group=cast(str, payload.get("group", "default")),
-            source=cast(str, payload.get("source", "application")),
-            kind=kind,
-            geometry_m=geometry,
-            environment_indices=environments,
-            color_rgba=cast(tuple[float, float, float, float], color),
-            size=cast(float, payload.get("size", 1.0)),
-            lifetime=lifetime,
-            text=cast(tuple[tuple[str, ...], ...] | None, payload.get("text")),
-            sample_times_s=sample_times,
-            metadata=metadata,
-        )
+        try:
+            return cls(
+                primitive_id=cast(str, primitive_id),
+                layer=cast(str, layer),
+                group=cast(str, payload.get("group", "default")),
+                source=cast(str, payload.get("source", "application")),
+                kind=kind,
+                geometry_m=geometry,
+                environment_indices=environments,
+                color_rgba=cast(tuple[float, float, float, float], color),
+                size=cast(float, payload.get("size", 1.0)),
+                lifetime=lifetime,
+                text=cast(tuple[tuple[str, ...], ...] | None, payload.get("text")),
+                sample_times_s=sample_times,
+                metadata=metadata,
+                mesh_resource_id=cast(str | None, payload.get("mesh_resource_id")),
+                mesh_style=(
+                    None
+                    if payload.get("mesh_style") is None
+                    else DebugMeshStyle(cast(str, payload.get("mesh_style")))
+                ),
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValidationError("trace contains an invalid debug primitive", operation=operation) from exc
 
 
 @dataclass(frozen=True)
@@ -388,6 +519,7 @@ class DebugBatch:
     sim_time_s: float = 0.0
     world_generation: int = 0
     event_id: str | None = None
+    mesh_resources: tuple[DebugMeshResource, ...] = ()
 
     def __post_init__(self) -> None:
         operation = "debug_batch.validate"
@@ -413,11 +545,32 @@ class DebugBatch:
             raise ValidationError("debug batch time/generation values are invalid", operation=operation)
         if self.event_id is not None and (not isinstance(self.event_id, str) or not _EVENT_ID.fullmatch(self.event_id)):
             raise ValidationError("debug event ID is invalid", operation=operation)
+        try:
+            resources = tuple(self.mesh_resources)
+        except TypeError as exc:
+            raise ValidationError("debug mesh resources must be iterable", operation=operation) from exc
+        if any(not isinstance(item, DebugMeshResource) for item in resources):
+            raise ValidationError("debug batch contains an invalid mesh resource", operation=operation)
+        identities = tuple(item.resource_id for item in resources)
+        if len(identities) != len(set(identities)):
+            raise ValidationError("debug batch contains duplicate mesh resource IDs", operation=operation)
         object.__setattr__(self, "primitives", primitives)
         object.__setattr__(self, "sim_time_s", float(self.sim_time_s))
+        object.__setattr__(self, "mesh_resources", resources)
 
-    def with_primitives(self, primitives: Sequence[DebugPrimitive]) -> DebugBatch:
-        return DebugBatch(tuple(primitives), self.step_index, self.sim_time_s, self.world_generation, self.event_id)
+    def with_primitives(
+        self,
+        primitives: Sequence[DebugPrimitive],
+        mesh_resources: Sequence[DebugMeshResource] | None = None,
+    ) -> DebugBatch:
+        return DebugBatch(
+            tuple(primitives),
+            self.step_index,
+            self.sim_time_s,
+            self.world_generation,
+            self.event_id,
+            self.mesh_resources if mesh_resources is None else tuple(mesh_resources),
+        )
 
     def to_dict(self) -> dict[str, object]:
         result: dict[str, object] = {
@@ -428,6 +581,8 @@ class DebugBatch:
         }
         if self.event_id is not None:
             result["event_id"] = self.event_id
+        if self.mesh_resources:
+            result["mesh_resources"] = [item.to_dict() for item in self.mesh_resources]
         return result
 
     @classmethod
@@ -444,6 +599,10 @@ class DebugBatch:
                 sim_time_s=cast(float, payload.get("sim_time_s", 0.0)),
                 world_generation=cast(int, payload.get("world_generation", 0)),
                 event_id=cast(str | None, payload.get("event_id")),
+                mesh_resources=tuple(
+                    DebugMeshResource.from_dict(item)
+                    for item in _sequence(payload.get("mesh_resources", ()), "mesh_resources", operation)
+                ),
             )
         except KeyError as exc:
             raise ValidationError("trace contains an invalid debug batch", operation=operation) from exc

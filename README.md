@@ -6,10 +6,10 @@
 
 UniRoboSim is a backend-neutral interoperability layer for robotics simulation. It defines portable scene, lifecycle, command, state, sensor, asset, debug, and scene-control contracts while keeping native simulator SDKs in independently packaged adapters. Applications and upper-layer frameworks can select a backend without propagating simulator-specific types through their architecture.
 
-Version `0.10.2` extends the v0alpha6 composite-scene contract with capability-gated
-XYZ scale. Declared embedded entities use the ordinary state and command APIs without
-composing the source asset again. Existing v0alpha4 and v0alpha5 payloads retain their
-byte-level meaning.
+Version `0.10.3` adds immutable triangle-mesh debug resources and lightweight mesh
+instances. Planning and diagnostic tools can display filled collision geometry while
+reusing topology across updates; these overlays remain render-only and never enter
+physics or planning queries.
 
 <img src="assets/readme/unirobosim-architecture.svg" alt="UniRoboSim architecture: applications, FastSim, policies and agents use EasyAPI, RuntimeAPI, MCP and Studio; portable contracts connect them to independent simulator adapters." width="100%">
 

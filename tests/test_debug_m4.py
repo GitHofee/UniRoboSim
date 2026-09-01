@@ -15,6 +15,8 @@ from unirobosim import (
     DebugBus,
     DebugLifetime,
     DebugLifetimeMode,
+    DebugMeshResource,
+    DebugMeshStyle,
     DebugPrimitive,
     DebugPrimitiveKind,
     DebugPublishReport,
@@ -93,6 +95,18 @@ def primitive(
             ),
             **common,
         )
+    if kind is DebugPrimitiveKind.MESH_INSTANCE:
+        return DebugPrimitive(
+            geometry_m=ArrayValue.from_nested(
+                [
+                    [[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0]],
+                    [[2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.5, 0.75, 1.25]],
+                ]
+            ),
+            mesh_resource_id="mesh.test_triangle",
+            mesh_style=DebugMeshStyle.SOLID_WITH_EDGES,
+            **common,
+        )
     return DebugPrimitive(
         geometry_m=ArrayValue.from_nested(
             [
@@ -109,6 +123,14 @@ def all_primitives() -> tuple[DebugPrimitive, ...]:
     return tuple(primitive(kind) for kind in DebugPrimitiveKind)
 
 
+def mesh_resource() -> DebugMeshResource:
+    return DebugMeshResource(
+        "mesh.test_triangle",
+        ArrayValue.from_nested([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], dtype="float32"),
+        ArrayValue.from_nested([[0, 1, 2]], dtype="int32"),
+    )
+
+
 class ManualClock:
     def __init__(self) -> None:
         self.value = 0.0
@@ -121,13 +143,76 @@ class ManualClock:
 
 
 def test_every_required_primitive_round_trips_with_versioned_batch() -> None:
-    batch = DebugBatch(all_primitives(), step_index=12, sim_time_s=0.2, world_generation=3, event_id="evt-12")
+    batch = DebugBatch(
+        all_primitives(),
+        step_index=12,
+        sim_time_s=0.2,
+        world_generation=3,
+        event_id="evt-12",
+        mesh_resources=(mesh_resource(),),
+    )
     decoded = DebugBatch.from_dict(batch.to_dict())
     assert decoded == batch
     assert DEBUG_SCHEMA_VERSION == "unirobosim.debug/v1alpha1"
     assert {item.kind for item in decoded.primitives} == set(DebugPrimitiveKind)
     assert decoded.primitives[2].vertex_count == 12
     assert decoded.primitives[4].vertex_count == 48
+
+
+def test_mesh_resources_are_content_addressed_validated_and_round_trip() -> None:
+    resource = mesh_resource()
+    assert resource.vertex_count == 3
+    assert resource.triangle_count == 1
+    assert DebugMeshResource.from_dict(resource.to_dict()) == resource
+
+    tampered = resource.to_dict()
+    tampered["content_sha256"] = "0" * 64
+    with pytest.raises(ValidationError, match="digest"):
+        DebugMeshResource.from_dict(tampered)
+    with pytest.raises(ValidationError, match="out-of-range"):
+        DebugMeshResource(
+            "mesh.bad",
+            resource.vertices_m,
+            ArrayValue.from_nested([[0, 1, 3]], dtype="int32"),
+        )
+    with pytest.raises(ValidationError, match="scales"):
+        replace(
+            primitive(DebugPrimitiveKind.MESH_INSTANCE),
+            geometry_m=ArrayValue.from_nested(
+                [[[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0]]]
+            ),
+        )
+
+
+def test_debug_bus_transfers_mesh_topology_once_and_reuses_cached_resource() -> None:
+    class CapturingSink(TestDebugSink):
+        def __init__(self) -> None:
+            super().__init__()
+            self.batches: list[DebugBatch] = []
+
+        def publish(self, batch: DebugBatch) -> None:
+            self.batches.append(batch)
+            super().publish(batch)
+
+    sink = CapturingSink()
+    bus = DebugBus((sink,))
+    instance = primitive(DebugPrimitiveKind.MESH_INSTANCE)
+    assert bus.publish(DebugBatch((instance,), mesh_resources=(mesh_resource(),))).accepted_count == 1
+    assert len(sink.batches[0].mesh_resources) == 1
+    moved = replace(
+        instance,
+        geometry_m=ArrayValue.from_nested(
+            [[[1.0, 2.0, 3.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0]]]
+        ),
+        environment_indices=(0,),
+    )
+    assert bus.publish(DebugBatch((moved,))).accepted_count == 1
+    assert sink.batches[1].mesh_resources == ()
+
+    missing = replace(instance, primitive_id="missing", mesh_resource_id="mesh.not_offered")
+    missing_report = DebugBus((TestDebugSink(),)).publish(DebugBatch((missing,)))
+    assert missing_report.accepted_count == 0
+    assert missing_report.drop_reasons["mesh_resource_missing"] == 1
 
 
 @pytest.mark.parametrize(
@@ -413,7 +498,15 @@ def test_native_sink_reset_preserves_manual_and_validates_closed_state() -> None
 
 def _write_trace(path: Path) -> None:
     sink = TraceDebugSink(path, run_id="m4-test", metadata=FrozenMap({"seed": 42}))
-    sink.publish(DebugBatch(all_primitives(), step_index=1, sim_time_s=0.1, world_generation=2))
+    sink.publish(
+        DebugBatch(
+            all_primitives(),
+            step_index=1,
+            sim_time_s=0.1,
+            world_generation=2,
+            mesh_resources=(mesh_resource(),),
+        )
+    )
     sink.publish(
         DebugBatch(
             (primitive(DebugPrimitiveKind.POINT_SET, "manual", lifetime=DebugLifetime.manual()),),
@@ -434,7 +527,7 @@ def test_trace_manifest_validation_and_replay_reproduce_final_state(tmp_path: Pa
     assert trace.manifest.run_id == "m4-test"
     assert trace.manifest.event_count == 4
     assert trace.manifest.publish_count == 2
-    assert trace.manifest.primitive_count == 7
+    assert trace.manifest.primitive_count == 8
     assert trace.manifest.active_count == 1
     assert trace.manifest.report_count == 0
     assert trace.reports == ()
@@ -548,13 +641,13 @@ def test_portable_viewer_and_svg_are_self_contained_and_render_all_kinds(tmp_pat
     payload = html_path.read_text(encoding="utf-8")
     svg = svg_path.read_text(encoding="utf-8")
     assert html_report.frame_count == 5
-    assert html_report.primitive_count == 7
+    assert html_report.primitive_count == 8
     assert len(html_report.sha256) == 64
     assert "<script src=" not in payload
     assert "fetch(" not in payload
     assert "__URS_VIEWER_READY__" in payload
     assert all(f'"kind":"{kind.value}"' in payload for kind in DebugPrimitiveKind)
-    assert svg_report.primitive_count == 6
+    assert svg_report.primitive_count == 7
     assert "origin" in svg
     assert "<line" in svg and "<circle" in svg and "<text" in svg
 
