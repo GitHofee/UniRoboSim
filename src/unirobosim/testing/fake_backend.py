@@ -30,6 +30,12 @@ from unirobosim.api.capabilities import (
     CapabilitySet,
     NegotiationReport,
 )
+from unirobosim.api.checkpoint import (
+    CHECKPOINT_CAPABILITY_ID,
+    CheckpointFidelity,
+    CheckpointRestoreResult,
+    WorldCheckpoint,
+)
 from unirobosim.api.debug import DebugBatch, DebugLifetimeMode, DebugPrimitive, DebugPublishReport
 from unirobosim.api.errors import (
     ARTICULATION_AXIS_UNITS_MISMATCH,
@@ -195,6 +201,18 @@ FAKE_CAPABILITIES = CapabilitySet(
         ),
         CapabilityDeclaration(CapabilityId("state.articulation@1")),
         CapabilityDeclaration(
+            CHECKPOINT_CAPABILITY_ID,
+            FrozenMap(
+                {
+                    "atomic_scope": "world",
+                    "clock_rewind": False,
+                    "fidelity": "physical",
+                    "payload_schema": "reference.fake-checkpoint/1",
+                }
+            ),
+            limitations=("deterministic contract reference; not a physics-fidelity backend",),
+        ),
+        CapabilityDeclaration(
             RENDER_STATE_CAPABILITY_ID,
             FrozenMap(
                 {
@@ -329,7 +347,7 @@ FAKE_CAPABILITIES = CapabilitySet(
 FAKE_DESCRIPTOR = ProviderDescriptor(
     provider_id="reference.fake",
     display_name="UniRoboSim Fake Reference Backend",
-    version="0.10.4",
+    version="0.10.5",
     contract_version="v0alpha6",
     capabilities=FAKE_CAPABILITIES,
     supported_world_schema_versions=(
@@ -1089,6 +1107,42 @@ def _copy_vectors(values: list[list[float]]) -> list[list[float]]:
     return [vector.copy() for vector in values]
 
 
+def _numeric_matrix(value: object, rows: int, columns: int) -> list[list[float]]:
+    if type(value) is not list or len(value) != rows:
+        raise ValueError("checkpoint numeric matrix row count is invalid")
+    result: list[list[float]] = []
+    for row in value:
+        if type(row) is not list or len(row) != columns:
+            raise ValueError("checkpoint numeric matrix column count is invalid")
+        converted: list[float] = []
+        for item in row:
+            if not isinstance(item, (int, float)) or isinstance(item, bool):
+                raise ValueError("checkpoint numeric matrix contains a non-numeric value")
+            number = float(item)
+            if not math.isfinite(number):
+                raise ValueError("checkpoint numeric matrix contains a non-finite value")
+            converted.append(number)
+        result.append(converted)
+    return result
+
+
+def _numeric_tensor(value: object, outer: int, inner: int, width: int) -> list[list[list[float]]]:
+    if type(value) is not list or len(value) != outer:
+        raise ValueError("checkpoint numeric tensor outer dimension is invalid")
+    return [_numeric_matrix(item, inner, width) for item in value]
+
+
+def _enum_matrix(value: object, rows: int, columns: int, enum_type: type[Any]) -> list[list[Any]]:
+    if type(value) is not list or len(value) != rows:
+        raise ValueError("checkpoint enum matrix row count is invalid")
+    result: list[list[Any]] = []
+    for row in value:
+        if type(row) is not list or len(row) != columns:
+            raise ValueError("checkpoint enum matrix column count is invalid")
+        result.append([enum_type(item) for item in row])
+    return result
+
+
 def _rotate_vector_xyzw(vector: list[float], quaternion: tuple[float, float, float, float]) -> list[float]:
     x, y, z, w = quaternion
     vx, vy, vz = vector
@@ -1453,6 +1507,7 @@ class FakeWorld:
         self._reset_count = 0
         self._scene_sequence = 0
         self._render_state_revision = 0
+        self._checkpoint_state_revision = 0
         self._scene_results: dict[str, SceneCommandResult] = {}
         self._active_drags: dict[str, tuple[EntityPath, int, Pose]] = {}
         self._attachments: dict[tuple[int, str], _FakeAttachment] = {}
@@ -4122,6 +4177,270 @@ class FakeWorld:
             rigid_body_count=len(rigid_updates),
             particle_fluid_count=len(fluid_updates),
         )
+
+    def create_checkpoint(self) -> WorldCheckpoint:
+        """Capture every physical fake-world degree of freedom without advancing time."""
+
+        operation = "world.create_checkpoint"
+        self._ensure_ready(operation)
+        if self._descriptor.capabilities.get(CHECKPOINT_CAPABILITY_ID) is None:
+            raise UnsupportedCapabilityError(
+                "provider does not support checkpoints",
+                operation=operation,
+                backend_id=self._descriptor.provider_id,
+                world_id=self.world_id,
+            ) from None
+        payload = {
+            "schema": "reference.fake-checkpoint/1",
+            "entity_prim_poses": {
+                path.value: [
+                    {"position": list(pose.position), "orientation_xyzw": list(pose.orientation_xyzw)}
+                    for pose in poses
+                ]
+                for path, poses in sorted(self._entity_prim_poses.items(), key=lambda item: item[0].value)
+            },
+            "articulations": {
+                path.value: {
+                    "positions": runtime.positions,
+                    "velocities": runtime.velocities,
+                    "modes": [[mode.value for mode in row] for row in runtime.modes],
+                    "targets": runtime.targets,
+                    "root_positions": runtime.root_positions,
+                    "root_orientations": runtime.root_orientations,
+                    "root_linear_velocities": runtime.root_linear_velocities,
+                    "root_angular_velocities": runtime.root_angular_velocities,
+                }
+                for path, runtime in sorted(self._articulations.items(), key=lambda item: item[0].value)
+            },
+            "rigids": {
+                path.value: {
+                    "positions": runtime.positions,
+                    "orientations": runtime.orientations,
+                    "linear_velocities": runtime.linear_velocities,
+                    "angular_velocities": runtime.angular_velocities,
+                    "forces": runtime.forces,
+                    "torques": runtime.torques,
+                }
+                for path, runtime in sorted(self._rigids.items(), key=lambda item: item[0].value)
+            },
+            "points": {
+                path.value: {
+                    "positions": runtime.positions,
+                    "velocities": runtime.velocities,
+                    "modes": [[mode.value for mode in row] for row in runtime.modes],
+                    "targets": runtime.targets,
+                }
+                for path, runtime in sorted(self._points.items(), key=lambda item: item[0].value)
+            },
+            "attachments": [
+                {
+                    "attachment_id": value.attachment_id,
+                    "environment_index": value.environment_index,
+                    "parent_path": value.parent_path.value,
+                    "child_path": value.child_path.value,
+                    "parent_link_name": value.parent_link_name,
+                    "child_link_name": value.child_link_name,
+                    "parent_T_child": {
+                        "position": list(value.parent_T_child.position),
+                        "orientation_xyzw": list(value.parent_T_child.orientation_xyzw),
+                    },
+                }
+                for _, value in sorted(self._attachments.items())
+            ],
+        }
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+        return WorldCheckpoint(
+            provider_id=self._descriptor.provider_id,
+            world_id=self.world_id,
+            source_generation=self.generation,
+            source_tick=self.tick,
+            payload_schema="reference.fake-checkpoint/1",
+            fidelity=CheckpointFidelity.PHYSICAL,
+            payload=encoded,
+            entity_count=len(self._entities),
+        )
+
+    def restore_checkpoint(self, checkpoint: WorldCheckpoint) -> CheckpointRestoreResult:
+        """Atomically restore one exact fake-world payload while retaining the live clock."""
+
+        operation = "world.restore_checkpoint"
+        self._ensure_ready(operation)
+        if self._descriptor.capabilities.get(CHECKPOINT_CAPABILITY_ID) is None:
+            raise UnsupportedCapabilityError(
+                "provider does not support checkpoints",
+                operation=operation,
+                backend_id=self._descriptor.provider_id,
+                world_id=self.world_id,
+            ) from None
+        if type(checkpoint) is not WorldCheckpoint:
+            raise ValidationError("operation requires a WorldCheckpoint", operation=operation)
+        if (
+            checkpoint.provider_id != self._descriptor.provider_id
+            or checkpoint.world_id != self.world_id
+            or checkpoint.payload_schema != "reference.fake-checkpoint/1"
+            or checkpoint.entity_count != len(self._entities)
+        ):
+            raise ValidationError("checkpoint identity differs from the active world", operation=operation)
+        try:
+            document = json.loads(checkpoint.payload)
+            staged = self._decode_checkpoint_document(document)
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+            _scrub_private_failure(error)
+            raise ValidationError("checkpoint payload is invalid", operation=operation) from None
+
+        prims, articulations, rigids, points, attachments = staged
+        self._entity_prim_poses = prims
+        for path, values in articulations.items():
+            articulation_runtime = self._articulations[path]
+            (
+                articulation_runtime.positions,
+                articulation_runtime.velocities,
+                articulation_runtime.modes,
+                articulation_runtime.targets,
+                articulation_runtime.root_positions,
+                articulation_runtime.root_orientations,
+                articulation_runtime.root_linear_velocities,
+                articulation_runtime.root_angular_velocities,
+            ) = values
+        for path, values in rigids.items():
+            rigid_runtime = self._rigids[path]
+            (
+                rigid_runtime.positions,
+                rigid_runtime.orientations,
+                rigid_runtime.linear_velocities,
+                rigid_runtime.angular_velocities,
+                rigid_runtime.forces,
+                rigid_runtime.torques,
+            ) = values
+        for path, values in points.items():
+            point_runtime = self._points[path]
+            point_runtime.positions, point_runtime.velocities, point_runtime.modes, point_runtime.targets = values
+        self._attachments = attachments
+        self._active_drags.clear()
+        self._scene_results.clear()
+        self._scene_sequence += 1
+        self._checkpoint_state_revision += 1
+        if hasattr(self, "_planning_runtime"):
+            cast(Any, self)._planning_commit_state()
+        return CheckpointRestoreResult(
+            generation=self.generation,
+            tick=self.tick,
+            state_revision=self._checkpoint_state_revision,
+            restored_entity_count=len(self._entities),
+        )
+
+    def _decode_checkpoint_document(self, document: object) -> tuple[Any, ...]:
+        if type(document) is not dict or document.get("schema") != "reference.fake-checkpoint/1":
+            raise ValueError("checkpoint document schema is invalid")
+
+        def paths(value: object, expected: set[EntityPath]) -> dict[EntityPath, dict[str, Any]]:
+            if type(value) is not dict or set(value) != {path.value for path in expected}:
+                raise ValueError("checkpoint entity set differs from the active world")
+            return {EntityPath(path): cast(dict[str, Any], item) for path, item in value.items()}
+
+        raw_prims = document["entity_prim_poses"]
+        if type(raw_prims) is not dict or set(raw_prims) != {path.value for path in self._entities}:
+            raise ValueError("checkpoint Prim set differs from the active world")
+        prims: dict[EntityPath, list[Pose]] = {}
+        for raw_path, raw_poses in raw_prims.items():
+            if type(raw_poses) is not list or len(raw_poses) != self._spec.environments.count:
+                raise ValueError("checkpoint Prim pose batch is invalid")
+            prims[EntityPath(raw_path)] = [
+                Pose(
+                    cast(tuple[float, float, float], tuple(float(v) for v in raw["position"])),
+                    cast(tuple[float, float, float, float], tuple(float(v) for v in raw["orientation_xyzw"])),
+                )
+                for raw in raw_poses
+            ]
+
+        articulations: dict[EntityPath, tuple[Any, ...]] = {}
+        for path, raw in paths(document["articulations"], set(self._articulations)).items():
+            runtime = self._articulations[path]
+            articulation_positions = _numeric_matrix(
+                raw["positions"], self._spec.environments.count, len(runtime.spec.joint_names)
+            )
+            articulation_velocities = _numeric_matrix(
+                raw["velocities"], self._spec.environments.count, len(runtime.spec.joint_names)
+            )
+            modes = _enum_matrix(
+                raw["modes"], self._spec.environments.count, len(runtime.spec.joint_names), CommandMode
+            )
+            articulation_targets = _numeric_matrix(
+                raw["targets"], self._spec.environments.count, len(runtime.spec.joint_names)
+            )
+            roots = tuple(
+                _numeric_matrix(raw[name], self._spec.environments.count, width)
+                for name, width in (
+                    ("root_positions", 3),
+                    ("root_orientations", 4),
+                    ("root_linear_velocities", 3),
+                    ("root_angular_velocities", 3),
+                )
+            )
+            articulations[path] = (
+                articulation_positions,
+                articulation_velocities,
+                modes,
+                articulation_targets,
+                *roots,
+            )
+
+        rigids: dict[EntityPath, tuple[Any, ...]] = {}
+        for path, raw in paths(document["rigids"], set(self._rigids)).items():
+            rigids[path] = tuple(
+                _numeric_matrix(raw[name], self._spec.environments.count, width)
+                for name, width in (
+                    ("positions", 3),
+                    ("orientations", 4),
+                    ("linear_velocities", 3),
+                    ("angular_velocities", 3),
+                    ("forces", 3),
+                    ("torques", 3),
+                )
+            )
+
+        points: dict[EntityPath, tuple[Any, ...]] = {}
+        for path, raw in paths(document["points"], set(self._points)).items():
+            point_runtime = self._points[path]
+            count = len(point_runtime.initial_positions)
+            point_positions = _numeric_tensor(raw["positions"], self._spec.environments.count, count, 3)
+            point_velocities = _numeric_tensor(raw["velocities"], self._spec.environments.count, count, 3)
+            point_modes = _enum_matrix(raw["modes"], self._spec.environments.count, count, PointCommandMode)
+            point_targets = _numeric_tensor(raw["targets"], self._spec.environments.count, count, 3)
+            points[path] = (point_positions, point_velocities, point_modes, point_targets)
+
+        raw_attachments = document["attachments"]
+        if type(raw_attachments) is not list:
+            raise ValueError("checkpoint attachments are invalid")
+        attachments: dict[tuple[int, str], _FakeAttachment] = {}
+        for raw in raw_attachments:
+            if type(raw) is not dict:
+                raise ValueError("checkpoint attachment is invalid")
+            transform = raw["parent_T_child"]
+            attachment = _FakeAttachment(
+                attachment_id=str(raw["attachment_id"]),
+                environment_index=int(raw["environment_index"]),
+                parent_path=EntityPath(str(raw["parent_path"])),
+                child_path=EntityPath(str(raw["child_path"])),
+                parent_link_name=raw["parent_link_name"],
+                child_link_name=raw["child_link_name"],
+                parent_T_child=Pose(
+                    cast(tuple[float, float, float], tuple(float(v) for v in transform["position"])),
+                    cast(
+                        tuple[float, float, float, float],
+                        tuple(float(v) for v in transform["orientation_xyzw"]),
+                    ),
+                ),
+            )
+            key = (attachment.environment_index, attachment.attachment_id)
+            if (
+                key in attachments
+                or attachment.parent_path not in self._entities
+                or attachment.child_path not in self._entities
+            ):
+                raise ValueError("checkpoint attachment identity is invalid")
+            attachments[key] = attachment
+        return prims, articulations, rigids, points, attachments
 
     def apply_articulation_command(self, command: ArticulationCommand) -> None:
         self._ensure_ready("world.apply_articulation_command")

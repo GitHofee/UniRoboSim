@@ -17,6 +17,15 @@ from .capabilities import (
     CapabilitySet,
     NegotiationReport,
 )
+from .checkpoint import (
+    CHECKPOINT_CAPABILITY_ID,
+    CHECKPOINT_RESTORE_RESULT_SCHEMA_VERSION,
+    CHECKPOINT_SCHEMA_VERSION,
+    CheckpointFidelity,
+    CheckpointRestoreResult,
+    CheckpointWorld,
+    WorldCheckpoint,
+)
 from .debug import (
     DEBUG_SCHEMA_VERSION,
     DebugBatch,
@@ -252,6 +261,9 @@ __all__ = [
     "CameraModality",
     "CameraMountSpec",
     "CameraSpec",
+    "CHECKPOINT_CAPABILITY_ID",
+    "CHECKPOINT_RESTORE_RESULT_SCHEMA_VERSION",
+    "CHECKPOINT_SCHEMA_VERSION",
     "CapabilityDeclaration",
     "CapabilityId",
     "CapabilityIssue",
@@ -260,6 +272,9 @@ __all__ = [
     "CapabilitySet",
     "CommandError",
     "CommandMode",
+    "CheckpointFidelity",
+    "CheckpointRestoreResult",
+    "CheckpointWorld",
     "COMPOSITE_WORLD_SCHEMA_VERSION",
     "ContactState",
     "DeformableBodySpec",
@@ -436,6 +451,7 @@ __all__ = [
     "WORLD_SCHEMA_UNSUPPORTED",
     "World",
     "WorldBuildError",
+    "WorldCheckpoint",
     "WorldSpec",
     "WorldState",
     "DEBUG_SCHEMA_VERSION",

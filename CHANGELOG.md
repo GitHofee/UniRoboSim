@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.10.5 - 2026-09-02
+
+- Add the backend-neutral `checkpoint@1` capability and opaque physical-world
+  checkpoint contracts.
+- Restore rigid, articulation, deformable, fluid, control-target, and attachment
+  state without rewinding the live simulation clock.
+- Keep checkpoint support optional so worlds that never request it gain no per-tick
+  work.
+
 ## 0.10.4 - 2026-09-01
 
 - Define entity pose as the imported asset/model root frame; USD adapters expose

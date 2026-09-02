@@ -6,7 +6,7 @@
 
 UniRoboSim 是面向机器人仿真的后端中立互操作层。它定义可移植的场景、生命周期、命令、状态、传感器、资产、调试与场景控制合同，并将原生仿真器 SDK 隔离在独立发布的 Adapter 中。应用和上层框架可以选择仿真后端，而不必让仿真器专用类型扩散到整体架构。
 
-`0.10.4` 将所有实体位姿明确定义为导入资产或模型的根参考系。在 USD 后端中，
+`0.10.5` 新增可选物理检查点，并将所有实体位姿明确定义为导入资产或模型的根参考系。在 USD 后端中，
 它就是生成的实体 Prim，绝不从 articulation root link 推断；物理 link 位姿仍由
 显式 link-state API 提供。
 
@@ -48,7 +48,7 @@ Core、Isaac Lab、MuJoCo、USD Converter 和 MCP 推荐 Python 3.12：
 ```bash
 conda create -n unirobosim python=3.12 pip -y
 conda activate unirobosim
-git clone --branch v0.10.4 --depth 1 https://github.com/GitHofee/UniRoboSim.git
+git clone --branch v0.10.5 --depth 1 https://github.com/GitHofee/UniRoboSim.git
 python -m pip install ./UniRoboSim
 ```
 
@@ -60,11 +60,11 @@ Core 无第三方运行时依赖，支持 Python `>=3.11,<3.13`。
 
 ```bash
 # MuJoCo / Python 3.12
-git clone --branch v0.9.3 --depth 1 https://github.com/GitHofee/UniRoboSim-mujoco.git
+git clone --branch v0.9.4 --depth 1 https://github.com/GitHofee/UniRoboSim-mujoco.git
 python -m pip install ./UniRoboSim-mujoco
 
 # Isaac Lab / Python 3.12；先安装已验证的 NVIDIA SDK 运行栈
-git clone --branch v0.10.14 --depth 1 https://github.com/GitHofee/UniRoboSim-isaaclab.git
+git clone --branch v0.10.15 --depth 1 https://github.com/GitHofee/UniRoboSim-isaaclab.git
 python -m pip install ./UniRoboSim-isaaclab
 ```
 
@@ -73,8 +73,8 @@ PyBullet 使用单独的 Python 3.11 环境：
 ```bash
 conda create -n unirobosim-pybullet python=3.11 pip -y
 conda activate unirobosim-pybullet
-git clone --branch v0.10.4 --depth 1 https://github.com/GitHofee/UniRoboSim.git
-git clone --branch v0.9.3 --depth 1 https://github.com/GitHofee/UniRoboSim-pybullet.git
+git clone --branch v0.10.5 --depth 1 https://github.com/GitHofee/UniRoboSim.git
+git clone --branch v0.9.4 --depth 1 https://github.com/GitHofee/UniRoboSim-pybullet.git
 python -m pip install ./UniRoboSim ./UniRoboSim-pybullet
 ```
 
@@ -82,10 +82,10 @@ python -m pip install ./UniRoboSim ./UniRoboSim-pybullet
 
 | Distribution | 发布标签 | Python | Core 兼容范围 |
 | --- | --- | --- | --- |
-| `unirobosim` | `v0.10.0` | `>=3.11,<3.13` | Core |
-| `unirobosim-isaaclab` | `v0.10.14` | `>=3.12,<3.13` | `unirobosim>=0.10.4,<0.11` |
-| `unirobosim-mujoco` | `v0.9.3` | `>=3.12,<3.13` | `unirobosim>=0.9,<0.11` |
-| `unirobosim-pybullet` | `v0.9.3` | `>=3.11,<3.12` | `unirobosim>=0.9,<0.11` |
+| `unirobosim` | `v0.10.5` | `>=3.11,<3.13` | Core |
+| `unirobosim-isaaclab` | `v0.10.15` | `>=3.12,<3.13` | `unirobosim>=0.10.5,<0.11` |
+| `unirobosim-mujoco` | `v0.9.4` | `>=3.12,<3.13` | `unirobosim>=0.10.5,<0.11` |
+| `unirobosim-pybullet` | `v0.9.4` | `>=3.11,<3.12` | `unirobosim>=0.10.5,<0.11` |
 | `unirobosim-usd-converter` | `v0.10.0` | `>=3.11,<3.13` | `unirobosim>=0.10,<0.11` |
 | `unirobosim-mcp` | `v0.10.0` | `>=3.11,<3.13` | `unirobosim>=0.10,<0.11` |
 
