@@ -532,6 +532,8 @@ class Sim:
     def _configuring(self, operation: str) -> None:
         if self._state is not SimState.CONFIGURING:
             raise LifecycleError("scene can only be edited before start", operation=operation)
+        if self._session is not None:
+            raise LifecycleError("startup cleanup is incomplete; call close() before further use", operation=operation)
 
     def _add(self, entity: Entity) -> Entity:
         self._configuring("easy.sim.add")
@@ -878,6 +880,12 @@ class Sim:
             )
 
     def start(self, *, build_input: BuildInput | None = None) -> BuildReport:
+        """Build the configured scene, retaining ownership until cleanup succeeds.
+
+        Clean rollback permits editing and retry. Failed rollback remains
+        CONFIGURING but requires explicit close before further configuration;
+        close may itself be retried if release fails.
+        """
         self._configuring("easy.sim.start")
         if not self._entities:
             raise _invalid("add at least one entity before start", "easy.sim.start")
@@ -915,13 +923,14 @@ class Sim:
             build_resource_manifest_sha256=None if build_input is None else build_input.manifest.sha256,
         )
         session = provider.open()
+        self._session = session
         try:
             world = session.build(spec, build_input=build_input)
-        except Exception:
+        except BaseException:
             session.close()
+            self._session = None
             raise
         self._provider = provider
-        self._session = session
         self._world = world
         self._world_spec = spec
         self._state = SimState.RUNNING
