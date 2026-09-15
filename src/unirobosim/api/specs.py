@@ -583,6 +583,46 @@ class EmbeddedEntityBinding:
 
 
 @dataclass(frozen=True)
+class ContactComplianceSpec:
+    """Force-based compliant contact in SI units; omission keeps rigid contact.
+
+    Compression affects contact response only, not the rendered mesh. Combine
+    modes describe the two contacting materials; backend support is mandatory.
+    """
+
+    stiffness_n_m: float
+    damping_n_s_m: float
+    stiffness_combine_mode: str = "max"
+    damping_combine_mode: str = "max"
+
+    def __post_init__(self) -> None:
+        for name, positive in (("stiffness_n_m", True), ("damping_n_s_m", False)):
+            value = getattr(self, name)
+            if type(value) not in (int, float):
+                raise _invalid(f"{name} must be a finite number (not bool)", "contact_compliance.validate")
+            try:
+                normalized = float(value)
+            except (ValueError, OverflowError) as exc:
+                raise _invalid(f"{name} must be finite", "contact_compliance.validate") from exc
+            if not math.isfinite(normalized) or normalized < 0.0 or (positive and normalized == 0.0):
+                bound = "positive" if positive else "nonnegative"
+                raise _invalid(f"{name} must be finite and {bound}", "contact_compliance.validate")
+            object.__setattr__(self, name, 0.0 if normalized == 0.0 else normalized)
+        for name in ("stiffness_combine_mode", "damping_combine_mode"):
+            value = getattr(self, name)
+            if type(value) is not str or value not in {"average", "min", "multiply", "max"}:
+                raise _invalid(f"{name} must be average, min, multiply, or max", "contact_compliance.validate")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "stiffness_n_m": self.stiffness_n_m,
+            "damping_n_s_m": self.damping_n_s_m,
+            "stiffness_combine_mode": self.stiffness_combine_mode,
+            "damping_combine_mode": self.damping_combine_mode,
+        }
+
+
+@dataclass(frozen=True)
 class EntitySpec:
     path: EntityPath
     kind: EntityKind
@@ -600,6 +640,7 @@ class EntitySpec:
     scale_xyz: tuple[float, float, float] = (1.0, 1.0, 1.0)
     mount: CameraMountSpec | None = None
     embedded_binding: EmbeddedEntityBinding | None = None
+    contact_compliance: ContactComplianceSpec | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.path, EntityPath) or not isinstance(self.kind, EntityKind):
@@ -681,6 +722,14 @@ class EntitySpec:
                 "articulation scale must be uniform",
                 "entity_spec.validate",
                 detail_code="ENTITY_SCALE_UNSUPPORTED",
+            )
+        if self.contact_compliance is not None and (
+            not isinstance(self.contact_compliance, ContactComplianceSpec)
+            or self.kind is not EntityKind.RIGID_BODY
+            or self.embedded_binding is not None
+        ):
+            raise _invalid(
+                "contact_compliance requires a ContactComplianceSpec on a standalone rigid body", "entity_spec.validate"
             )
         if self.box is not None and (
             not isinstance(self.box, BoxGeometrySpec)
@@ -808,6 +857,8 @@ class EntitySpec:
             result["camera"] = self.camera.to_dict()
         if self.box is not None:
             result["box"] = self.box.to_dict()
+        if self.contact_compliance is not None:
+            result["contact_compliance"] = self.contact_compliance.to_dict()
         if self.embedded_binding is not None:
             result["embedded_binding"] = self.embedded_binding.to_dict()
         return result
@@ -995,6 +1046,8 @@ class WorldSpec:
             requirements += (CapabilityRequirement(capability),)
 
         for entity in entities:
+            if entity.contact_compliance is not None:
+                require(CapabilityId("physics.contact.compliant@1"))
             capability = kind_requirements.get(entity.kind)
             if capability is not None:
                 require(capability)

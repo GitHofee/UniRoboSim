@@ -41,6 +41,7 @@ from unirobosim.api.specs import (
     ArticulationCommand,
     BoxGeometrySpec,
     CameraSpec,
+    ContactComplianceSpec,
     DeformableBodySpec,
     DeformableCommand,
     EmbeddedEntityBinding,
@@ -554,12 +555,14 @@ class Sim:
         restitution: float = 0.0,
         position_m: Sequence[float] = (0.0, 0.0, 0.5),
         orientation_xyzw: Sequence[float] = (0.0, 0.0, 0.0, 1.0),
+        contact_compliance: ContactComplianceSpec | None = None,
     ) -> RigidBody:
         dimensions = (float(size_m),) * 3 if isinstance(size_m, (int, float)) else tuple(size_m)
         spec = EntitySpec(
             _path(name),
             EntityKind.RIGID_BODY,
             pose=_pose(position_m, orientation_xyzw),
+            contact_compliance=contact_compliance,
             box=BoxGeometrySpec(
                 dimensions_m=dimensions,  # type: ignore[arg-type]
                 mass_kg=mass_kg,
@@ -581,6 +584,7 @@ class Sim:
         conversion_options: Mapping[str, object] | None = None,
         position_m: Sequence[float] = (0.0, 0.0, 0.0),
         orientation_xyzw: Sequence[float] = (0.0, 0.0, 0.0, 1.0),
+        contact_compliance: ContactComplianceSpec | None = None,
     ) -> RigidBody:
         """Add a rigid asset and prepare it for the selected backend at start time.
 
@@ -600,6 +604,7 @@ class Sim:
             path,
             EntityKind.RIGID_BODY,
             pose=_pose(position_m, orientation_xyzw),
+            contact_compliance=contact_compliance,
             asset_uri=asset_uri,
         )
         body = cast(RigidBody, self._add(RigidBody(self, spec)))

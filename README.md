@@ -82,8 +82,8 @@ python -m pip install ./UniRoboSim ./UniRoboSim-pybullet
 
 | Distribution | Release tag | Python | Core compatibility |
 | --- | --- | --- | --- |
-| `unirobosim` | `v0.10.5` | `>=3.11,<3.13` | Core |
-| `unirobosim-isaaclab` | `v0.10.15` | `>=3.12,<3.13` | `unirobosim>=0.10.5,<0.11` |
+| `unirobosim` | `v0.10.6` | `>=3.11,<3.13` | Core |
+| `unirobosim-isaaclab` | `v0.10.19` | `>=3.12,<3.13` | `unirobosim>=0.10.6,<0.11` |
 | `unirobosim-mujoco` | `v0.9.4` | `>=3.12,<3.13` | `unirobosim>=0.10.5,<0.11` |
 | `unirobosim-pybullet` | `v0.9.4` | `>=3.11,<3.12` | `unirobosim>=0.10.5,<0.11` |
 | `unirobosim-usd-converter` | `v0.10.0` | `>=3.11,<3.13` | `unirobosim>=0.10,<0.11` |
@@ -434,3 +434,9 @@ coverage report
 ```
 
 The 0.10.0 Core release gate covers the complete Core suite and clean source, wheel, and sdist installs on Python 3.11 and 3.12. Native GPU, GUI, and backend-adapter acceptance remains an independent adapter gate.
+
+## Optional compliant contact (0.10.6)
+
+`EntitySpec.contact_compliance=ContactComplianceSpec(stiffness_n_m=1000.0, damping_n_s_m=2.0)` requests a force-based implicit contact spring for standalone rigid bodies. EasyAPI `add_box` and `add_rigid_body` accept the same `contact_compliance` keyword. Stiffness must be finite and positive, damping finite and nonnegative; bools are rejected. Optional stiffness/damping combine modes are `average|min|multiply|max`, both default `max`.
+
+The world automatically requires `physics.contact.compliant@1`. Isaac adapter 0.10.19 supports it; providers lacking the capability reject preflight. Omission preserves existing serialization/digests and contact behavior. Embedded objects and robot link overrides are outside this first version. This is equivalent contact compression of a rigid mesh, not mesh deformation or calibrated material behavior. Asset binding limitations are documented by the Isaac adapter.

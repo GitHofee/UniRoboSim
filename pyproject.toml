@@ -5,7 +5,7 @@ backend-path = ["."]
 
 [project]
 name = "unirobosim"
-version = "0.10.5"
+version = "0.10.6"
 description = "Backend-neutral contracts and runtime foundation for robot simulators"
 readme = "README.md"
 requires-python = ">=3.11,<3.13"
