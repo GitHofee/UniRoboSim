@@ -78,6 +78,16 @@ def _actual_base(value: object, allowed: tuple[type, ...]) -> object:
     """Classify by the real type MRO without consulting ``value.__class__``."""
 
     actual_type = type(value)
+    # The common canonical scalar types have no relevant inherited scalar base.
+    # Inspect subclasses (including bool, an int subclass) through the original
+    # real-MRO path so allowed-base precedence and hostile-input handling stay
+    # identical. Never consult value.__class__ or subclass equality hooks.
+    if actual_type is str or actual_type is int or actual_type is float:
+        for allowed_base in allowed:
+            if allowed_base is object:
+                break
+            if actual_type is allowed_base:
+                return allowed_base
     try:
         mro = type.mro(actual_type)
     except BaseException:
@@ -107,7 +117,7 @@ def _text(value: object, label: str, *, identifier: bool = False, opaque: bool =
         canonical = None
     if type(canonical) is not str or not canonical or len(canonical) > _MAX_TEXT_CODEPOINTS or "\x00" in canonical:
         raise _invalid(f"{label} must be bounded non-empty portable text") from None
-    if any(0xD800 <= ord(character) <= 0xDFFF for character in canonical):
+    if not canonical.isascii() and any(0xD800 <= ord(character) <= 0xDFFF for character in canonical):
         raise _invalid(f"{label} must contain valid Unicode") from None
     encoded = canonical.encode("utf-8")
     if len(encoded) > byte_limit:
