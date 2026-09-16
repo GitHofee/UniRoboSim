@@ -187,7 +187,7 @@ def _finite(value: object, label: str, *, positive: bool = False, non_negative: 
 def _vector(value: object, size: int, label: str) -> tuple[float, ...]:
     if type(value) is not tuple or tuple.__len__(value) != size:
         raise _invalid(f"{label} must be an immutable {size}-element tuple") from None
-    return tuple(_finite(tuple.__getitem__(value, index), f"{label}[{index}]") for index in range(size))
+    return tuple(_finite(item, f"{label}[{index}]") for index, item in enumerate(value))
 
 
 def _typed_tuple(
@@ -199,8 +199,8 @@ def _typed_tuple(
 ) -> tuple[_ValueT, ...]:
     if type(value) is not tuple or tuple.__len__(value) > _MAX_ITEMS or (not allow_empty and not value):
         raise _invalid(f"{label} must be a bounded immutable tuple") from None
-    for index in range(tuple.__len__(value)):
-        if type(tuple.__getitem__(value, index)) is not item_type:
+    for item in value:
+        if type(item) is not item_type:
             raise _invalid(f"{label} contains an invalid value") from None
     return cast(tuple[_ValueT, ...], value)
 
@@ -208,9 +208,7 @@ def _typed_tuple(
 def _identifier_tuple(value: object, label: str, *, allow_empty: bool = True, ordered: bool = False) -> tuple[str, ...]:
     if type(value) is not tuple or tuple.__len__(value) > _MAX_ITEMS or (not allow_empty and not value):
         raise _invalid(f"{label} must be a bounded immutable tuple") from None
-    result = tuple(
-        _text(tuple.__getitem__(value, index), f"{label} item", identifier=True) for index in range(len(value))
-    )
+    result = tuple(_text(item, f"{label} item", identifier=True) for item in value)
     if len(set(result)) != len(result):
         raise _invalid(f"{label} must not contain duplicates") from None
     if not ordered and result != tuple(sorted(result)):
@@ -1902,9 +1900,10 @@ class PlanningSceneState(_PlanningValue):
         world_frame_pose = frame_by_id.get(world_frame_id)
         if world_frame_pose is None or not _is_identity_pose(world_frame_pose):
             raise _invalid("world frame state must be present with canonical identity") from None
-        entity_ids = frozenset(item.entity_id for item in entities)
-        link_ids = frozenset(item.link_id for item in links)
-        geometry_ids = frozenset(item.geometry_id for item in geometry_transforms)
+        if attachments:
+            entity_ids = frozenset(item.entity_id for item in entities)
+            link_ids = frozenset(item.link_id for item in links)
+            geometry_ids = frozenset(item.geometry_id for item in geometry_transforms)
         for attachment in attachments:
             if (
                 attachment.parent_entity_id not in entity_ids
@@ -1968,9 +1967,10 @@ class PlanningSceneState(_PlanningValue):
             if state.joint_ids != entity.joint_ids or state.position_units != expected_units:
                 raise _invalid("articulation state order/units do not match physical catalog joints") from None
         entity_by_id = {entity.entity_id: entity for entity in catalog.entities}
-        link_by_id = {link.link_id: link for link in catalog.links}
-        frame_by_id = {frame.frame_id: frame for frame in catalog.frames}
-        geometry_by_id = {geometry.geometry_id: geometry for geometry in catalog.geometries}
+        if self.attachments:
+            link_by_id = {link.link_id: link for link in catalog.links}
+            frame_by_id = {frame.frame_id: frame for frame in catalog.frames}
+            geometry_by_id = {geometry.geometry_id: geometry for geometry in catalog.geometries}
         entity_state_by_id = {item.entity_id: item for item in self.entities}
         link_state_by_id = {item.link_id: item for item in self.links}
         frame_state_by_id = {item.frame_id: item for item in self.frames}
