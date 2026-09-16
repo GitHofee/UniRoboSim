@@ -48,7 +48,7 @@ Core、Isaac Lab、MuJoCo、USD Converter 和 MCP 推荐 Python 3.12：
 ```bash
 conda create -n unirobosim python=3.12 pip -y
 conda activate unirobosim
-git clone --branch v0.10.5 --depth 1 https://github.com/GitHofee/UniRoboSim.git
+git clone --branch v0.10.7 --depth 1 https://github.com/GitHofee/UniRoboSim.git
 python -m pip install ./UniRoboSim
 ```
 
@@ -64,7 +64,7 @@ git clone --branch v0.9.4 --depth 1 https://github.com/GitHofee/UniRoboSim-mujoc
 python -m pip install ./UniRoboSim-mujoco
 
 # Isaac Lab / Python 3.12；先安装已验证的 NVIDIA SDK 运行栈
-git clone --branch v0.10.15 --depth 1 https://github.com/GitHofee/UniRoboSim-isaaclab.git
+git clone --branch v0.10.20 --depth 1 https://github.com/GitHofee/UniRoboSim-isaaclab.git
 python -m pip install ./UniRoboSim-isaaclab
 ```
 
@@ -73,7 +73,7 @@ PyBullet 使用单独的 Python 3.11 环境：
 ```bash
 conda create -n unirobosim-pybullet python=3.11 pip -y
 conda activate unirobosim-pybullet
-git clone --branch v0.10.5 --depth 1 https://github.com/GitHofee/UniRoboSim.git
+git clone --branch v0.10.7 --depth 1 https://github.com/GitHofee/UniRoboSim.git
 git clone --branch v0.9.4 --depth 1 https://github.com/GitHofee/UniRoboSim-pybullet.git
 python -m pip install ./UniRoboSim ./UniRoboSim-pybullet
 ```
@@ -82,8 +82,8 @@ python -m pip install ./UniRoboSim ./UniRoboSim-pybullet
 
 | Distribution | 发布标签 | Python | Core 兼容范围 |
 | --- | --- | --- | --- |
-| `unirobosim` | `v0.10.6` | `>=3.11,<3.13` | Core |
-| `unirobosim-isaaclab` | `v0.10.19` | `>=3.12,<3.13` | `unirobosim>=0.10.6,<0.11` |
+| `unirobosim` | `v0.10.7` | `>=3.11,<3.13` | Core |
+| `unirobosim-isaaclab` | `v0.10.20` | `>=3.12,<3.13` | `unirobosim>=0.10.7,<0.11` |
 | `unirobosim-mujoco` | `v0.9.4` | `>=3.12,<3.13` | `unirobosim>=0.10.5,<0.11` |
 | `unirobosim-pybullet` | `v0.9.4` | `>=3.11,<3.12` | `unirobosim>=0.10.5,<0.11` |
 | `unirobosim-usd-converter` | `v0.10.0` | `>=3.11,<3.13` | `unirobosim>=0.10,<0.11` |
@@ -431,6 +431,10 @@ coverage report
 
 0.10.0 Core 发布闸门覆盖完整 Core 测试，以及 Python 3.11 与 3.12 上全新的 source、wheel、sdist 安装。原生 GPU、GUI 与后端 Adapter 验收仍须通过独立 Adapter 闸门。
 
-## 可选柔顺接触（0.10.6）
+## 可选柔顺接触（0.10.7）
 
-独立刚体的 `EntitySpec.contact_compliance` 可使用 `ContactComplianceSpec(stiffness_n_m=1000.0, damping_n_s_m=2.0)` 声明力弹簧接触，EasyAPI 的 `add_box`、`add_rigid_body` 同样支持。World 自动要求 `physics.contact.compliant@1`；Isaac 0.10.19 支持，缺少该能力的后端在启动前拒绝。未设置时保留原有序列化、摘要及接触行为。此功能模拟接触处的等效压缩，不改变网格形状，也不保证抓取更稳。
+独立刚体的 `EntitySpec.contact_compliance` 可使用 `ContactComplianceSpec(stiffness_n_m=1000.0, damping_n_s_m=2.0)` 声明力弹簧接触，EasyAPI 的 `add_box`、`add_rigid_body` 同样支持。World 自动要求 `physics.contact.compliant@1`；Isaac 0.10.20 支持，缺少该能力的后端在启动前拒绝。未设置时保留原有序列化、摘要及接触行为。此功能模拟接触处的等效压缩，不改变网格形状，也不保证抓取更稳。
+
+## 点闭环规划约束
+
+`PlanningPointClosureDescriptor` 发布同实体刚体端点、连杆局部 SI 锚点、原生约束事实摘要和精确的非固定树关节路径。`PlanningSceneCatalog.point_closures` 独立于 `joints`。含闭环的目录使用 v3；空目录保留 v2 摘要和传输字节兼容性。`scene.point_closures.read@1` 只声明读取能力。构造和传输均校验摘要及拓扑。请配套使用 FastSim 0.1.0a41 和 Isaac 适配器 0.10.20；旧 FastSim 映射未检查 schema，强行绕过依赖固定可能丢失字段。

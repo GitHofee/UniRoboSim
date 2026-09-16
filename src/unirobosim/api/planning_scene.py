@@ -31,6 +31,8 @@ from .values import Tick
 
 PLANNING_SCENE_CAPABILITY_ID = "planning.scene@2"
 PLANNING_SCENE_SCHEMA_VERSION = "unirobosim.planning-scene/v2"
+PLANNING_POINT_CLOSURES_SCHEMA_VERSION = "unirobosim.planning-scene/v3"
+PLANNING_POINT_CLOSURES_CAPABILITY_ID = "scene.point_closures.read@1"
 PLANNING_FRAME_DECLARATIONS_SCHEMA_VERSION = "unirobosim.planning-frame-declarations/v2"
 PLANNING_SYSTEM_ENTITY_ID = "system.simulator_effective"
 PLANNING_SYSTEM_ENTITY_PATH = "/system/simulator_effective"
@@ -848,6 +850,64 @@ class PlanningJointDescriptor(_PlanningValue):
 
 
 @dataclass(frozen=True, slots=True)
+class PlanningPointClosureDescriptor(_PlanningValue):
+    """A positional closure separate from the articulation's physical tree.
+
+    Anchors are metres in each endpoint's scale-free link frame. The source
+    constraint fact digest attests native admission; this descriptor's digest
+    also pins the portable identities and exact non-fixed coupled tree joints.
+    Reading this fact does not claim closed-loop motion solving support.
+    """
+
+    closure_id: str
+    entity_id: str
+    authored_name: str
+    link_a_id: str
+    link_b_id: str
+    anchor_a_m: tuple[float, float, float]
+    anchor_b_m: tuple[float, float, float]
+    constraint_sha256: str
+    coupled_joint_ids: tuple[str, ...]
+    content_sha256: str = ""
+
+    def __post_init__(self) -> None:
+        for name in ("closure_id", "entity_id", "link_a_id", "link_b_id"):
+            object.__setattr__(self, name, _text(getattr(self, name), f"point closure {name}", identifier=True))
+        if self.link_a_id == self.link_b_id:
+            raise _invalid("point closure endpoints must differ") from None
+        object.__setattr__(self, "authored_name", _text(self.authored_name, "point closure authored_name"))
+        for name in ("anchor_a_m", "anchor_b_m"):
+            object.__setattr__(self, name, _vector(getattr(self, name), 3, f"point closure {name}"))
+        object.__setattr__(
+            self, "constraint_sha256", _sha256(self.constraint_sha256, "point closure constraint_sha256")
+        )
+        object.__setattr__(
+            self, "coupled_joint_ids", _identifier_tuple(self.coupled_joint_ids, "point closure coupled_joint_ids")
+        )
+        expected = _content_digest({
+            "closure_id": self.closure_id,
+            "entity_id": self.entity_id,
+            "authored_name": self.authored_name,
+            "link_a_id": self.link_a_id,
+            "link_b_id": self.link_b_id,
+            "anchor_a_m": list(self.anchor_a_m),
+            "anchor_b_m": list(self.anchor_b_m),
+            "constraint_sha256": self.constraint_sha256,
+            "coupled_joint_ids": list(self.coupled_joint_ids),
+        })
+        if type(self.content_sha256) is str and not self.content_sha256:
+            object.__setattr__(self, "content_sha256", expected)
+        elif _sha256(self.content_sha256, "point closure content_sha256") != expected:
+            raise _invalid("point closure content_sha256 does not match its canonical content") from None
+
+
+    def __reduce__(self) -> tuple[object, tuple[object, ...]]:
+        # Worker IPC is trusted pickle, but constructor replay still prevents
+        # transported closure facts from bypassing their content hash checks.
+        return PlanningPointClosureDescriptor, tuple(getattr(self, item.name) for item in fields(self))
+
+
+@dataclass(frozen=True, slots=True)
 class PlanningFrameDescriptor(_PlanningValue):
     frame_id: str
     kind: PlanningFrameKind
@@ -1012,6 +1072,7 @@ def _portable_payload(value: object) -> object:
         PlanningEntityDescriptor,
         PlanningLinkDescriptor,
         PlanningJointDescriptor,
+        PlanningPointClosureDescriptor,
         PlanningFrameDescriptor,
         PlanningGeometryDescriptor,
         PlanningGeometryResourceLayout,
@@ -1034,8 +1095,9 @@ def _catalog_content(
     joints: tuple[PlanningJointDescriptor, ...],
     frames_: tuple[PlanningFrameDescriptor, ...],
     geometries: tuple[PlanningGeometryDescriptor, ...],
+    point_closures: tuple[PlanningPointClosureDescriptor, ...] = (),
 ) -> dict[str, object]:
-    return {
+    result = {
         "schema_version": schema_version,
         "provider_id": provider_id,
         "world_id": world_id,
@@ -1049,6 +1111,9 @@ def _catalog_content(
         "frames": _portable_payload(frames_),
         "geometries": _portable_payload(geometries),
     }
+    if point_closures:
+        result["point_closures"] = _portable_payload(point_closures)
+    return result
 
 
 def _content_digest(payload: dict[str, object]) -> str:
@@ -1062,6 +1127,59 @@ def _content_digest(payload: dict[str, object]) -> str:
             raise _invalid("catalog canonical content exceeds its byte budget") from None
         digest.update(encoded)
     return digest.hexdigest()
+
+
+def _validate_point_closures(
+    closures: tuple[PlanningPointClosureDescriptor, ...],
+    entities: dict[str, PlanningEntityDescriptor],
+    links: dict[str, PlanningLinkDescriptor],
+    joints: tuple[PlanningJointDescriptor, ...],
+) -> None:
+    joint_by_child = {joint.child_link_id: joint for joint in joints}
+    joint_ids = {joint.joint_id for joint in joints}
+    remaining = _MAX_RELATIONSHIP_REFERENCES
+    for closure in closures:
+        entity = entities.get(closure.entity_id)
+        endpoint_a = links.get(closure.link_a_id)
+        endpoint_b = links.get(closure.link_b_id)
+        if (
+            entity is None
+            or endpoint_a is None
+            or endpoint_b is None
+            or endpoint_a.entity_id != closure.entity_id
+            or endpoint_b.entity_id != closure.entity_id
+        ):
+            raise _invalid("point closure endpoints must close to rigid links in the same entity") from None
+        if closure.closure_id in joint_ids:
+            raise _invalid("point closure identity must not alias a physical tree joint") from None
+        # The tree has unique child edges and was cycle checked above. Bound
+        # total traversal independently of authored descriptor/reference counts.
+        ancestors: dict[str, int] = {}
+        a_edges: list[PlanningJointDescriptor] = []
+        current = endpoint_a
+        while True:
+            remaining -= 1
+            if remaining < 0:
+                raise _invalid("point closure traversal exceeds its relationship budget") from None
+            ancestors[current.link_id] = len(a_edges)
+            if current.parent_link_id is None:
+                break
+            a_edges.append(joint_by_child[current.link_id])
+            current = links[current.parent_link_id]
+        b_edges: list[PlanningJointDescriptor] = []
+        current = endpoint_b
+        while current.link_id not in ancestors:
+            remaining -= 1
+            if remaining < 0:
+                raise _invalid("point closure traversal exceeds its relationship budget") from None
+            if current.parent_link_id is None:
+                raise _invalid("point closure endpoints must have a unique connected tree path") from None
+            b_edges.append(joint_by_child[current.link_id])
+            current = links[current.parent_link_id]
+        path = a_edges[:ancestors[current.link_id]] + b_edges
+        expected = tuple(sorted(joint.joint_id for joint in path if joint.joint_type is not PlanningJointType.FIXED))
+        if closure.coupled_joint_ids != expected:
+            raise _invalid("point closure coupled joints must equal the exact non-fixed tree path") from None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1079,10 +1197,11 @@ class PlanningSceneCatalog(_PlanningValue):
     frames: tuple[PlanningFrameDescriptor, ...]
     geometries: tuple[PlanningGeometryDescriptor, ...]
     schema_version: str = PLANNING_SCENE_SCHEMA_VERSION
+    point_closures: tuple[PlanningPointClosureDescriptor, ...] = ()
 
     def __post_init__(self) -> None:
         schema_version = _text(self.schema_version, "planning-scene catalog schema_version")
-        if schema_version != PLANNING_SCENE_SCHEMA_VERSION:
+        if schema_version not in {PLANNING_SCENE_SCHEMA_VERSION, PLANNING_POINT_CLOSURES_SCHEMA_VERSION}:
             raise _invalid("planning-scene catalog schema version is unsupported") from None
         object.__setattr__(self, "schema_version", schema_version)
         object.__setattr__(self, "provider_id", _text(self.provider_id, "catalog provider_id", identifier=True))
@@ -1096,15 +1215,19 @@ class PlanningSceneCatalog(_PlanningValue):
         joints = _typed_tuple(self.joints, PlanningJointDescriptor, "catalog joints")
         frames_ = _typed_tuple(self.frames, PlanningFrameDescriptor, "catalog frames", allow_empty=False)
         geometries = _typed_tuple(self.geometries, PlanningGeometryDescriptor, "catalog geometries")
+        point_closures = _typed_tuple(self.point_closures, PlanningPointClosureDescriptor, "catalog point_closures")
+        if point_closures and schema_version != PLANNING_POINT_CLOSURES_SCHEMA_VERSION:
+            raise _invalid("point closures require planning-scene catalog schema v3") from None
         for values, attribute, label in (
             (entities, "entity_id", "catalog entities"),
             (links, "link_id", "catalog links"),
             (joints, "joint_id", "catalog joints"),
             (frames_, "frame_id", "catalog frames"),
             (geometries, "geometry_id", "catalog geometries"),
+            (point_closures, "closure_id", "catalog point_closures"),
         ):
             _unique_sorted(values, attribute, label)
-        if sum(map(len, (entities, links, joints, frames_, geometries))) > _MAX_ITEMS:
+        if sum(map(len, (entities, links, joints, frames_, geometries, point_closures))) > _MAX_ITEMS:
             raise _invalid("catalog exceeds the aggregate node budget") from None
         relationship_count = sum(
             len(identities)
@@ -1114,6 +1237,7 @@ class PlanningSceneCatalog(_PlanningValue):
         relationship_count += sum(
             len(geometry.inline.parts) for geometry in geometries if type(geometry.inline) is PlanningCompoundGeometry
         )
+        relationship_count += sum(2 + len(item.coupled_joint_ids) for item in point_closures)
         if relationship_count > _MAX_RELATIONSHIP_REFERENCES:
             raise _invalid("catalog exceeds the aggregate relationship budget") from None
 
@@ -1242,6 +1366,8 @@ class PlanningSceneCatalog(_PlanningValue):
         non_root_links = frozenset(link.link_id for link in links if link.parent_link_id is not None)
         if frozenset(child_joint_owner) != non_root_links:
             raise _invalid("catalog link parent edges and physical joints must correspond exactly") from None
+
+        _validate_point_closures(point_closures, entity_by_id, link_by_id, joints)
 
         for frame in frames_:
             if frame.parent_frame_id is not None and frame.parent_frame_id not in frame_by_id:
@@ -1378,6 +1504,7 @@ class PlanningSceneCatalog(_PlanningValue):
                 joints=joints,
                 frames_=frames_,
                 geometries=geometries,
+                point_closures=point_closures,
             )
         )
         if type(self.content_sha256) is str and not self.content_sha256:
@@ -1400,6 +1527,7 @@ class PlanningSceneCatalog(_PlanningValue):
         joints: tuple[PlanningJointDescriptor, ...],
         frames: tuple[PlanningFrameDescriptor, ...],
         geometries: tuple[PlanningGeometryDescriptor, ...],
+        point_closures: tuple[PlanningPointClosureDescriptor, ...] = (),
     ) -> PlanningSceneCatalog:
         return cls(
             provider_id,
@@ -1414,7 +1542,26 @@ class PlanningSceneCatalog(_PlanningValue):
             joints,
             frames,
             geometries,
+            PLANNING_POINT_CLOSURES_SCHEMA_VERSION if point_closures else PLANNING_SCENE_SCHEMA_VERSION,
+            point_closures,
         )
+
+    def __getstate__(self) -> list[object]:
+        values = [getattr(self, item.name) for item in fields(self)]
+        # Preserve the exact legacy frozen-slots pickle state for empty scenes.
+        return values[:-1] if type(self.point_closures) is tuple and not self.point_closures else values
+
+    @_planning_method_boundary
+    def __setstate__(self, state: object) -> None:
+        descriptors = fields(self)
+        if type(state) is not list or len(state) not in {len(descriptors) - 1, len(descriptors)}:
+            raise _invalid("planning-scene catalog pickle state has an unsupported shape") from None
+        values = list(state)
+        if len(values) == len(descriptors) - 1:
+            values.append(())
+        for descriptor, value in zip(descriptors, values, strict=True):
+            object.__setattr__(self, descriptor.name, value)
+        self.__post_init__()
 
     @property
     def world_frame_id(self) -> str:
@@ -2617,6 +2764,8 @@ __all__ = [
     "PLANNING_HEIGHTFIELD_SAMPLE_CONVENTION",
     "PLANNING_SCENE_CAPABILITY_ID",
     "PLANNING_SCENE_SCHEMA_VERSION",
+    "PLANNING_POINT_CLOSURES_SCHEMA_VERSION",
+    "PLANNING_POINT_CLOSURES_CAPABILITY_ID",
     "PLANNING_SYSTEM_ENTITY_ID",
     "PLANNING_SYSTEM_ENTITY_PATH",
     "PLANNING_SDF_SIGN_CONVENTION",
@@ -2654,6 +2803,7 @@ __all__ = [
     "PlanningGeometryStorageKind",
     "PlanningGeometryTransform",
     "PlanningJointDescriptor",
+    "PlanningPointClosureDescriptor",
     "PlanningJointType",
     "PlanningLinkDescriptor",
     "PlanningLinkState",

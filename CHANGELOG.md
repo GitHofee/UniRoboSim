@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.10.7 - 2026-09-16
+
+- Publish immutable point-closure descriptors with SI anchors, constraint hashes and exact coupled tree-joint paths.
+- Use planning catalog v3 for nonempty closures and preserve empty v2 hashes and serialized bytes.
+- Validate topology and descriptor integrity across worker transport.
+
 ## 0.10.5 - 2026-09-02
 
 - Add the backend-neutral `checkpoint@1` capability and opaque physical-world
