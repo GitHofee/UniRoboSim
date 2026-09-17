@@ -12,7 +12,7 @@ import unirobosim
 REPOSITORY = Path(__file__).resolve().parents[1]
 SOURCE = REPOSITORY / "src" / "unirobosim"
 FORBIDDEN_ROOTS = {"fastsim", "isaaclab", "isaacsim", "omni", "mujoco", "pybullet", "torch", "numpy"}
-RELEASE_VERSION = "0.10.7"
+RELEASE_VERSION = "0.10.8"
 PLANNING_RELEASE_SYMBOLS = (
     "PlanningGeometryLease",
     "PlanningGeometryResourceDescriptor",

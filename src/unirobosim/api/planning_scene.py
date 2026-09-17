@@ -1821,6 +1821,70 @@ def _poses_close(left: PlanningPose, right: PlanningPose) -> bool:
 
 
 @dataclass(frozen=True, slots=True)
+class PlanningScenePoseState(_PlanningValue):
+    """Fresh entity and physical-link poses without geometry or planning history."""
+
+    provider_id: str
+    world_id: str
+    generation: int
+    environment_index: int
+    tick: Tick
+    catalog_revision: int
+    catalog_content_sha256: str
+    world_frame_id: str
+    entities: tuple[PlanningEntityState, ...]
+    links: tuple[PlanningLinkState, ...]
+
+    def __post_init__(self) -> None:
+        for name in ("provider_id", "world_id", "world_frame_id"):
+            object.__setattr__(self, name, _text(getattr(self, name), name, identifier=True))
+        for name in ("generation", "catalog_revision"):
+            object.__setattr__(self, name, _integer(getattr(self, name), name, minimum=1))
+        object.__setattr__(self, "environment_index", _integer(self.environment_index, "environment_index"))
+        object.__setattr__(self, "tick", _tick(self.tick, "pose state tick"))
+        object.__setattr__(self, "catalog_content_sha256", _sha256(self.catalog_content_sha256, "catalog digest"))
+        for name, kind, key in (
+            ("entities", PlanningEntityState, "entity_id"), ("links", PlanningLinkState, "link_id"),
+        ):
+            values = _typed_tuple(getattr(self, name), kind, name)
+            _unique_sorted(values, key, name)
+            pose_values = cast(tuple[PlanningEntityState | PlanningLinkState, ...], values)
+            if any(item.pose.frame_id != self.world_frame_id or item.twist.frame_id != self.world_frame_id
+                   for item in pose_values):
+                raise _invalid("pose state must use the catalog world frame")
+        if len(self.entities) + len(self.links) > _MAX_ITEMS:
+            raise _invalid("pose state exceeds the aggregate node budget")
+
+    @_planning_method_boundary
+    def validate_against(self, catalog: PlanningSceneCatalog) -> None:
+        if type(catalog) is not PlanningSceneCatalog:
+            raise _invalid("pose state requires an exact catalog")
+        for name in ("provider_id", "world_id", "generation", "environment_index", "catalog_revision",
+                     "catalog_content_sha256", "world_frame_id"):
+            expected = catalog.content_sha256 if name == "catalog_content_sha256" else getattr(catalog, name)
+            if getattr(self, name) != expected:
+                raise _invalid("pose state catalog identity differs")
+        if tuple(item.entity_id for item in self.entities) != tuple(item.entity_id for item in catalog.entities):
+            raise _invalid("pose state does not cover every catalog entity")
+        if tuple(item.link_id for item in self.links) != tuple(item.link_id for item in catalog.links):
+            raise _invalid("pose state does not cover every catalog link")
+        for entity in self.entities:
+            if entity.entity_id == PLANNING_SYSTEM_ENTITY_ID and (
+                not _is_identity_pose(entity.pose)
+                or entity.twist.linear_m_s != (0.0, 0.0, 0.0)
+                or entity.twist.angular_rad_s != (0.0, 0.0, 0.0)
+            ):
+                raise _invalid("pose state system entity must retain the world identity and zero twist")
+
+
+@runtime_checkable
+class PlanningScenePoseWorld(Protocol):
+    """Optional pose-only extension; unsupported worlds reject the request."""
+
+    def planning_scene_pose_state(self, environment_index: int = 0) -> PlanningScenePoseState: ...
+
+
+@dataclass(frozen=True, slots=True)
 class PlanningSceneState(_PlanningValue):
     provider_id: str
     world_id: str
@@ -2822,6 +2886,8 @@ __all__ = [
     "PlanningSceneCatalog",
     "PlanningSceneDelta",
     "PlanningSceneDeltaKind",
+    "PlanningScenePoseState",
+    "PlanningScenePoseWorld",
     "PlanningSceneState",
     "PlanningSceneStatePatch",
     "PlanningSceneUpdate",

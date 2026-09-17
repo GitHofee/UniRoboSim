@@ -48,7 +48,7 @@ Core、Isaac Lab、MuJoCo、USD Converter 和 MCP 推荐 Python 3.12：
 ```bash
 conda create -n unirobosim python=3.12 pip -y
 conda activate unirobosim
-git clone --branch v0.10.7 --depth 1 https://github.com/GitHofee/UniRoboSim.git
+git clone --branch v0.10.8 --depth 1 https://github.com/GitHofee/UniRoboSim.git
 python -m pip install ./UniRoboSim
 ```
 
@@ -64,7 +64,7 @@ git clone --branch v0.9.4 --depth 1 https://github.com/GitHofee/UniRoboSim-mujoc
 python -m pip install ./UniRoboSim-mujoco
 
 # Isaac Lab / Python 3.12；先安装已验证的 NVIDIA SDK 运行栈
-git clone --branch v0.10.20 --depth 1 https://github.com/GitHofee/UniRoboSim-isaaclab.git
+git clone --branch v0.10.21 --depth 1 https://github.com/GitHofee/UniRoboSim-isaaclab.git
 python -m pip install ./UniRoboSim-isaaclab
 ```
 
@@ -73,7 +73,7 @@ PyBullet 使用单独的 Python 3.11 环境：
 ```bash
 conda create -n unirobosim-pybullet python=3.11 pip -y
 conda activate unirobosim-pybullet
-git clone --branch v0.10.7 --depth 1 https://github.com/GitHofee/UniRoboSim.git
+git clone --branch v0.10.8 --depth 1 https://github.com/GitHofee/UniRoboSim.git
 git clone --branch v0.9.4 --depth 1 https://github.com/GitHofee/UniRoboSim-pybullet.git
 python -m pip install ./UniRoboSim ./UniRoboSim-pybullet
 ```
@@ -82,8 +82,8 @@ python -m pip install ./UniRoboSim ./UniRoboSim-pybullet
 
 | Distribution | 发布标签 | Python | Core 兼容范围 |
 | --- | --- | --- | --- |
-| `unirobosim` | `v0.10.7` | `>=3.11,<3.13` | Core |
-| `unirobosim-isaaclab` | `v0.10.20` | `>=3.12,<3.13` | `unirobosim>=0.10.7,<0.11` |
+| `unirobosim` | `v0.10.8` | `>=3.11,<3.13` | Core |
+| `unirobosim-isaaclab` | `v0.10.21` | `>=3.12,<3.13` | `unirobosim>=0.10.8,<0.11` |
 | `unirobosim-mujoco` | `v0.9.4` | `>=3.12,<3.13` | `unirobosim>=0.10.5,<0.11` |
 | `unirobosim-pybullet` | `v0.9.4` | `>=3.11,<3.12` | `unirobosim>=0.10.5,<0.11` |
 | `unirobosim-usd-converter` | `v0.10.0` | `>=3.11,<3.13` | `unirobosim>=0.10,<0.11` |
@@ -438,3 +438,16 @@ coverage report
 ## 点闭环规划约束
 
 `PlanningPointClosureDescriptor` 发布同实体刚体端点、连杆局部 SI 锚点、原生约束事实摘要和精确的非固定树关节路径。`PlanningSceneCatalog.point_closures` 独立于 `joints`。含闭环的目录使用 v3；空目录保留 v2 摘要和传输字节兼容性。`scene.point_closures.read@1` 只声明读取能力。构造和传输均校验摘要及拓扑。请配套使用 FastSim 0.1.0a41 和 Isaac 适配器 0.10.20；旧 FastSim 映射未检查 schema，强行绕过依赖固定可能丢失字段。
+
+## 场景位姿扩展
+
+`PlanningScenePoseWorld` 是与 `PlanningSceneWorld` 分开的可选协议，提供
+`planning_scene_pose_state(environment_index=0)`。`PlanningScenePoseState` 携带
+provider/world/generation/environment 身份、已提交 tick、目录 revision/摘要/世界
+坐标系，以及目录内全部实体和物理连杆的位姿与速度。`validate_against(catalog)`
+要求身份完全一致、实体及连杆完整覆盖，并检查世界坐标系一致性。
+
+该扩展读取实际状态，不推进仿真，也不生成几何、关节、附着或完整规划历史记录，
+不能代替完整规划状态及执行前复核。同 tick 的状态写入必须可见，不能仅按 tick
+缓存。实现必须保留原有权威线程及环境检查。不支持的后端可不实现该可选协议；
+调用者应在使用轻量位姿功能时明确要求该接口。

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.10.8 - 2026-09-17
+
+- Add optional `PlanningScenePoseWorld` and immutable `PlanningScenePoseState` for fresh entity/link pose and twist reads without planning history or geometry.
+- Validate world frames, exact DTO types, sorted unique coverage, full catalog identity and aggregate node budgets. Unsupported providers remain explicit.
+- Document the additive interface in both public READMEs; pair with Isaac adapter 0.10.21.
+
 ## 0.10.7 - 2026-09-16
 
 - Publish immutable point-closure descriptors with SI anchors, constraint hashes and exact coupled tree-joint paths.
