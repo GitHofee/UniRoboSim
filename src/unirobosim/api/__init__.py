@@ -96,6 +96,7 @@ from .kinematics import (
     SelectedKinematicsWorld,
 )
 from .media import EncodedSensorFrame, EncodedSensorRequest, EncodedSensorWorld
+from .performance import PERFORMANCE_CAPABILITY_ID, PerformanceCounter, PerformanceSnapshot, PerformanceWorld
 from .planning_scene import (
     PLANNING_FRAME_DECLARATIONS_SCHEMA_VERSION,
     PLANNING_GEOMETRY_BATCH_READ_LIMIT_BYTES,
@@ -166,6 +167,8 @@ from .planning_scene import (
 from .protocols import Provider, RuntimeDiagnosticsProvider, SceneControlWorld, Session, World
 from .render_state import (
     RENDER_STATE_CAPABILITY_ID,
+    RENDER_QUALITY_CAPABILITY_ID,
+    RenderQualityWorld,
     PackedFloat32Array,
     RenderArticulationState,
     RenderParticleFluidState,
@@ -330,6 +333,10 @@ __all__ = [
     "NativeWorldDebugSink",
     "NATIVE_PROVENANCE_MISMATCH",
     "PHYSICAL_WORLD_SCHEMA_VERSION",
+    "PERFORMANCE_CAPABILITY_ID",
+    "PerformanceCounter",
+    "PerformanceSnapshot",
+    "PerformanceWorld",
     "PhysicsSpec",
     "ParticleFluidCommand",
     "ParticleFluidSpec",
@@ -419,6 +426,8 @@ __all__ = [
     "ProviderRegistrationError",
     "ProviderSelectionError",
     "RENDER_STATE_CAPABILITY_ID",
+    "RENDER_QUALITY_CAPABILITY_ID",
+    "RenderQualityWorld",
     "RUNTIME_DIAGNOSTICS_CAPABILITY",
     "SELECTED_KINEMATICS_CAPABILITY",
     "ResetResult",

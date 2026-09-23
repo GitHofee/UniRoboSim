@@ -15,7 +15,7 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass, fields, replace
 from enum import StrEnum
-from functools import wraps
+from functools import lru_cache, wraps
 from typing import Any, Protocol, TypeVar, cast, runtime_checkable
 
 from .errors import (
@@ -1812,6 +1812,51 @@ def _compose_pose(parent: PlanningPose, local: PlanningGeometryLocalPose) -> Pla
     return PlanningPose(parent.frame_id, position, orientation)
 
 
+@lru_cache(maxsize=8192)
+def _cached_geometry_expected_pose(
+    frame_id: str,
+    parent_position: tuple[float, float, float],
+    parent_orientation: tuple[float, float, float, float],
+    local_position: tuple[float, float, float],
+    local_orientation: tuple[float, float, float, float],
+) -> PlanningPose:
+    """Validation-private expectations; keys contain complete scalar values only.
+
+    Preserve _compose_pose arithmetic and constructor validation on cache misses.
+    This bounded cache retains no catalog, state, provider or backend references.
+    Supplied world poses are still compared against the expectation on every read.
+    """
+
+    offset = _rotate(local_position, parent_orientation)
+    position = (
+        parent_position[0] + offset[0],
+        parent_position[1] + offset[1],
+        parent_position[2] + offset[2],
+    )
+    orientation = _quaternion_multiply(parent_orientation, local_orientation)
+    return PlanningPose(frame_id, position, orientation)
+
+
+def _geometry_expected_pose(parent: PlanningPose, local: PlanningGeometryLocalPose) -> PlanningPose:
+    # Only detached exact scalars enter the cache: hashing/equality must not run
+    # arbitrary subclass hooks. Noncanonical inputs retain the original path.
+    if type(parent) is not PlanningPose or type(local) is not PlanningGeometryLocalPose:
+        return _compose_pose(parent, local)
+    frame_id = parent.frame_id
+    pp, pq = parent.position_m, parent.orientation_xyzw
+    lp, lq = local.position_m, local.orientation_xyzw
+    if (
+        type(frame_id) is str
+        and type(pp) is tuple and len(pp) == 3
+        and type(pq) is tuple and len(pq) == 4
+        and type(lp) is tuple and len(lp) == 3
+        and type(lq) is tuple and len(lq) == 4
+        and all(type(value) is float for vector in (pp, pq, lp, lq) for value in vector)
+    ):
+        return _cached_geometry_expected_pose(frame_id, pp, pq, lp, lq)
+    return _compose_pose(parent, local)
+
+
 def _poses_close(left: PlanningPose, right: PlanningPose) -> bool:
     return all(
         abs(a - b) <= _TRANSFORM_TOLERANCE for a, b in zip(left.position_m, right.position_m, strict=True)
@@ -2052,7 +2097,7 @@ class PlanningSceneState(_PlanningValue):
             ):
                 raise _invalid("committed link pose contradicts its catalog physical frame") from None
         for geometry in catalog.geometries:
-            expected = _compose_pose(
+            expected = _geometry_expected_pose(
                 frame_state_by_id[geometry.parent_frame_id].world_pose,
                 geometry.parent_frame_T_geometry,
             )

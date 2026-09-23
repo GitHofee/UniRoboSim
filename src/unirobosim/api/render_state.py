@@ -276,3 +276,20 @@ __all__ = (
     "RenderStateResult",
     "RenderStateWorld",
 )
+
+
+RENDER_QUALITY_CAPABILITY_ID = CapabilityId("render.quality@1")
+
+
+@runtime_checkable
+class RenderQualityWorld(Protocol):
+    """Optional live renderer settings; no physics step or clock advancement.
+
+    Calls belong to the world's owner thread. Both flags are exact booleans.
+    Return the effective GI/AO pair or raise on unsupported settings. A world
+    restores its pre-configuration renderer settings on close, including reuse.
+    """
+
+    def configure_render_quality(
+        self, *, enable_global_illumination: bool, enable_ambient_occlusion: bool,
+    ) -> tuple[bool, bool]: ...
