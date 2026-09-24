@@ -100,6 +100,95 @@ class EnvironmentSpec:
 
 
 @dataclass(frozen=True)
+class CameraCalibrationSpec:
+    """OpenCV pixel intrinsics and rational8 coefficients at camera resolution."""
+
+    projection_model: str
+    intrinsics: tuple[float, ...]
+    distortion_coefficients: tuple[float, ...]
+    focal_length: float | None = None
+    focus_distance: float | None = None
+    horizontal_aperture: float | None = None
+    vertical_aperture: float | None = None
+    fisheye_resolution_budget: float | None = None
+
+    def __post_init__(self) -> None:
+        operation = "camera_calibration.validate"
+        for name in (
+            "focal_length",
+            "focus_distance",
+            "horizontal_aperture",
+            "vertical_aperture",
+            "fisheye_resolution_budget",
+        ):
+            value = getattr(self, name)
+            if value is not None:
+                if (
+                    isinstance(value, bool)
+                    or not isinstance(value, (float, int))
+                    or not math.isfinite(value)
+                    or value <= 0
+                ):
+                    raise _invalid(f"{name} must be a positive finite USD-native value", operation)
+                object.__setattr__(self, name, float(value))
+        if self.projection_model != "opencv_pinhole":
+            raise _invalid("unsupported camera projection model", operation)
+        for name, count in (("intrinsics", 9), ("distortion_coefficients", 8)):
+            try:
+                values = tuple(getattr(self, name))
+            except TypeError as error:
+                raise _invalid(f"{name} must be a finite numeric sequence", operation) from error
+            if len(values) != count or any(
+                isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) for v in values
+            ):
+                raise _invalid(f"{name} must contain {count} finite numbers", operation)
+            object.__setattr__(self, name, tuple(float(v) for v in values))
+        k = self.intrinsics
+        if k[0] <= 0 or k[4] <= 0 or (k[1], k[3], k[6], k[7], k[8]) != (0, 0, 0, 0, 1):
+            raise _invalid("intrinsics require positive fx/fy, zero skew and homogeneous last row", operation)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "projection_model": self.projection_model,
+            "intrinsics": list(self.intrinsics),
+            "distortion_coefficients": list(self.distortion_coefficients),
+            **{
+                name: getattr(self, name)
+                for name in (
+                    "focal_length",
+                    "focus_distance",
+                    "horizontal_aperture",
+                    "vertical_aperture",
+                    "fisheye_resolution_budget",
+                )
+                if getattr(self, name) is not None
+            },
+        }
+
+
+@dataclass(frozen=True)
+class CameraRenderExclusion:
+    """An exact visual Mesh prim excluded only from one camera's render."""
+
+    entity_path: EntityPath
+    relative_prim_path: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.entity_path, EntityPath):
+            raise _invalid("render exclusion requires an EntityPath", "camera_exclusion.validate")
+        path = self.relative_prim_path
+        if (
+            not isinstance(path, str)
+            or not path
+            or any(not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", segment) for segment in path.split("/"))
+        ):
+            raise _invalid("render exclusion requires an exact relative prim path", "camera_exclusion.validate")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"entity_path": self.entity_path.value, "relative_prim_path": self.relative_prim_path}
+
+
+@dataclass(frozen=True)
 class CameraSpec:
     """Synchronous pinhole camera intent.
 
@@ -113,9 +202,22 @@ class CameraSpec:
     horizontal_fov_degrees: float = 90.0
     near_plane_m: float = 0.01
     far_plane_m: float = 1000.0
+    calibration: CameraCalibrationSpec | None = None
+    render_exclusions: tuple[CameraRenderExclusion, ...] = ()
 
     def __post_init__(self) -> None:
         operation = "camera_spec.validate"
+        if self.calibration is not None and not isinstance(self.calibration, CameraCalibrationSpec):
+            raise _invalid("camera calibration requires CameraCalibrationSpec", operation)
+        try:
+            exclusions = tuple(self.render_exclusions)
+        except TypeError as error:
+            raise _invalid("camera exclusions must be iterable", operation) from error
+        if any(not isinstance(item, CameraRenderExclusion) for item in exclusions) or len(exclusions) != len(
+            set(exclusions)
+        ):
+            raise _invalid("camera exclusions must be typed and unique", operation)
+        object.__setattr__(self, "render_exclusions", exclusions)
         if any(
             not isinstance(value, int) or isinstance(value, bool) or value <= 0
             for value in (self.width_px, self.height_px)
@@ -154,7 +256,7 @@ class CameraSpec:
         object.__setattr__(self, "far_plane_m", far)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        result = {
             "width_px": self.width_px,
             "height_px": self.height_px,
             "modalities": [item.value for item in self.modalities],
@@ -162,6 +264,11 @@ class CameraSpec:
             "near_plane_m": self.near_plane_m,
             "far_plane_m": self.far_plane_m,
         }
+        if self.calibration is not None:
+            result["calibration"] = self.calibration.to_dict()
+        if self.render_exclusions:
+            result["render_exclusions"] = [item.to_dict() for item in self.render_exclusions]
+        return result
 
 
 @dataclass(frozen=True)
@@ -932,6 +1039,15 @@ class WorldSpec:
         if mounted_cameras and self.schema_version not in _PHYSICAL_WORLD_SCHEMA_VERSIONS:
             raise _invalid("only v0alpha5/v0alpha6 worlds can contain mounted cameras", "world_spec.validate")
         entity_by_path = {entity.path: entity for entity in entities}
+        for camera_entity in entities:
+            if camera_entity.camera is None:
+                continue
+            for exclusion in camera_entity.camera.render_exclusions:
+                target = entity_by_path.get(exclusion.entity_path)
+                if target is None or target.kind not in {EntityKind.RIGID_BODY, EntityKind.ARTICULATION}:
+                    raise _invalid(
+                        "camera render exclusion requires an existing physical entity", "world_spec.validate"
+                    )
         for camera_entity in mounted_cameras:
             mount = camera_entity.mount
             assert mount is not None
@@ -1054,6 +1170,10 @@ class WorldSpec:
             if entity.embedded_binding is not None:
                 require(CapabilityId("entity.embedded-binding@1"))
             if entity.camera is not None:
+                if entity.camera.calibration is not None:
+                    require(CapabilityId("sensor.camera.calibrated@1"))
+                if entity.camera.render_exclusions:
+                    require(CapabilityId("sensor.camera.render-exclusions@1"))
                 modality_capabilities = {
                     CameraModality.RGB: CapabilityId("sensor.camera.rgb@1"),
                     CameraModality.DEPTH: CapabilityId("sensor.camera.depth@1"),

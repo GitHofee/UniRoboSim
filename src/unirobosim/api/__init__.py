@@ -166,12 +166,12 @@ from .planning_scene import (
 )
 from .protocols import Provider, RuntimeDiagnosticsProvider, SceneControlWorld, Session, World
 from .render_state import (
-    RENDER_STATE_CAPABILITY_ID,
     RENDER_QUALITY_CAPABILITY_ID,
-    RenderQualityWorld,
+    RENDER_STATE_CAPABILITY_ID,
     PackedFloat32Array,
     RenderArticulationState,
     RenderParticleFluidState,
+    RenderQualityWorld,
     RenderRigidBodyState,
     RenderStateFrame,
     RenderStateResult,
@@ -215,7 +215,9 @@ from .specs import (
     WORLD_SCHEMA_VERSION,
     ArticulationCommand,
     BoxGeometrySpec,
+    CameraCalibrationSpec,
     CameraMountSpec,
+    CameraRenderExclusion,
     CameraSpec,
     ContactComplianceSpec,
     DeformableBodySpec,
@@ -269,6 +271,8 @@ __all__ = [
     "BoxGeometrySpec",
     "ContactComplianceSpec",
     "CameraModality",
+    "CameraCalibrationSpec",
+    "CameraRenderExclusion",
     "CameraMountSpec",
     "CameraSpec",
     "CHECKPOINT_CAPABILITY_ID",
