@@ -340,6 +340,7 @@ class ParticleFluidState:
     particle_positions_m: ArrayValue
     particle_velocities_m_s: ArrayValue
     tick: Tick
+    particle_colors_rgba: ArrayValue | None = None
 
     def __post_init__(self) -> None:
         _validate_point_state(
@@ -348,6 +349,10 @@ class ParticleFluidState:
             self.tick,
             "particle_fluid_state.validate",
         )
+
+        if self.particle_colors_rgba is not None:
+            from .particle_colors import validate_particle_colors
+            validate_particle_colors(self.particle_colors_rgba, (*self.particle_positions_m.shape[:2], 4))
 
 
 @dataclass(frozen=True)

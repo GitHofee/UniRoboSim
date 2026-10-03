@@ -1,5 +1,18 @@
 """Stable UniRoboSim 0.10 public API."""
 
+from .appearance import (
+    AppearanceApplyResult,
+    AppearanceApplyWorld,
+    AppearanceBinding,
+    AppearanceCaptureWorld,
+    AppearanceEnvironment,
+    AppearanceLight,
+    AppearanceMaterial,
+    AppearanceRenderer,
+    AppearanceSnapshot,
+    AppearanceTexture,
+    appearance_topology_sha256,
+)
 from .build import (
     BUILD_RESOURCE_MANIFEST_SCHEMA_VERSION,
     BuildInput,
@@ -170,6 +183,7 @@ from .render_state import (
     RENDER_STATE_CAPABILITY_ID,
     PackedFloat32Array,
     RenderArticulationState,
+    RenderDeformableState,
     RenderParticleFluidState,
     RenderQualityWorld,
     RenderRigidBodyState,
@@ -250,6 +264,18 @@ from .values import (
 )
 
 __all__ = [
+    "appearance_topology_sha256",
+    "AppearanceCaptureWorld",
+    "AppearanceApplyWorld",
+    "AppearanceTexture",
+    "AppearanceMaterial",
+    "AppearanceBinding",
+    "AppearanceLight",
+    "AppearanceEnvironment",
+    "AppearanceRenderer",
+    "AppearanceSnapshot",
+    "AppearanceApplyResult",
+
     "ARTICULATION_AXIS_UNITS_MISMATCH",
     "ARTICULATION_POSITION_AXIS_UNITS_UNSUPPORTED",
     "ASSET_DEPENDENCY_INCOMPLETE",
@@ -437,6 +463,7 @@ __all__ = [
     "ResetResult",
     "RenderArticulationState",
     "RenderParticleFluidState",
+    "RenderDeformableState",
     "RenderRigidBodyState",
     "RenderStateFrame",
     "RenderStateResult",
@@ -487,3 +514,7 @@ __all__ = [
     "replay_debug_trace",
     "thaw_json",
 ]
+
+from .deformable_topology import DEFORMABLE_TOPOLOGY_CAPABILITY_ID, DeformableTopologySnapshot, DeformableTopologyWorld
+
+__all__ += ("DEFORMABLE_TOPOLOGY_CAPABILITY_ID", "DeformableTopologySnapshot", "DeformableTopologyWorld")

@@ -520,9 +520,13 @@ class ParticleFluidSpec:
     surface_tension_n_m: float = 0.072
     material_id: str | None = None
     color_rgba: tuple[float, float, float, float] | None = None
+    initial_particle_colors_rgba: ArrayValue | None = None
 
     def __post_init__(self) -> None:
         _validate_point_array(self.initial_particle_positions_m, "initial_particle_positions_m")
+        if self.initial_particle_colors_rgba is not None:
+            from .particle_colors import validate_particle_colors
+            validate_particle_colors(self.initial_particle_colors_rgba, (self.particle_count, 4))
         if self.initial_particle_velocities_m_s is not None:
             _validate_point_array(self.initial_particle_velocities_m_s, "initial_particle_velocities_m_s")
             if self.initial_particle_velocities_m_s.shape != self.initial_particle_positions_m.shape:
@@ -613,6 +617,8 @@ class ParticleFluidSpec:
             result["color_rgba"] = list(self.color_rgba)
         if self.initial_particle_velocities_m_s is not None:
             result["initial_particle_velocities_m_s"] = self.initial_particle_velocities_m_s.nested()
+        if self.initial_particle_colors_rgba is not None:
+            result["initial_particle_colors_rgba"] = self.initial_particle_colors_rgba.nested()
         return result
 
 

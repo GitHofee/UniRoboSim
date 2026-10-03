@@ -6,7 +6,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 RELEASE_ROWS = (
-    "| `unirobosim` | `v0.10.9` | `>=3.11,<3.13` | Core |",
+    "| `unirobosim` | `v0.10.10` | `>=3.11,<3.13` | Core |",
     "| `unirobosim-isaaclab` | `v0.10.21` | `>=3.12,<3.13` | `unirobosim>=0.10.8,<0.11` |",
     "| `unirobosim-mujoco` | `v0.9.4` | `>=3.12,<3.13` | `unirobosim>=0.10.5,<0.11` |",
     "| `unirobosim-pybullet` | `v0.9.4` | `>=3.11,<3.12` | `unirobosim>=0.10.5,<0.11` |",

@@ -347,7 +347,7 @@ FAKE_CAPABILITIES = CapabilitySet(
 FAKE_DESCRIPTOR = ProviderDescriptor(
     provider_id="reference.fake",
     display_name="UniRoboSim Fake Reference Backend",
-    version="0.10.9",
+    version="0.10.10",
     contract_version="v0alpha6",
     capabilities=FAKE_CAPABILITIES,
     supported_world_schema_versions=(
@@ -447,6 +447,8 @@ class _PointRuntime:
     velocities: list[list[list[float]]]
     modes: list[list[PointCommandMode]]
     targets: list[list[list[float]]]
+
+    colors: list | None = None
 
 
 @dataclass
@@ -1630,6 +1632,14 @@ class FakeWorld:
             velocities=velocities,
             modes=modes,
             targets=targets,
+            colors=(
+                [
+                    [[float(v) for v in row] for row in entity.particle_fluid.initial_particle_colors_rgba.nested()]
+                    for _ in range(environment_count)
+                ]
+                if entity.particle_fluid is not None and entity.particle_fluid.initial_particle_colors_rgba is not None
+                else None
+            ),
         )
 
     @staticmethod
@@ -3873,15 +3883,11 @@ class FakeWorld:
         for articulation_runtime in self._articulations.values():
             initial = articulation_runtime.spec.initial_joint_positions
             for environment in environments:
-                self._entity_prim_poses[articulation_runtime.spec.path][environment] = (
-                    articulation_runtime.spec.pose
-                )
+                self._entity_prim_poses[articulation_runtime.spec.path][environment] = articulation_runtime.spec.pose
                 articulation_runtime.positions[environment] = list(initial)
                 articulation_runtime.velocities[environment] = [0.0] * len(initial)
                 articulation_runtime.root_positions[environment] = articulation_runtime.initial_root_position.copy()
-                articulation_runtime.root_orientations[environment] = (
-                    articulation_runtime.initial_root_orientation.copy()
-                )
+                articulation_runtime.root_orientations[environment] = articulation_runtime.initial_root_orientation.copy()
                 articulation_runtime.root_linear_velocities[environment] = [0.0, 0.0, 0.0]
                 articulation_runtime.root_angular_velocities[environment] = [0.0, 0.0, 0.0]
                 articulation_runtime.modes[environment] = [CommandMode.POSITION] * len(initial)
@@ -3896,12 +3902,18 @@ class FakeWorld:
                 rigid_runtime.torques[environment] = [0.0, 0.0, 0.0]
         for point_runtime in self._points.values():
             for environment in environments:
+                if point_runtime.colors is not None and point_runtime.spec.particle_fluid is not None:
+                    fluid = point_runtime.spec.particle_fluid
+                    initial_colors = (
+                        fluid.initial_particle_colors_rgba.nested()
+                        if fluid.initial_particle_colors_rgba is not None
+                        else (fluid.color_rgba or (0.1, 0.45, 1.0, 1.0),) * fluid.particle_count
+                    )
+                    point_runtime.colors[environment] = [list(row) for row in initial_colors]
                 point_runtime.positions[environment] = _copy_vectors(point_runtime.initial_positions)
                 point_runtime.velocities[environment] = _copy_vectors(point_runtime.initial_velocities)
                 point_runtime.modes[environment] = [PointCommandMode.FORCE] * len(point_runtime.initial_positions)
-                point_runtime.targets[environment] = [
-                    [0.0, 0.0, 0.0] for _ in range(len(point_runtime.initial_positions))
-                ]
+                point_runtime.targets[environment] = [[0.0, 0.0, 0.0] for _ in range(len(point_runtime.initial_positions))]
                 for point in point_runtime.kinematic_indices:
                     point_runtime.modes[environment][point] = PointCommandMode.POSITION
                     point_runtime.targets[environment][point] = point_runtime.initial_positions[point].copy()
@@ -3947,14 +3959,14 @@ class FakeWorld:
             scalars = struct.unpack(f"<{len(value.data) // 4}f", value.data)
             if not all(math.isfinite(component) for component in scalars):
                 raise ValidationError("packed render state must contain finite values", operation=operation)
-            environment_count, particle_count, _ = value.shape
+            environment_count, particle_count, width = value.shape
             return tuple(
                 tuple(
-                    tuple(float(component) for component in scalars[offset : offset + 3])
+                    tuple(float(component) for component in scalars[offset : offset + width])
                     for offset in range(
-                        environment * particle_count * 3,
-                        (environment + 1) * particle_count * 3,
-                        3,
+                        environment * particle_count * width,
+                        (environment + 1) * particle_count * width,
+                        width,
                     )
                 )
                 for environment in range(environment_count)
@@ -4023,9 +4035,7 @@ class FakeWorld:
                     degrees,
                     articulation_update.joint_positions.rows(),
                     articulation_update.joint_velocities.rows(),
-                    None
-                    if articulation_update.root_positions_m is None
-                    else articulation_update.root_positions_m.rows(),
+                    None if articulation_update.root_positions_m is None else articulation_update.root_positions_m.rows(),
                     None
                     if articulation_update.root_orientations_xyzw is None
                     else articulation_update.root_orientations_xyzw.rows(),
@@ -4072,6 +4082,7 @@ class FakeWorld:
                 )
             )
 
+        color_updates = []
         fluid_updates: list[tuple[Any, ...]] = []
         for fluid_update in frame.particle_fluids:
             entity = self._validate_handle(fluid_update.handle, operation)
@@ -4097,15 +4108,39 @@ class FakeWorld:
                     operation=operation,
                     entity_path=entity.path.value,
                 )
+            if fluid_update.colors_rgba is not None:
+                colors = particle_rows(fluid_update.colors_rgba)
+                if any(not 0 <= v <= 1 for env in colors for row in env for v in row):
+                    raise ValidationError("particle colors must be linear RGBA in [0,1]", operation=operation)
+                color_updates.append((self._points[entity.path], environments, fluid_update.first_particle_index, colors))
             fluid_updates.append(
                 (
                     self._points[entity.path],
                     environments,
                     fluid_update.first_particle_index,
                     particle_rows(fluid_update.positions_m),
-                    None
-                    if fluid_update.velocities_m_s is None
-                    else particle_rows(fluid_update.velocities_m_s),
+                    None if fluid_update.velocities_m_s is None else particle_rows(fluid_update.velocities_m_s),
+                )
+            )
+
+        deformable_updates: list[tuple[Any, ...]] = []
+        for update in frame.deformables:
+            entity = self._validate_handle(update.handle, operation)
+            if entity.deformable is None:
+                raise CommandError("render state entity is not a deformable", operation=operation)
+            environments = self._indices(
+                update.environment_indices, self._spec.environments.count, "environment_indices", operation=operation
+            )
+            expected = (len(environments), entity.deformable.node_count, 3)
+            if update.positions_m.shape != expected:
+                raise CommandError("render deformable state shape is invalid", operation=operation)
+            deformable_updates.append(
+                (
+                    self._points[entity.path],
+                    environments,
+                    0,
+                    particle_rows(update.positions_m),
+                    None if update.velocities_m_s is None else particle_rows(update.velocities_m_s),
                 )
             )
 
@@ -4126,13 +4161,9 @@ class FakeWorld:
                     velocity = float(velocities[row_index][column_index])
                     articulation_runtime.positions[environment][degree] = position
                     articulation_runtime.velocities[environment][degree] = velocity
-                    articulation_runtime.modes[environment][degree] = CommandMode.POSITION
-                    articulation_runtime.targets[environment][degree] = position
                 if root_positions is not None:
                     assert root_orientations is not None and root_linear is not None and root_angular is not None
-                    articulation_runtime.root_positions[environment] = [
-                        float(value) for value in root_positions[row_index]
-                    ]
+                    articulation_runtime.root_positions[environment] = [float(value) for value in root_positions[row_index]]
                     articulation_runtime.root_orientations[environment] = [
                         float(value) for value in root_orientations[row_index]
                     ]
@@ -4150,7 +4181,7 @@ class FakeWorld:
                 rigid_runtime.angular_velocities[environment] = [float(value) for value in angular[row_index]]
                 rigid_runtime.forces[environment] = [0.0, 0.0, 0.0]
                 rigid_runtime.torques[environment] = [0.0, 0.0, 0.0]
-        for point_runtime, environments, first, positions, velocities in fluid_updates:
+        for point_runtime, environments, first, positions, velocities in (*fluid_updates, *deformable_updates):
             for row_index, environment in enumerate(environments):
                 for column_index, position in enumerate(positions[row_index]):
                     particle = first + column_index
@@ -4162,12 +4193,21 @@ class FakeWorld:
                     point_runtime.modes[environment][particle] = PointCommandMode.FORCE
                     point_runtime.targets[environment][particle] = [0.0, 0.0, 0.0]
 
+        for point_runtime, environments, first, colors in color_updates:
+            if point_runtime.colors is None:
+                fluid = point_runtime.spec.particle_fluid
+                fallback = fluid.color_rgba or (0.1, 0.45, 1.0, 1.0)
+                point_runtime.colors = [[list(fallback) for _ in row] for row in point_runtime.positions]
+            for i, environment in enumerate(environments):
+                for j, color in enumerate(colors[i]):
+                    point_runtime.colors[environment][first + j] = list(color)
+
         self._render_state_revision += 1
         self._scene_sequence += 1
         self._session._native_count += 1
         self._session._command_count += 1
         self._session._state_mutation_count += (
-            len(articulation_updates) + len(rigid_updates) + len(fluid_updates)
+            len(articulation_updates) + len(rigid_updates) + len(fluid_updates) + len(deformable_updates)
         )
         return RenderStateResult(
             generation=self.generation,
@@ -4176,6 +4216,7 @@ class FakeWorld:
             articulation_count=len(articulation_updates),
             rigid_body_count=len(rigid_updates),
             particle_fluid_count=len(fluid_updates),
+            deformable_count=len(deformable_updates),
         )
 
     def create_checkpoint(self) -> WorldCheckpoint:
@@ -4752,6 +4793,9 @@ class FakeWorld:
             particle_positions_m=ArrayValue.from_nested(runtime.positions),
             particle_velocities_m_s=ArrayValue.from_nested(runtime.velocities),
             tick=self.tick,
+            particle_colors_rgba=None
+            if runtime.colors is None
+            else ArrayValue.from_nested(runtime.colors, dtype="float32"),
         )
 
     def read_sensor(self, handle: EntityHandle) -> SensorSample:

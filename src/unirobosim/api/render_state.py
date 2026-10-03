@@ -51,11 +51,7 @@ def _selection(value: tuple[int, ...] | None, field: str) -> tuple[int, ...] | N
         result = tuple(value)
     except TypeError as exc:
         raise ValueError(f"{field} must be iterable") from exc
-    if (
-        not result
-        or any(type(index) is not int or index < 0 for index in result)
-        or len(result) != len(set(result))
-    ):
+    if not result or any(type(index) is not int or index < 0 for index in result) or len(result) != len(set(result)):
         raise ValueError(f"{field} must contain unique non-negative integers")
     return result
 
@@ -126,8 +122,7 @@ class RenderArticulationState:
             root_angular = _float_array(self.root_angular_velocities_rad_s, "root_angular_velocities_rad_s", 2, 3)
             row_count = positions.shape[0]
             if any(
-                array.shape[0] != row_count
-                for array in (root_positions, root_orientations, root_linear, root_angular)
+                array.shape[0] != row_count for array in (root_positions, root_orientations, root_linear, root_angular)
             ):
                 raise ValueError("articulation root arrays must match the joint-state environment rows")
             for row in root_orientations.rows():
@@ -178,6 +173,7 @@ class RenderParticleFluidState:
     velocities_m_s: ArrayValue | PackedFloat32Array | None = None
     environment_indices: tuple[int, ...] | None = None
     first_particle_index: int = 0
+    colors_rgba: ArrayValue | PackedFloat32Array | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.handle, EntityHandle) or self.handle.entity_kind is not EntityKind.PARTICLE_FLUID:
@@ -194,6 +190,46 @@ class RenderParticleFluidState:
             raise ValueError("first_particle_index must be a non-negative integer")
         object.__setattr__(self, "environment_indices", environments)
 
+        if self.colors_rgba is not None:
+            expected = (*positions.shape[:2], 4)
+            if isinstance(self.colors_rgba, PackedFloat32Array):
+                if self.colors_rgba.shape != expected:
+                    raise ValueError("packed particle color shape must match selected particles")
+            else:
+                from .particle_colors import validate_particle_colors
+
+                validate_particle_colors(self.colors_rgba, expected)
+
+
+@dataclass(frozen=True, slots=True)
+class RenderDeformableState:
+    """All recorded nodes, in declared topology order and environment-local metres.
+
+    No solver is advanced. Optional velocities use metres per second; omitted
+    velocities preserve their previous values. Selection only selects environments.
+    """
+
+    handle: EntityHandle
+    positions_m: ArrayValue | PackedFloat32Array
+    velocities_m_s: ArrayValue | PackedFloat32Array | None = None
+    environment_indices: tuple[int, ...] | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.handle, EntityHandle) or self.handle.entity_kind not in {
+            EntityKind.SURFACE_DEFORMABLE,
+            EntityKind.VOLUME_DEFORMABLE,
+        }:
+            raise TypeError("render deformable state requires a deformable handle")
+        positions = _particle_array(self.positions_m, "positions_m")
+        if self.velocities_m_s is not None:
+            velocities = _particle_array(self.velocities_m_s, "velocities_m_s")
+            if velocities.shape != positions.shape:
+                raise ValueError("deformable position and velocity shapes must match")
+        environments = _selection(self.environment_indices, "environment_indices")
+        if environments is not None and len(environments) != positions.shape[0]:
+            raise ValueError("environment_indices must match the deformable state rows")
+        object.__setattr__(self, "environment_indices", environments)
+
 
 @dataclass(frozen=True, slots=True)
 class RenderStateFrame:
@@ -202,12 +238,14 @@ class RenderStateFrame:
     articulations: tuple[RenderArticulationState, ...] = ()
     rigid_bodies: tuple[RenderRigidBodyState, ...] = ()
     particle_fluids: tuple[RenderParticleFluidState, ...] = ()
+    deformables: tuple[RenderDeformableState, ...] = ()
 
     def __post_init__(self) -> None:
         try:
             articulations = tuple(self.articulations)
             rigid_bodies = tuple(self.rigid_bodies)
             particle_fluids = tuple(self.particle_fluids)
+            deformables = tuple(self.deformables)
         except TypeError as exc:
             raise TypeError("render state frame groups must be iterable") from exc
         if any(type(value) is not RenderArticulationState for value in articulations):
@@ -216,6 +254,9 @@ class RenderStateFrame:
             raise TypeError("rigid_bodies contains an invalid render state entry")
         if any(type(value) is not RenderParticleFluidState for value in particle_fluids):
             raise TypeError("particle_fluids contains an invalid render state entry")
+        if any(type(value) is not RenderDeformableState for value in deformables):
+            raise TypeError("deformables contains an invalid render state entry")
+        object.__setattr__(self, "deformables", deformables)
         object.__setattr__(self, "articulations", articulations)
         object.__setattr__(self, "rigid_bodies", rigid_bodies)
         object.__setattr__(self, "particle_fluids", particle_fluids)
@@ -225,6 +266,7 @@ class RenderStateFrame:
             *(value.handle for value in articulations),
             *(value.handle for value in rigid_bodies),
             *(value.handle for value in particle_fluids),
+            *(value.handle for value in deformables),
         ):
             identity = (handle.provider_id, handle.world_id, handle.generation, handle.path.value)
             if identity in seen:
@@ -244,6 +286,7 @@ class RenderStateResult:
     articulation_count: int
     rigid_body_count: int
     particle_fluid_count: int
+    deformable_count: int = 0
 
     def __post_init__(self) -> None:
         if type(self.generation) is not int or self.generation <= 0:
@@ -254,7 +297,12 @@ class RenderStateResult:
             raise ValueError("render state revision must be a positive integer")
         if any(
             type(value) is not int or value < 0
-            for value in (self.articulation_count, self.rigid_body_count, self.particle_fluid_count)
+            for value in (
+                self.articulation_count,
+                self.rigid_body_count,
+                self.particle_fluid_count,
+                self.deformable_count,
+            )
         ):
             raise ValueError("render state result counts must be non-negative integers")
 
@@ -271,6 +319,7 @@ __all__ = (
     "RENDER_STATE_CAPABILITY_ID",
     "RenderArticulationState",
     "RenderParticleFluidState",
+    "RenderDeformableState",
     "RenderRigidBodyState",
     "RenderStateFrame",
     "RenderStateResult",
@@ -291,5 +340,8 @@ class RenderQualityWorld(Protocol):
     """
 
     def configure_render_quality(
-        self, *, enable_global_illumination: bool, enable_ambient_occlusion: bool,
+        self,
+        *,
+        enable_global_illumination: bool,
+        enable_ambient_occlusion: bool,
     ) -> tuple[bool, bool]: ...
