@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.10.11 - 2026-10-14
+
+- Add validated elastic material and permanent volume-node mounting contracts.
+- Require exact mount-mode and explicit contact-offset capabilities; preserve old default digests.
+- Define mounted velocity/reset semantics, material exclusivity and worker transport version boundaries.
+- Reject boolean, nonfinite and overflowing material/offset scalars with structured errors.
+
 ## 0.10.8 - 2026-09-17
 
 - Add optional `PlanningScenePoseWorld` and immutable `PlanningScenePoseState` for fresh entity/link pose and twist reads without planning history or geometry.

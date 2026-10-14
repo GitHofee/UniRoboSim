@@ -82,7 +82,7 @@ python -m pip install ./UniRoboSim ./UniRoboSim-pybullet
 
 | Distribution | Release tag | Python | Core compatibility |
 | --- | --- | --- | --- |
-| `unirobosim` | `v0.10.10` | `>=3.11,<3.13` | Core |
+| `unirobosim` | `v0.10.11` | `>=3.11,<3.13` | Core |
 | `unirobosim-isaaclab` | `v0.10.21` | `>=3.12,<3.13` | `unirobosim>=0.10.8,<0.11` |
 | `unirobosim-mujoco` | `v0.9.4` | `>=3.12,<3.13` | `unirobosim>=0.10.5,<0.11` |
 | `unirobosim-pybullet` | `v0.9.4` | `>=3.11,<3.12` | `unirobosim>=0.10.5,<0.11` |
@@ -460,3 +460,70 @@ a complete planning state or its revalidation. Same-tick writes must remain
 observable; a tick-only cache is insufficient. Implementations must maintain their
 normal authority and environment validation. Unsupported worlds need not implement
 this optional protocol; callers must explicitly require it for pose-only features.
+
+### Structural deformable pads
+
+`DeformableBodySpec` accepts an optional `DeformableMaterialSpec` (Young's modulus
+in Pa, Poisson's ratio, static/dynamic friction and elasticity damping) and a
+`DeformableRigidMount(parent_path, parent_link_name, node_indices)`. Mounted volume
+nodes are permanent solver constraints to a rigid body or articulation link;
+the entity pose is relative to that parent. This describes the robot's construction,
+not a runtime grasp attachment. Indices must be unique, nonempty and in range;
+mounted bodies cannot also declare kinematic nodes. World validation checks the
+parent kind and requires explicit backend mounting/material capabilities.
+Optional contact offsets use metres and require `0 <= rest_offset_m < contact_offset_m`.
+Omitted material, mount and contact fields preserve the previous contract.
+
+Mount `coupling` is explicit: `solver` requests native two-way mechanical coupling;
+`kinematic_boundary` prescribes only selected backing nodes from parent motion,
+leaving other nodes free. The latter does not transmit boundary reaction to the
+parent and must not be represented as a two-way coupled robot model.
+
+#### Soft-matter contract boundary (Core 0.10.11)
+
+This extension is supported through **RuntimeAPI `WorldSpec`**. `Sim.add_deformable`
+(EasyAPI) does not yet forward these new fields. Existing default bodies keep the
+same canonical JSON/digest. The existing soft/physical/composite World schemas
+accept these additive fields; no schema number alone implies feature support.
+Both host and worker must run Core >=0.10.11,<0.11. There is no public WorldSpec
+JSON decoder: canonical JSON is a fingerprint/recording representation; the
+existing trusted multiprocessing/pickle transport must preserve the typed spec.
+Do not send a new spec to an old worker or strip unknown fields to make it work.
+
+Capabilities are independent required gates:
+
+- `physics.deformable.elastic-material@1` for inline material;
+- `physics.deformable.contact-offsets@1` for an explicit contact/rest pair;
+- `physics.deformable.rigid-mount@1` plus exactly the requested
+  `physics.deformable.rigid-mount.solver@1` or
+  `physics.deformable.rigid-mount.kinematic-boundary@1` for a mount.
+
+A backend supporting only one coupling cannot admit the other. Generic mounting
+alone is insufficient. Optional caller requirements are promoted to required
+while retaining their reason and constraints. Render-only/legacy backends must
+reject unsupported requests before native initialization, not ignore them.
+
+`material_id` and `elastic_material` are mutually exclusive. Material scalars and
+contact/rest offsets are finite binary64 floats, rejecting bool, nonnumeric and
+overflowing values. Equal integer/float inputs and signed zero have equal canonical
+representations. Rest is validated even when contact is absent. Elastic damping
+is a nonnegative native elastic damping coefficient, **not** a universally defined
+SI rate or `linear_damping_per_s`; adapters must document its exact mapping and
+limitations (including whether static friction affects native deformable solving).
+
+Mounted rest positions and initial relative velocities use the deformable local
+frame; the entity pose is parent-body/link-local. On build and reset:
+
+```
+p_world = T_world_parent * T_parent_entity * p_local
+v_world = R_world_parent * R_parent_entity * v_local
+          + v_parent_world + omega_parent_world x (p_world - p_parent_world)
+```
+
+Parent twist is at the physical parent/link origin, not COM. Backing nodes require
+zero relative initial velocity; free nodes may have nonzero relative velocity.
+The same composition applies at initialization and reset after the parent state
+is restored. A kinematic boundary updates only backing nodes each physics substep
+and transmits no reaction. Solver mode requires native two-way coupling with no
+silent fallback. Core validates authoring intent; only adapter native conformance
+can establish physical realization, multi-environment and partial-reset behavior.

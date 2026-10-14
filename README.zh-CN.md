@@ -82,7 +82,7 @@ python -m pip install ./UniRoboSim ./UniRoboSim-pybullet
 
 | Distribution | 发布标签 | Python | Core 兼容范围 |
 | --- | --- | --- | --- |
-| `unirobosim` | `v0.10.10` | `>=3.11,<3.13` | Core |
+| `unirobosim` | `v0.10.11` | `>=3.11,<3.13` | Core |
 | `unirobosim-isaaclab` | `v0.10.21` | `>=3.12,<3.13` | `unirobosim>=0.10.8,<0.11` |
 | `unirobosim-mujoco` | `v0.9.4` | `>=3.12,<3.13` | `unirobosim>=0.10.5,<0.11` |
 | `unirobosim-pybullet` | `v0.9.4` | `>=3.11,<3.12` | `unirobosim>=0.10.5,<0.11` |
@@ -451,3 +451,46 @@ provider/world/generation/environment 身份、已提交 tick、目录 revision/
 不能代替完整规划状态及执行前复核。同 tick 的状态写入必须可见，不能仅按 tick
 缓存。实现必须保留原有权威线程及环境检查。不支持的后端可不实现该可选协议；
 调用者应在使用轻量位姿功能时明确要求该接口。
+
+### 结构性可形变指腹
+
+`DeformableBodySpec` 新增可选的 `DeformableMaterialSpec`（杨氏模量单位 Pa、
+泊松比、静态/动态摩擦和弹性阻尼）以及
+`DeformableRigidMount(parent_path, parent_link_name, node_indices)`。
+体积可形变体的指定节点通过永久求解器约束固定到刚体或关节连杆，实体位姿相对于该父级。
+这是机器人自身的结构定义，不是运行时抓取物体的 attach。
+节点索引必须非空、唯一且有效；安装后的可形变体不能同时声明运动学节点。
+世界验证检查父级类型，并要求后端显式支持安装和材料能力。
+可选接触偏移单位为米，要求 `0 <= rest_offset_m < contact_offset_m`。
+未指定材料、安装和接触字段时保留原有契约。
+
+安装 `coupling` 必须明确：`solver` 请求原生双向机械耦合；`kinematic_boundary`
+根据父级运动规定背面节点位置，其余节点保持自由。后者不把边界反力传回父级，
+不能作为双向耦合机器人模型描述。
+
+#### 0.10.11 契约与版本边界
+
+本扩展只承诺 RuntimeAPI/WorldSpec，EasyAPI `Sim.add_deformable` 尚未转发新字段。
+旧默认体的 canonical JSON/摘要保持不变；沿用现有软体/物理/composite World schema，
+新增字段由必需能力单独门禁，schema 版本本身不代表支持。宿主和 worker 均需 Core
+>=0.10.11,<0.11；实际类型传输沿用可信 multiprocessing/pickle，不新增或假称存在
+WorldSpec JSON decoder，也不能为旧 worker 静默丢字段。
+
+材料使用 `physics.deformable.elastic-material@1`，显式偏移使用
+`physics.deformable.contact-offsets@1`。安装除通用
+`physics.deformable.rigid-mount@1`，还必须要求所选模式的
+`physics.deformable.rigid-mount.solver@1` 或
+`physics.deformable.rigid-mount.kinematic-boundary@1`。旧后端、render-only、仅支持
+另一模式的后端应在原生初始化前拒绝；不允许降级。已有 optional requirement 升为
+required 时保留 reason/constraints。
+
+material_id 与 elastic_material 互斥。材料/偏移有限数值拒绝bool和溢出整数，统一float，
+正负零和相同int/float保持相同摘要。contact未设置时仍校验rest类型，只允许数值零。
+弹性阻尼仅定义为非负原生弹性阻尼系数，后端声明具体映射与限制，不臆定通用SI单位，
+也不等同 linear_damping_per_s。
+
+安装实体pose为父物理刚体/连杆局部pose。局部节点初速度经父*实体旋转后，加父原点世界
+线速度和 `omega_world × (p_node_world - p_parent_world)`；初始创建与reset同样处理。
+背衬节点相对初速度必须为零，自由节点可非零。kinematic_boundary每物理子步只更新背衬，
+不传递反力；solver必须真实双向耦合。Core只证明契约准入，实际物理、多环境和部分reset
+仍需adapter原生证据。

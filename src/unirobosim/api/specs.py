@@ -409,9 +409,108 @@ def _validate_topology_array(
             )
 
 
+def _deformable_number(value: object, name: str, operation: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise _invalid(f"{name} must be finite numeric", operation)
+    try:
+        result = float(value)
+    except (OverflowError, ValueError) as exc:
+        raise _invalid(f"{name} must fit finite binary64", operation) from exc
+    if not math.isfinite(result):
+        raise _invalid(f"{name} must be finite numeric", operation)
+    return 0.0 if result == 0.0 else result
+
+
+@dataclass(frozen=True)
+class DeformableMaterialSpec:
+    """Isotropic elastic intent; no adhesion is implied.
+
+    Young's modulus uses Pa; Poisson's ratio and friction are dimensionless.
+    Elasticity damping is a nonnegative native elastic damping coefficient;
+    each backend must document its mapping and limitations. No universal SI
+    damping unit is assigned to it, and it is not linear_damping_per_s.
+    """
+
+    youngs_modulus_pa: float
+    poissons_ratio: float = 0.45
+    static_friction: float = 0.5
+    dynamic_friction: float = 0.5
+    elasticity_damping: float = 0.005
+
+    def __post_init__(self) -> None:
+        for name in (
+            "youngs_modulus_pa",
+            "poissons_ratio",
+            "static_friction",
+            "dynamic_friction",
+            "elasticity_damping",
+        ):
+            object.__setattr__(
+                self, name, _deformable_number(getattr(self, name), name, "deformable_material.validate")
+            )
+        if self.youngs_modulus_pa <= 0 or not -1 < self.poissons_ratio < 0.5:
+            raise _invalid("elastic material is outside its physical range", "deformable_material.validate")
+        if min(self.static_friction, self.dynamic_friction, self.elasticity_damping) < 0:
+            raise _invalid("friction and damping cannot be negative", "deformable_material.validate")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {name: getattr(self, name) for name in self.__dataclass_fields__}
+
+
+@dataclass(frozen=True)
+class DeformableRigidMount:
+    """Build-time mechanical mounting of explicit nodes to a rigid body.
+
+    The deformable entity pose is parent-link-local. Selected backing nodes are
+    welded by the solver at their authored parent-local rest positions, or use
+    an explicit one-way kinematic boundary with no reaction on the parent.
+    This is permanent structure, distinct from runtime object attachments.
+    """
+
+    parent_path: EntityPath
+    parent_link_name: str | None = None
+    node_indices: tuple[int, ...] = ()
+    coupling: str = "solver"
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.coupling, str) or self.coupling not in {"solver", "kinematic_boundary"}:
+            raise _invalid("unknown deformable mount coupling", "deformable_mount.validate")
+        if not isinstance(self.parent_path, EntityPath):
+            raise _invalid("mount parent must be an EntityPath", "deformable_mount.validate")
+        if self.parent_link_name is not None and (
+            not isinstance(self.parent_link_name, str) or not self.parent_link_name.strip()
+        ):
+            raise _invalid("mount link must be non-empty", "deformable_mount.validate")
+        if (
+            type(self.node_indices) is not tuple
+            or not self.node_indices
+            or any(type(i) is not int or i < 0 for i in self.node_indices)
+            or len(set(self.node_indices)) != len(self.node_indices)
+        ):
+            raise _invalid("mount node indices must be nonempty, unique and nonnegative", "deformable_mount.validate")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "parent_path": self.parent_path.value,
+            "parent_link_name": self.parent_link_name,
+            "node_indices": list(self.node_indices),
+            "coupling": self.coupling,
+        }
+
+
 @dataclass(frozen=True)
 class DeformableBodySpec:
-    """Entity-local deformable authoring geometry and portable physical intent."""
+    """Entity-local deformable geometry, velocities and portable physical intent.
+
+    For a mounted body, pose is parent-local and initial velocities are relative
+    node velocities in the deformable local frame. Build/reset use
+    R_parent * R_entity * v_local + v_parent + omega_parent x (p_world - p_parent).
+    Parent twist is measured at the physical parent body/link origin in world SI.
+    Backing nodes must have zero relative velocity; free nodes may move relative
+    to the parent. Kinematic boundaries recompute backing motion each substep;
+    solver mounts must preserve two-way reaction. Unmounted nodes retain the
+    existing entity-local initial-velocity convention.
+    """
 
     topology: DeformableTopology
     rest_positions_m: ArrayValue
@@ -423,6 +522,10 @@ class DeformableBodySpec:
     linear_damping_per_s: float = 0.0
     self_collision: bool = False
     material_id: str | None = None
+    elastic_material: DeformableMaterialSpec | None = None
+    rigid_mount: DeformableRigidMount | None = None
+    contact_offset_m: float | None = None
+    rest_offset_m: float = 0.0
 
     def __post_init__(self) -> None:
         if not isinstance(self.topology, DeformableTopology):
@@ -475,6 +578,31 @@ class DeformableBodySpec:
             raise _invalid("self_collision must be boolean", "deformable_spec.validate")
         if self.material_id is not None and (not isinstance(self.material_id, str) or not self.material_id.strip()):
             raise _invalid("material ID must be a non-empty string", "deformable_spec.validate")
+        if self.elastic_material is not None and not isinstance(self.elastic_material, DeformableMaterialSpec):
+            raise _invalid("elastic_material must be typed", "deformable_spec.validate")
+        if self.elastic_material is not None and self.material_id is not None:
+            raise _invalid("material_id and elastic_material are mutually exclusive", "deformable_spec.validate")
+        rest = _deformable_number(self.rest_offset_m, "rest_offset_m", "deformable_spec.validate")
+        object.__setattr__(self, "rest_offset_m", rest)
+        if self.contact_offset_m is not None:
+            contact = _deformable_number(self.contact_offset_m, "contact_offset_m", "deformable_spec.validate")
+            if not 0 <= rest < contact:
+                raise _invalid("contact offsets require 0 <= rest < contact", "deformable_spec.validate")
+            object.__setattr__(self, "contact_offset_m", contact)
+        elif rest != 0.0:
+            raise _invalid("rest offset requires an explicit contact offset", "deformable_spec.validate")
+        if self.rigid_mount is not None:
+            if not isinstance(self.rigid_mount, DeformableRigidMount) or self.topology is not DeformableTopology.VOLUME:
+                raise _invalid("rigid mounting requires a volume deformable", "deformable_spec.validate")
+            if kinematic:
+                raise _invalid("mounted deformables cannot also have kinematic nodes", "deformable_spec.validate")
+            if any(i >= point_count for i in self.rigid_mount.node_indices):
+                raise _invalid("mount node index exceeds node count", "deformable_spec.validate")
+            velocities = self.initial_velocities().rows()
+            if any(any(component != 0.0 for component in velocities[i]) for i in self.rigid_mount.node_indices):
+                raise _invalid(
+                    "mounted backing nodes require zero relative initial velocity", "deformable_spec.validate"
+                )
         object.__setattr__(self, "kinematic_node_indices", kinematic)
         object.__setattr__(self, "node_mass_kg", mass)
         object.__setattr__(self, "linear_damping_per_s", damping)
@@ -504,6 +632,13 @@ class DeformableBodySpec:
             result["tetrahedra"] = self.tetrahedra.nested()
         if self.initial_node_velocities_m_s is not None:
             result["initial_node_velocities_m_s"] = self.initial_node_velocities_m_s.nested()
+        if self.elastic_material is not None:
+            result["elastic_material"] = self.elastic_material.to_dict()
+        if self.rigid_mount is not None:
+            result["rigid_mount"] = self.rigid_mount.to_dict()
+        if self.contact_offset_m is not None:
+            result["contact_offset_m"] = self.contact_offset_m
+            result["rest_offset_m"] = self.rest_offset_m
         return result
 
 
@@ -526,6 +661,7 @@ class ParticleFluidSpec:
         _validate_point_array(self.initial_particle_positions_m, "initial_particle_positions_m")
         if self.initial_particle_colors_rgba is not None:
             from .particle_colors import validate_particle_colors
+
             validate_particle_colors(self.initial_particle_colors_rgba, (self.particle_count, 4))
         if self.initial_particle_velocities_m_s is not None:
             _validate_point_array(self.initial_particle_velocities_m_s, "initial_particle_velocities_m_s")
@@ -1045,6 +1181,18 @@ class WorldSpec:
         if mounted_cameras and self.schema_version not in _PHYSICAL_WORLD_SCHEMA_VERSIONS:
             raise _invalid("only v0alpha5/v0alpha6 worlds can contain mounted cameras", "world_spec.validate")
         entity_by_path = {entity.path: entity for entity in entities}
+        for entity in entities:
+            if entity.deformable is None or entity.deformable.rigid_mount is None:
+                continue
+            soft_mount = entity.deformable.rigid_mount
+            parent = entity_by_path.get(soft_mount.parent_path)
+            if parent is None or parent.kind not in {EntityKind.ARTICULATION, EntityKind.RIGID_BODY}:
+                raise _invalid("deformable mount requires an existing physical parent", "world_spec.validate")
+            if parent.kind is EntityKind.ARTICULATION:
+                if soft_mount.parent_link_name is None:
+                    raise _invalid("articulation deformable mount requires a parent link", "world_spec.validate")
+            elif soft_mount.parent_link_name is not None:
+                raise _invalid("rigid-body mounts do not accept a link name", "world_spec.validate")
         for camera_entity in entities:
             if camera_entity.camera is None:
                 continue
@@ -1168,6 +1316,15 @@ class WorldSpec:
             requirements += (CapabilityRequirement(capability),)
 
         for entity in entities:
+            if entity.deformable is not None:
+                if entity.deformable.rigid_mount is not None:
+                    require(CapabilityId("physics.deformable.rigid-mount@1"))
+                    mode = entity.deformable.rigid_mount.coupling.replace("_", "-")
+                    require(CapabilityId(f"physics.deformable.rigid-mount.{mode}@1"))
+                if entity.deformable.elastic_material is not None:
+                    require(CapabilityId("physics.deformable.elastic-material@1"))
+                if entity.deformable.contact_offset_m is not None:
+                    require(CapabilityId("physics.deformable.contact-offsets@1"))
             if entity.contact_compliance is not None:
                 require(CapabilityId("physics.contact.compliant@1"))
             capability = kind_requirements.get(entity.kind)

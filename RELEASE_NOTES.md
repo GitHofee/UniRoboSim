@@ -1,11 +1,9 @@
-# UniRoboSim 0.10.10
+# UniRoboSim 0.10.11
 
-Adds immutable appearance capture/restore contracts for FSR materials, directional lighting, environment, stable visual bindings and portable opaque base-color PNG textures with explicit UV/topology validation. Includes prerequisite deformable render-state/topology and exact float32 per-particle RGBA contracts. Recorded render-state application does not advance physics.
+Adds WorldSpec elastic material, permanent deformable mounts and explicit contact/rest offsets.
+Mode-specific capability gates prevent solver/boundary substitution; separate offset gates prevent silent ignoring.
+Existing default serialization remains unchanged. New typed fields require Core >=0.10.11,<0.11 on both host and worker.
 
-Validation: a Genesis recording was restored into Isaac Lab for all 121 mixed rigid/articulated/deformable/fluid frames; positions/joints/colors matched exactly except root-position float error below 2.4e-8 m. An embedded four-color PNG restored after original texture files were isolated. A real FastSimApplication Replay completed all 76 frames, with 2 materials, 2 bindings and 1 light restored.
+Mounted node initial velocities are entity-local relative velocities composed with the restored parent twist. Backing nodes reject nonzero relative initial velocities. Material IDs and inline elastic material are exclusive. Overflow/nonfinite/bool scalars return ValidationError.
 
-Known scope: native output transfer is renderer dependent (Genesis gamma 2.2 versus RTX sRGB), reported through conversion notes. Unsupported material graphs, non-opaque PNG textures, independent emissive materials and unsupported light types are rejected rather than silently approximated. Dynamic appearance mutation is not supported by this release's recording path. The extra FastSimApplication camera subscription currently reports a render-only tick-consistency error; normal Replay completed successfully and SDK RGB output was verified separately. Occasional native Kit startup stalls are bounded by worker startup deadlines.
-
-No Mission, cuRobo, simulator engine or vendor source was changed.
-
-Release checks: 760 CPU tests passed with the new wheel metadata installed in an isolated directory. Wheel and source distribution built successfully.
+See README for exact capability IDs, velocity frames and native damping limitations. EasyAPI does not expose these fields yet. CPU contract tests do not establish native solver reaction or GPU reset correctness; adapter conformance is required. No Mission/cuRobo or SDK code changes are included.
