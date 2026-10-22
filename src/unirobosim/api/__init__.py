@@ -521,3 +521,6 @@ __all__ = [
 from .deformable_topology import DEFORMABLE_TOPOLOGY_CAPABILITY_ID, DeformableTopologySnapshot, DeformableTopologyWorld
 
 __all__ += ("DEFORMABLE_TOPOLOGY_CAPABILITY_ID", "DeformableTopologySnapshot", "DeformableTopologyWorld")
+
+from .render_visibility import RENDER_VISIBILITY_CAPABILITY_ID, RenderVisibilityOverride, RenderVisibilityReceipt, RenderVisibilityWorld
+__all__ += ('RENDER_VISIBILITY_CAPABILITY_ID', 'RenderVisibilityOverride', 'RenderVisibilityReceipt', 'RenderVisibilityWorld')
