@@ -39,6 +39,15 @@ from .checkpoint import (
     CheckpointWorld,
     WorldCheckpoint,
 )
+from .contact_diagnostics import (
+    CONTACT_DIAGNOSTICS_CAPABILITY,
+    ContactDiagnosticsBatch,
+    ContactDiagnosticsRequest,
+    ContactDiagnosticsSample,
+    ContactDiagnosticsWorld,
+    ContactForcePoint,
+    ContactPairEvidence,
+)
 from .debug import (
     DEBUG_SCHEMA_VERSION,
     DebugBatch,
@@ -266,6 +275,13 @@ from .values import (
 )
 
 __all__ = [
+    "CONTACT_DIAGNOSTICS_CAPABILITY",
+    "ContactDiagnosticsBatch",
+    "ContactDiagnosticsRequest",
+    "ContactDiagnosticsSample",
+    "ContactDiagnosticsWorld",
+    "ContactForcePoint",
+    "ContactPairEvidence",
     "appearance_topology_sha256",
     "AppearanceCaptureWorld",
     "AppearanceApplyWorld",
