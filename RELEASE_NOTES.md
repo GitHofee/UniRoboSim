@@ -1,3 +1,7 @@
+# UniRoboSim 0.10.12
+
+Adds the optional typed render.visibility.apply@1 contract for explicit visibility changes during strict render replay. Immutable requests identify an entity and exact relative prim, with expected invisible to inherited transition; receipts carry authored/effective before and after values. Existing defaults and physical replay identity contracts remain unchanged. CPU contract/import/release checks: 21 passed. Backend GPU behavior is separately gated.
+
 # UniRoboSim 0.10.11
 
 Adds WorldSpec elastic material, permanent deformable mounts and explicit contact/rest offsets.

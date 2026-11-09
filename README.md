@@ -82,7 +82,7 @@ python -m pip install ./UniRoboSim ./UniRoboSim-pybullet
 
 | Distribution | Release tag | Python | Core compatibility |
 | --- | --- | --- | --- |
-| `unirobosim` | `v0.10.11` | `>=3.11,<3.13` | Core |
+| `unirobosim` | `v0.10.12` | `>=3.11,<3.13` | Core |
 | `unirobosim-isaaclab` | `v0.10.21` | `>=3.12,<3.13` | `unirobosim>=0.10.8,<0.11` |
 | `unirobosim-mujoco` | `v0.9.4` | `>=3.12,<3.13` | `unirobosim>=0.10.5,<0.11` |
 | `unirobosim-pybullet` | `v0.9.4` | `>=3.11,<3.12` | `unirobosim>=0.10.5,<0.11` |
@@ -554,3 +554,13 @@ force and torque; exceeding either break limit disables it until world reset.
 Adapters must implement native force behavior, environment isolation, reset and
 record/replay behavior and explicitly reject unsupported state operations. Shared
 contract tests do not prove native physical behavior or successful phone insertion.
+
+### Render visibility contract (0.10.12)
+
+`RenderVisibilityOverride`, `RenderVisibilityReceipt`, and `RenderVisibilityWorld`
+provide the optional `render.visibility.apply@1` contract. Overrides identify an
+entity path, exact relative prim path and an expected `invisible` to `inherited`
+transition. Implementations must preflight the whole batch, preserve nonvisibility
+state, read back the effective result, and remove world-local opinions on reset or
+close. Availability is capability-gated; adapters without this optional capability
+must not silently emulate it. IsaacLab currently supports a single environment.
