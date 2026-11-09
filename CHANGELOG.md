@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.10.13 - candidate
+
+- Add passive compliant connection declarations and backend capability gating.
+- Preserve released render visibility contracts and existing empty-world digests.
+- Normalize finite numeric properties and reject overflow with ValidationError.
+
 ## 0.10.11 - 2026-10-14
 
 - Add validated elastic material and permanent volume-node mounting contracts.
