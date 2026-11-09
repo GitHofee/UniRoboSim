@@ -39,6 +39,7 @@ from .checkpoint import (
     CheckpointWorld,
     WorldCheckpoint,
 )
+from .connections import CompliantConnectionSpec, ConnectionProperties
 from .debug import (
     DEBUG_SCHEMA_VERSION,
     DebugBatch,
@@ -266,6 +267,8 @@ from .values import (
 )
 
 __all__ = [
+    "CompliantConnectionSpec",
+    "ConnectionProperties",
     "appearance_topology_sha256",
     "AppearanceCaptureWorld",
     "AppearanceApplyWorld",

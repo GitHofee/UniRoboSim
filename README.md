@@ -527,3 +527,30 @@ is restored. A kinematic boundary updates only backing nodes each physics subste
 and transmits no reaction. Solver mode requires native two-way coupling with no
 silent fallback. Core validates authoring intent; only adapter native conformance
 can establish physical realization, multi-environment and partial-reset behavior.
+
+## Passive compliant connections
+
+`WorldSpec.compliant_connections` accepts a tuple of `CompliantConnectionSpec`
+values. This backend-neutral RuntimeAPI declaration connects two distinct existing
+rigid-body entity roots, never an articulation. Each connection ID and child must
+be unique; declarations are sorted by ID. The default empty tuple preserves old
+canonical output and capability requirements. Nonempty declarations change the
+world digest and require `physics.compliant_connections@1`; unsupported providers
+must reject them. EasyAPI and scenario YAML parsing are not supplied by this API.
+
+`rest_pose` is the child asset-root pose relative to the parent asset-root, in
+metres with a unit XYZW quaternion. `ConnectionProperties` requires ten finite,
+strictly positive binary64 constants: linear stiffness (N/m), damping (N s/m),
+angular stiffness (N m/rad), angular damping (N m s/rad), maximum force (N),
+maximum torque (N m), break distance (m), break angle (rad), admission position
+tolerance (m), and admission angle tolerance (rad). Booleans, nonnumeric inputs
+and overflow are rejected with `ValidationError`. Equal integer and float inputs
+serialize identically. Both admission tolerances must be strictly below their
+break limits, and break angle cannot exceed pi.
+
+The contract requires no force before measured seating satisfies both admission
+tolerances. After admission the connection is finitely compliant, with bounded
+force and torque; exceeding either break limit disables it until world reset.
+Adapters must implement native force behavior, environment isolation, reset and
+record/replay behavior and explicitly reject unsupported state operations. Shared
+contract tests do not prove native physical behavior or successful phone insertion.
