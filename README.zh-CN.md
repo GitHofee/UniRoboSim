@@ -78,11 +78,16 @@ git clone --branch v0.9.4 --depth 1 https://github.com/GitHofee/UniRoboSim-pybul
 python -m pip install ./UniRoboSim ./UniRoboSim-pybullet
 ```
 
+### 连接功能候选版本
+
+Core `0.10.13` 尚未发布，声明式有限弹性连接匹配 Isaac 适配器 `0.10.30`。
+下表保留已发布版本记录，不代表早期适配器支持新增连接能力。
+
 ### 已验证发布矩阵
 
 | Distribution | 发布标签 | Python | Core 兼容范围 |
 | --- | --- | --- | --- |
-| `unirobosim` | `v0.10.13` | `>=3.11,<3.13` | Core |
+| `unirobosim` | `v0.10.12` | `>=3.11,<3.13` | Core |
 | `unirobosim-isaaclab` | `v0.10.21` | `>=3.12,<3.13` | `unirobosim>=0.10.8,<0.11` |
 | `unirobosim-mujoco` | `v0.9.4` | `>=3.12,<3.13` | `unirobosim>=0.10.5,<0.11` |
 | `unirobosim-pybullet` | `v0.9.4` | `>=3.11,<3.12` | `unirobosim>=0.10.5,<0.11` |
