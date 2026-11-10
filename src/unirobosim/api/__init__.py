@@ -13,6 +13,12 @@ from .appearance import (
     AppearanceTexture,
     appearance_topology_sha256,
 )
+from .articulation_diagnostics import (
+    ArticulationDiagnosticsRequest,
+    ArticulationDiagnosticsSnapshot,
+    ArticulationDiagnosticsWorld,
+    ArticulationDriveEvidence,
+)
 from .build import (
     BUILD_RESOURCE_MANIFEST_SCHEMA_VERSION,
     BuildInput,
@@ -47,6 +53,7 @@ from .contact_diagnostics import (
     ContactDiagnosticsWorld,
     ContactForcePoint,
     ContactPairEvidence,
+    StaticContactTarget,
 )
 from .debug import (
     DEBUG_SCHEMA_VERSION,
@@ -282,6 +289,7 @@ __all__ = [
     "ContactDiagnosticsWorld",
     "ContactForcePoint",
     "ContactPairEvidence",
+    "StaticContactTarget",
     "appearance_topology_sha256",
     "AppearanceCaptureWorld",
     "AppearanceApplyWorld",
@@ -537,3 +545,6 @@ __all__ = [
 from .deformable_topology import DEFORMABLE_TOPOLOGY_CAPABILITY_ID, DeformableTopologySnapshot, DeformableTopologyWorld
 
 __all__ += ("DEFORMABLE_TOPOLOGY_CAPABILITY_ID", "DeformableTopologySnapshot", "DeformableTopologyWorld")
+
+__all__ += ("ArticulationDiagnosticsRequest", "ArticulationDiagnosticsSnapshot",
+            "ArticulationDiagnosticsWorld", "ArticulationDriveEvidence")

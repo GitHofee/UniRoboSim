@@ -514,3 +514,14 @@ Isaac Lab 当前支持无粒子流体的单环境；其他后端可明确拒绝�
 
 仅报告明确指定的接触对。不发布 SDK 未过滤的总力读数：实测运行时该通道的静止支撑力偏大一倍，
 而指定接触对的力通过了逐子步动量平衡校验。
+
+接触诊断也支持以关节链的明确 link 为主体，并通过规划碰撞目录中的
+`StaticContactTarget(target_id, geometry_id)` 选择静态伙伴。未知、非静态或原生映射
+不唯一的选择明确失败；不会把静态伙伴改成刚体，也不修改碰撞设置。只测量明确选中的
+接触，空结果不代表不存在未选择的障碍。
+
+可选的 `ArticulationDiagnosticsWorld.articulation_diagnostics(ArticulationDiagnosticsRequest(...))`
+按需读取单环境、最多 32 个具名关节的原生目标、实测位置/速度、刚度、阻尼、力限值和
+施加力指令，并返回 world、generation、step 身份。施加力指令不等于实测接触力。
+不支持的休眠字段为 null 并列入 `unsupported_fields`，不能用 USD 配置值冒充实测。
+两种诊断都不推进、唤醒、重置或控制仿真。

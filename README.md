@@ -553,3 +553,19 @@ or change material values.
 Only explicitly selected contact pairs are reported. Unfiltered SDK aggregate forces
 are excluded: the validated runtime returned a doubled static-support aggregate,
 while selected pair forces passed per-substep momentum-balance checks.
+
+Contact diagnostics also accepts an articulation-link subject and
+`StaticContactTarget(target_id, geometry_id)` partners selected from the admitted
+planning collision catalog. Unknown, non-static, and ambiguous native mappings
+fail explicitly. Static partners do not become rigid bodies and their collision
+settings are unchanged. Only explicitly selected contacts are measured; an empty
+result is not proof that unselected obstacles are absent.
+
+`ArticulationDiagnosticsWorld.articulation_diagnostics(ArticulationDiagnosticsRequest(...))`
+is an optional on-demand drive readback for one environment and at most 32 named
+joints. It returns effective native targets, measured positions/velocities,
+stiffness, damping, force limits and commanded actuation forces with world,
+generation and step identity. Actuation force is not measured contact force.
+Unsupported sleep fields are null and listed in `unsupported_fields`; authored
+USD values are never substituted for native readback. Neither diagnostic steps,
+wakes, resets or commands the simulation.

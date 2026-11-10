@@ -57,3 +57,25 @@ def test_same_body_and_sequence_gaps_are_rejected():
 def test_invalid_force_vector_is_rejected(force):
     with pytest.raises((TypeError, ValueError)):
         ContactForcePoint((0.0, 0.0, 0.0), force)
+
+
+def test_robot_link_and_static_geometry_selection_round_trip():
+    from unirobosim import StaticContactTarget
+
+    request = ContactDiagnosticsRequest(
+        KinematicTarget("base", EntityPath("/robot"), "base_link"),
+        (StaticContactTarget("wall", "geometry.wall123"),),
+    )
+    assert pickle.loads(pickle.dumps(request)) == request
+    with pytest.raises(ValueError, match="unique"):
+        ContactDiagnosticsRequest(
+            request.subject, (request.partners[0], StaticContactTarget("other", "geometry.wall123")),
+        )
+
+
+@pytest.mark.parametrize("value", ["", "../wall", "/World/wall", "geometry.*", None])
+def test_static_contact_rejects_non_catalog_selectors(value):
+    from unirobosim import StaticContactTarget
+
+    with pytest.raises(ValueError):
+        StaticContactTarget("wall", value)

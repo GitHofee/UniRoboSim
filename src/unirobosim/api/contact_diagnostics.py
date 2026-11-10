@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import asdict, dataclass
 from typing import Protocol, runtime_checkable
 
@@ -25,9 +26,24 @@ def _vector(value: object, size: int) -> None:
 
 
 @dataclass(frozen=True, slots=True)
+class StaticContactTarget:
+    """One admitted static collision geometry, selected by its catalog ID."""
+
+    target_id: str
+    geometry_id: str
+
+    def __post_init__(self) -> None:
+        if (type(self.target_id) is not str or not self.target_id
+                or len(self.target_id) > 1024 or "\x00" in self.target_id):
+            raise ValueError("target_id must be bounded non-empty text")
+        if type(self.geometry_id) is not str or not re.fullmatch(r"geometry\.[a-zA-Z0-9_-]{1,128}", self.geometry_id):
+            raise ValueError("geometry_id must be a canonical geometry ID")
+
+
+@dataclass(frozen=True, slots=True)
 class ContactDiagnosticsRequest:
     subject: KinematicTarget
-    partners: tuple[KinematicTarget, ...]
+    partners: tuple[KinematicTarget | StaticContactTarget, ...]
     capacity_substeps: int = 4096
     max_contact_points: int = 1024
 
@@ -36,12 +52,14 @@ class ContactDiagnosticsRequest:
             raise TypeError("subject must be a KinematicTarget")
         if type(self.partners) is not tuple or not 1 <= len(self.partners) <= 8:
             raise ValueError("partners must contain between one and eight targets")
-        if any(type(p) is not KinematicTarget for p in self.partners):
-            raise TypeError("partners must be KinematicTarget values")
+        if any(type(p) not in (KinematicTarget, StaticContactTarget) for p in self.partners):
+            raise TypeError("partners must be rigid-link or static-geometry targets")
         targets = (self.subject, *self.partners)
         if len({t.target_id for t in targets}) != len(targets):
             raise ValueError("contact target IDs must be unique")
-        if len({(t.entity_path, t.link_name) for t in targets}) != len(targets):
+        selections = {("static", t.geometry_id) if isinstance(t, StaticContactTarget)
+                      else (t.entity_path, t.link_name) for t in targets}
+        if len(selections) != len(targets):
             raise ValueError("contact bodies must be unique")
         _integer(self.capacity_substeps, "capacity_substeps", 1, 16384)
         _integer(self.max_contact_points, "max_contact_points", 16, 4096)
@@ -168,6 +186,7 @@ class ContactDiagnosticsWorld(Protocol):
 __all__ = [
     "CONTACT_DIAGNOSTICS_CAPABILITY",
     "ContactDiagnosticsRequest",
+    "StaticContactTarget",
     "ContactForcePoint",
     "ContactPairEvidence",
     "ContactDiagnosticsSample",
