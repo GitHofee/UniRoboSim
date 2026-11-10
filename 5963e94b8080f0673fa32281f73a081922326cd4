@@ -1,0 +1,9 @@
+{
+  "tag": "v0.10.13",
+  "source_sha": "5963e94b8080f0673fa32281f73a081922326cd4",
+  "release_url": "https://github.com/GitHofee/UniRoboSim/releases/tag/v0.10.13",
+  "assets_sha256": {
+    "unirobosim-0.10.13-py3-none-any.whl": "cd3eb8ab9eb572490ae3a499cceb4d5ddcea3a13efd12efcc1dc74f22c3500ad",
+    "unirobosim-0.10.13.tar.gz": "6f67f5d8edadc39b28d223078cf47776e5d3e6b9d9363ef09024177b7aff797f"
+  }
+}
