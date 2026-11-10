@@ -27,7 +27,7 @@ from .easy import (
 )
 from .runtime import ProviderFactory, ProviderRegistry
 
-__version__ = "0.10.11"
+__version__ = "0.10.13"
 
 __all__ = [
     *_api_all,

@@ -78,11 +78,17 @@ git clone --branch v0.9.4 --depth 1 https://github.com/GitHofee/UniRoboSim-pybul
 python -m pip install ./UniRoboSim ./UniRoboSim-pybullet
 ```
 
+### Connection release
+
+Core `0.10.13` pairs with Isaac adapter `0.10.30`
+for declared compliant connections. The matrix below records published history;
+it does not claim those earlier adapters support the new connection capability.
+
 ### Verified release matrix
 
 | Distribution | Release tag | Python | Core compatibility |
 | --- | --- | --- | --- |
-| `unirobosim` | `v0.10.11` | `>=3.11,<3.13` | Core |
+| `unirobosim` | `v0.10.12` | `>=3.11,<3.13` | Core |
 | `unirobosim-isaaclab` | `v0.10.21` | `>=3.12,<3.13` | `unirobosim>=0.10.8,<0.11` |
 | `unirobosim-mujoco` | `v0.9.4` | `>=3.12,<3.13` | `unirobosim>=0.10.5,<0.11` |
 | `unirobosim-pybullet` | `v0.9.4` | `>=3.11,<3.12` | `unirobosim>=0.10.5,<0.11` |
@@ -569,3 +575,40 @@ generation and step identity. Actuation force is not measured contact force.
 Unsupported sleep fields are null and listed in `unsupported_fields`; authored
 USD values are never substituted for native readback. Neither diagnostic steps,
 wakes, resets or commands the simulation.
+
+## Passive compliant connections
+
+`WorldSpec.compliant_connections` accepts a tuple of `CompliantConnectionSpec`
+values. This backend-neutral RuntimeAPI declaration connects two distinct existing
+rigid-body entity roots, never an articulation. Each connection ID and child must
+be unique; declarations are sorted by ID. The default empty tuple preserves old
+canonical output and capability requirements. Nonempty declarations change the
+world digest and require `physics.compliant_connections@1`; unsupported providers
+must reject them. EasyAPI and scenario YAML parsing are not supplied by this API.
+
+`rest_pose` is the child asset-root pose relative to the parent asset-root, in
+metres with a unit XYZW quaternion. `ConnectionProperties` requires ten finite,
+strictly positive binary64 constants: linear stiffness (N/m), damping (N s/m),
+angular stiffness (N m/rad), angular damping (N m s/rad), maximum force (N),
+maximum torque (N m), break distance (m), break angle (rad), admission position
+tolerance (m), and admission angle tolerance (rad). Booleans, nonnumeric inputs
+and overflow are rejected with `ValidationError`. Equal integer and float inputs
+serialize identically. Both admission tolerances must be strictly below their
+break limits, and break angle cannot exceed pi.
+
+The contract requires no force before measured seating satisfies both admission
+tolerances. After admission the connection is finitely compliant, with bounded
+force and torque; exceeding either break limit disables it until world reset.
+Adapters must implement native force behavior, environment isolation, reset and
+record/replay behavior and explicitly reject unsupported state operations. Shared
+contract tests do not prove native physical behavior or successful phone insertion.
+
+### Render visibility contract (0.10.12)
+
+`RenderVisibilityOverride`, `RenderVisibilityReceipt`, and `RenderVisibilityWorld`
+provide the optional `render.visibility.apply@1` contract. Overrides identify an
+entity path, exact relative prim path and an expected `invisible` to `inherited`
+transition. Implementations must preflight the whole batch, preserve nonvisibility
+state, read back the effective result, and remove world-local opinions on reset or
+close. Availability is capability-gated; adapters without this optional capability
+must not silently emulate it. IsaacLab currently supports a single environment.

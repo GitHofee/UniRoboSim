@@ -45,6 +45,7 @@ from .checkpoint import (
     CheckpointWorld,
     WorldCheckpoint,
 )
+from .connections import CompliantConnectionSpec, ConnectionProperties
 from .contact_diagnostics import (
     CONTACT_DIAGNOSTICS_CAPABILITY,
     ContactDiagnosticsBatch,
@@ -55,6 +56,7 @@ from .contact_diagnostics import (
     ContactPairEvidence,
     StaticContactTarget,
 )
+
 from .debug import (
     DEBUG_SCHEMA_VERSION,
     DebugBatch,
@@ -290,6 +292,9 @@ __all__ = [
     "ContactForcePoint",
     "ContactPairEvidence",
     "StaticContactTarget",
+
+    "CompliantConnectionSpec",
+    "ConnectionProperties",
     "appearance_topology_sha256",
     "AppearanceCaptureWorld",
     "AppearanceApplyWorld",
@@ -548,3 +553,6 @@ __all__ += ("DEFORMABLE_TOPOLOGY_CAPABILITY_ID", "DeformableTopologySnapshot", "
 
 __all__ += ("ArticulationDiagnosticsRequest", "ArticulationDiagnosticsSnapshot",
             "ArticulationDiagnosticsWorld", "ArticulationDriveEvidence")
+
+from .render_visibility import RENDER_VISIBILITY_CAPABILITY_ID, RenderVisibilityOverride, RenderVisibilityReceipt, RenderVisibilityWorld
+__all__ += ('RENDER_VISIBILITY_CAPABILITY_ID', 'RenderVisibilityOverride', 'RenderVisibilityReceipt', 'RenderVisibilityWorld')

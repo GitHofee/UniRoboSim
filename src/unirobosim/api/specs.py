@@ -11,6 +11,7 @@ from typing import Any
 
 from ._codec import canonical_json
 from .capabilities import CapabilityId, CapabilityRequirement
+from .connections import CompliantConnectionSpec
 from .errors import ValidationError
 from .frozen import FrozenMap
 from .values import (
@@ -1127,6 +1128,7 @@ class WorldSpec:
     metadata: FrozenMap = field(default_factory=FrozenMap)
     schema_version: str = WORLD_SCHEMA_VERSION
     build_resource_manifest_sha256: str | None = None
+    compliant_connections: tuple[CompliantConnectionSpec, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.world_id, str) or not _WORLD_ID.fullmatch(self.world_id):
@@ -1181,6 +1183,24 @@ class WorldSpec:
         if mounted_cameras and self.schema_version not in _PHYSICAL_WORLD_SCHEMA_VERSIONS:
             raise _invalid("only v0alpha5/v0alpha6 worlds can contain mounted cameras", "world_spec.validate")
         entity_by_path = {entity.path: entity for entity in entities}
+        try:
+            connections = tuple(self.compliant_connections)
+        except TypeError as exc:
+            raise _invalid("connections must be iterable", "world_spec.validate") from exc
+        if any(not isinstance(item, CompliantConnectionSpec) for item in connections):
+            raise _invalid("connections require CompliantConnectionSpec values", "world_spec.validate")
+        if len({item.connection_id for item in connections}) != len(connections) or len(
+            {item.child_path for item in connections}
+        ) != len(connections):
+            raise _invalid("connection IDs and children must be unique", "world_spec.validate")
+        for connection in connections:
+            for endpoint in (connection.parent_path, connection.child_path):
+                entity = entity_by_path.get(endpoint)
+                if entity is None or entity.kind is not EntityKind.RIGID_BODY:
+                    raise _invalid("connections require two existing rigid bodies", "world_spec.validate")
+        object.__setattr__(
+            self, "compliant_connections", tuple(sorted(connections, key=lambda item: item.connection_id))
+        )
         for entity in entities:
             if entity.deformable is None or entity.deformable.rigid_mount is None:
                 continue
@@ -1315,6 +1335,9 @@ class WorldSpec:
                 return
             requirements += (CapabilityRequirement(capability),)
 
+        if connections:
+            require(CapabilityId("physics.compliant_connections@1"))
+
         for entity in entities:
             if entity.deformable is not None:
                 if entity.deformable.rigid_mount is not None:
@@ -1401,6 +1424,8 @@ class WorldSpec:
             "requirements": [requirement.to_dict() for requirement in self.requirements],
             "metadata": self.metadata.to_dict(),
         }
+        if self.compliant_connections:
+            result["compliant_connections"] = [item.to_dict() for item in self.compliant_connections]
         if self.build_resource_manifest_sha256 is not None:
             result["build_resource_manifest_sha256"] = self.build_resource_manifest_sha256
         return result
