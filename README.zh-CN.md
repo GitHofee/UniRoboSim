@@ -499,3 +499,34 @@ material_id 与 elastic_material 互斥。材料/偏移有限数值拒绝bool和
 背衬节点相对初速度必须为零，自由节点可非零。kinematic_boundary每物理子步只更新背衬，
 不传递反力；solver必须真实双向耦合。Core只证明契约准入，实际物理、多环境和部分reset
 仍需adapter原生证据。
+
+
+## 可选接触诊断
+
+`contact.diagnostics@1` 是默认关闭的 `ContactDiagnosticsWorld` 扩展。
+用 `ContactDiagnosticsRequest` 选择独立刚体主体及明确的刚体/关节链 link 接触伙伴
+（`KinematicTarget`），启动后返回 epoch。`contact_diagnostics(epoch, after_sequence)`
+非破坏性读取有界历史；epoch 过期或游标对应的数据被覆盖时明确失败。停止、重置、
+恢复检查点及关闭世界都会释放采集。
+每个样本记录世界步、从 1 开始的子步、子步数和实际物理步长。力作用于主体，以环境局部
+世界坐标系表示，单位 N；法向力与摩擦力保留各自的作用点，力矩逐点计算至子步开始时的主体质心。
+`*_start_*` 字段保留接触生成时的状态，其余姿态/速度为积分后的状态；同时记录原生质量供力平衡核查。
+姿态数组为 XYZ 加 XYZW，速度为线速度加角速度，均使用 SI 单位。测量值本身不代表摩擦极限。
+Isaac Lab 当前支持无粒子流体的单环境；其他后端可明确拒绝该可选能力。采集会增加读取开销，
+不下发物体控制，也不改变材质参数。
+
+接触诊断历史同时受请求的子步容量和 262,144 个力作用点上限约束；读取已被覆盖的游标会明确失败。
+
+仅报告明确指定的接触对。不发布 SDK 未过滤的总力读数：实测运行时该通道的静止支撑力偏大一倍，
+而指定接触对的力通过了逐子步动量平衡校验。
+
+接触诊断也支持以关节链的明确 link 为主体，并通过规划碰撞目录中的
+`StaticContactTarget(target_id, geometry_id)` 选择静态伙伴。未知、非静态或原生映射
+不唯一的选择明确失败；不会把静态伙伴改成刚体，也不修改碰撞设置。只测量明确选中的
+接触，空结果不代表不存在未选择的障碍。
+
+可选的 `ArticulationDiagnosticsWorld.articulation_diagnostics(ArticulationDiagnosticsRequest(...))`
+按需读取单环境、最多 32 个具名关节的原生目标、实测位置/速度、刚度、阻尼、力限值和
+施加力指令，并返回 world、generation、step 身份。施加力指令不等于实测接触力。
+不支持的休眠字段为 null 并列入 `unsupported_fields`，不能用 USD 配置值冒充实测。
+两种诊断都不推进、唤醒、重置或控制仿真。

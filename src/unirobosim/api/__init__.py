@@ -13,6 +13,12 @@ from .appearance import (
     AppearanceTexture,
     appearance_topology_sha256,
 )
+from .articulation_diagnostics import (
+    ArticulationDiagnosticsRequest,
+    ArticulationDiagnosticsSnapshot,
+    ArticulationDiagnosticsWorld,
+    ArticulationDriveEvidence,
+)
 from .build import (
     BUILD_RESOURCE_MANIFEST_SCHEMA_VERSION,
     BuildInput,
@@ -40,6 +46,17 @@ from .checkpoint import (
     WorldCheckpoint,
 )
 from .connections import CompliantConnectionSpec, ConnectionProperties
+from .contact_diagnostics import (
+    CONTACT_DIAGNOSTICS_CAPABILITY,
+    ContactDiagnosticsBatch,
+    ContactDiagnosticsRequest,
+    ContactDiagnosticsSample,
+    ContactDiagnosticsWorld,
+    ContactForcePoint,
+    ContactPairEvidence,
+    StaticContactTarget,
+)
+
 from .debug import (
     DEBUG_SCHEMA_VERSION,
     DebugBatch,
@@ -267,6 +284,15 @@ from .values import (
 )
 
 __all__ = [
+    "CONTACT_DIAGNOSTICS_CAPABILITY",
+    "ContactDiagnosticsBatch",
+    "ContactDiagnosticsRequest",
+    "ContactDiagnosticsSample",
+    "ContactDiagnosticsWorld",
+    "ContactForcePoint",
+    "ContactPairEvidence",
+    "StaticContactTarget",
+
     "CompliantConnectionSpec",
     "ConnectionProperties",
     "appearance_topology_sha256",
@@ -524,6 +550,9 @@ __all__ = [
 from .deformable_topology import DEFORMABLE_TOPOLOGY_CAPABILITY_ID, DeformableTopologySnapshot, DeformableTopologyWorld
 
 __all__ += ("DEFORMABLE_TOPOLOGY_CAPABILITY_ID", "DeformableTopologySnapshot", "DeformableTopologyWorld")
+
+__all__ += ("ArticulationDiagnosticsRequest", "ArticulationDiagnosticsSnapshot",
+            "ArticulationDiagnosticsWorld", "ArticulationDriveEvidence")
 
 from .render_visibility import RENDER_VISIBILITY_CAPABILITY_ID, RenderVisibilityOverride, RenderVisibilityReceipt, RenderVisibilityWorld
 __all__ += ('RENDER_VISIBILITY_CAPABILITY_ID', 'RenderVisibilityOverride', 'RenderVisibilityReceipt', 'RenderVisibilityWorld')

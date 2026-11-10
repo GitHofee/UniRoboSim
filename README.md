@@ -534,6 +534,48 @@ and transmits no reaction. Solver mode requires native two-way coupling with no
 silent fallback. Core validates authoring intent; only adapter native conformance
 can establish physical realization, multi-environment and partial-reset behavior.
 
+
+## Optional contact diagnostics
+
+`contact.diagnostics@1` is a default-off `ContactDiagnosticsWorld` extension.
+Start it with a `ContactDiagnosticsRequest` selecting a standalone rigid subject
+and explicit rigid/articulation-link partners (`KinematicTarget`). Start returns
+an epoch. `contact_diagnostics(epoch, after_sequence)` reads bounded,
+non-destructive history, bounded by the requested substep count and 262,144 force points;
+a stale epoch or overwritten cursor fails explicitly.
+Stop, reset, checkpoint restore, or world close releases collection.
+Each sample identifies its world step, one-based substep, substep count, and
+actual physics timestep. Forces act on the subject, in environment-local world
+coordinates, in newtons. Normal and friction points are separate. Torque is
+computed at the **start-of-substep** subject COM from each force's own application point.
+`*_start_*` fields preserve that contact-generation frame; other body poses/velocities
+are post-integration. Native mass is included for force-balance checks. Pose arrays
+contain XYZ followed by XYZW; velocity contains linear then angular SI components.
+The measurements alone do not establish a friction limit. Isaac Lab currently
+supports one environment without particle fluid; unsupported backends reject the
+optional capability. Collection adds readback cost and does not command bodies
+or change material values.
+
+Only explicitly selected contact pairs are reported. Unfiltered SDK aggregate forces
+are excluded: the validated runtime returned a doubled static-support aggregate,
+while selected pair forces passed per-substep momentum-balance checks.
+
+Contact diagnostics also accepts an articulation-link subject and
+`StaticContactTarget(target_id, geometry_id)` partners selected from the admitted
+planning collision catalog. Unknown, non-static, and ambiguous native mappings
+fail explicitly. Static partners do not become rigid bodies and their collision
+settings are unchanged. Only explicitly selected contacts are measured; an empty
+result is not proof that unselected obstacles are absent.
+
+`ArticulationDiagnosticsWorld.articulation_diagnostics(ArticulationDiagnosticsRequest(...))`
+is an optional on-demand drive readback for one environment and at most 32 named
+joints. It returns effective native targets, measured positions/velocities,
+stiffness, damping, force limits and commanded actuation forces with world,
+generation and step identity. Actuation force is not measured contact force.
+Unsupported sleep fields are null and listed in `unsupported_fields`; authored
+USD values are never substituted for native readback. Neither diagnostic steps,
+wakes, resets or commands the simulation.
+
 ## Passive compliant connections
 
 `WorldSpec.compliant_connections` accepts a tuple of `CompliantConnectionSpec`
