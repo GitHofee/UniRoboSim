@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.10.13 - candidate
+## 0.10.13 - 2026-11-10
 
 - Add passive compliant connection declarations and backend capability gating.
 - Preserve released render visibility contracts and existing empty-world digests.

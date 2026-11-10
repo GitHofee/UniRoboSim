@@ -78,9 +78,9 @@ git clone --branch v0.9.4 --depth 1 https://github.com/GitHofee/UniRoboSim-pybul
 python -m pip install ./UniRoboSim ./UniRoboSim-pybullet
 ```
 
-### Connection release candidate
+### Connection release
 
-Core `0.10.13` is an unpublished candidate paired with Isaac adapter `0.10.30`
+Core `0.10.13` pairs with Isaac adapter `0.10.30`
 for declared compliant connections. The matrix below records published history;
 it does not claim those earlier adapters support the new connection capability.
 
